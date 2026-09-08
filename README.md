@@ -4,10 +4,12 @@ AI 小说创作与故事工程系统。作者决定故事，AI 帮助讨论、�
 
 当前阶段：需求与方案整理，尚未实现应用。
 
+交付方向：先用本地 CLI 验证创作流程，产品稳定后再做 UI。建议使用 Python、Markdown 正文和 SQLite；模型供应商待定。
+
 ## 文档
 
 - [需求基线](docs/requirements.md)：产品边界、功能需求、权限规则与验收场景。
-- [实施方案](docs/implementation.md)：页面流程、数据模型、AI 职责、交付顺序与待定事项。
+- [实施方案](docs/implementation.md)：CLI 交互、本地数据、AI 职责、交付顺序与待定事项。
 
 ## 核心闭环
 
