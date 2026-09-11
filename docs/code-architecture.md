@@ -164,7 +164,7 @@ tests/                       仓库根目录，与包同级
 | 记录 | 字段与含义 |
 | --- | --- |
 | Target | novel_id, chapter_id, version_id；准确定位正文 |
-| Expected | adopted_id, plan_id, previous_snapshot_id, workcopy_hash；调用前观察的基准，NULL 也是需比较的值 |
+| Expected | adopted_id, plan_id, previous_snapshot_id, workcopy_hash, current_draft_id；调用前观察的基准，NULL 也是需比较的值；current_draft_id 是编辑与恢复的基准 |
 | ContextDraft / ContextPackage | ai/context 输出尚无新 basis_id 的 ContextDraft（保留已有来源 ID、规则分区、摘录、遗漏与容量）；generation 保存 basis 后组装带 basis_id 的 ContextPackage |
 | AuthorAction | request_id, source_message_id, target, expected, check_id（采用/复核必需）, read_declared, issue_resolutions, accepted_plot, accepted_ending；只有明确 UI 操作能构造正式动作 |
 | TaskRequest | task, basis_id, input_version_id?, source_message_id, delegation_scope, template_version, missing_inputs, assumptions, output_limit；scope 明确限本次请求本章，不接受从上次任务继承 |
@@ -211,6 +211,8 @@ tests/                       仓库根目录，与包同级
 应用流程是显式状态机，AI 任务是有界调用，没有自主 Agent 循环、共享隐式记忆或模型直接执行工具。上下文必须随任务传入；允许模型提出动作候选，但只接受作者从入口提交的 AuthorAction 作为正式操作依据。
 
 首期同项目最多一个模型请求在途。启动层提供一个网络执行线程和取消信号，网络线程只产出有界队列事件，不持有数据库连接；应用协调线程消费事件、保存流块和响应 CLI 动作。队列满时背压；取消置位后生产者可退出，不因队列写入永久阻塞。此方案保留编辑和取消响应，不引入后台服务或任务队列系统。
+
+2026-09-11 补充：若 P03 确认采用 prompt_toolkit，模型客户端改为 asyncio 调用，流式事件直接进入终端事件循环，取消使用 asyncio 取消信号，不再单独开网络线程。P03 验证时必须同时验证生成中仍可输入与取消；验证通过后本段以 asyncio 方案为准。
 
 取消首先由应用通过 database 将 run 从 running 改为 cancelled，成功后才报告取消已记录，再通知客户端尽力终止网络请求。排队中的迟到事件按 run 状态拒绝；未等旧网络请求结束时不启动下一次请求。关闭项目时停止接收动作、记录中断、关闭网络资源，最后关闭数据库并释放锁；超时退出后仅承诺已落库内容。
 
@@ -317,7 +319,7 @@ SQLite 与文件系统没有共同事务；外部编辑器也不遵守项目进�
 
 ## 8. 模型合同、事实与上下文
 
-四类任务由 ai/tasks 中的普通函数表达：discuss、generate、inspect、diagnose。它们构建任务消息、解析输出并调用 domain 的证据/范围规则。infrastructure/provider 只负责供应商的 stream/complete 协议；测试传入相同签名的固定函数，不建适配器框架。讨论与诊断由 generation 的对应用例调度、记录 run 和候选消息；作者决定仍单独通过 authoring 提交。
+四类任务由 ai/tasks 中的普通函数表达：discuss、generate、inspect、diagnose。它们构建任务消息、解析输出并调用 domain 的证据/范围规则。infrastructure/provider 只负责供应商的 stream/complete 协议；测试传入相同签名的固定函数，不建适配器框架。讨论与诊断由 generation 的对应用例调度、记录 run 和候选消息；作者决定仍单独通过 authoring 提交。首期讨论输出只保存为 message，不自动抽取结构化想法；作者说“记为候选”“就这么定”时由 CLI 产生明确动作生成 story_item。
 
 检查载荷必须有 `issues[]`、`candidate_facts[]`、`actual_plot`、`actual_ending`、`coverage`，空数组也必须明确返回。每条事实有类别、主体（需要时）、陈述、故事时间（未知可空）和原文区间/摘录。issue 引用来源由应用映射到本次允许的正文或 context 来源；不接受模型任意数据库 ID。应用检查类型、枚举、范围、必填字段以及 `body[start:end] == quote`。无效结果记 MODEL_FAILED，保留安全的诊断，不计作“无问题”。
 
