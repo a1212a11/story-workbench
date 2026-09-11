@@ -41,11 +41,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"项目目录：{args.project}", file=sys.stderr)
         return 2
 
-    from story_workbench import cli
+    from story_workbench import bootstrap, cli
 
-    # 模型客户端与生成配置在 G05 由此处装配；接入前传 None，CLI 对写作、检查与 AI 讨论
-    # 提示“模型尚未接入”，其余操作照常。
-    return cli.run(args.project, clients=None, config=None)
+    # 非敏感配置来自用户配置目录，密钥只读环境变量；没有密钥时 clients 为 None，
+    # CLI 对写作、检查与 AI 讨论提示“模型尚未接入”，其余操作照常。
+    try:
+        settings = bootstrap.load_settings()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    config = bootstrap.build_generation_config(settings)
+    clients = bootstrap.build_clients(settings)
+    if clients is None:
+        print(
+            f"未检测到 {bootstrap.API_KEY_ENV}，本次不接模型；写作与检查将提示尚未接入。",
+            file=sys.stderr,
+        )
+    return cli.run(args.project, clients=clients, config=config)
 
 
 if __name__ == "__main__":

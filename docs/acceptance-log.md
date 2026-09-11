@@ -7,6 +7,7 @@
 | 日期 | 提交 | 命令 | 结果 |
 | --- | --- | --- | --- |
 | 2026-09-11 | `0eb845e` | `uv run pytest` | 91 passed, 1 skipped（真实调用门控） |
+| 2026-09-11 | 合并 C03 后 | `uv run pytest` | 99 passed, 1 skipped |
 
 对应测试：`tests/test_adoption.py`（T01–T04）、`tests/test_workflow.py`（T06、T08、T09、T10、T12 确定性）、`tests/test_recovery.py`（T03 文件、T09 重启、T11 备份）、`tests/test_generation.py`（T07 格式、T08 上下文）、`tests/test_cli.py`（T05 可自动化部分）。
 

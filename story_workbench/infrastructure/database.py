@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from collections.abc import Iterator
@@ -1332,6 +1333,12 @@ def get_check(conn: sqlite3.Connection, novel_id: str, check_id: str) -> CheckRe
         "SELECT * FROM issue WHERE novel_id = ? AND check_id = ? ORDER BY rowid",
         (novel_id, check_id),
     ).fetchall()
+    try:
+        coverage = json.loads(row["coverage_json"] or "{}")
+    except ValueError:
+        coverage = {}
+    if not isinstance(coverage, dict):
+        coverage = {}
     return CheckRecord(
         id=row["id"],
         novel_id=row["novel_id"],
@@ -1341,6 +1348,8 @@ def get_check(conn: sqlite3.Connection, novel_id: str, check_id: str) -> CheckRe
         run_id=row["run_id"],
         actual_plot=row["actual_plot"],
         actual_ending=row["actual_ending"],
+        coverage_checked=tuple(coverage.get("checked", ())),
+        coverage_unchecked=tuple(coverage.get("unchecked", ())),
         issues=tuple(
             IssueRecord(
                 id=r["id"],

@@ -395,6 +395,8 @@ class CheckRecord:
     actual_plot: str
     actual_ending: str
     issues: tuple[IssueRecord, ...]
+    coverage_checked: tuple[str, ...] = ()
+    coverage_unchecked: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
