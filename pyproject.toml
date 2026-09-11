@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "AI 小说创作与故事工程系统：作者决定故事，AI 讨论、写作与检查，本地 CLI 闭环"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pydantic>=2.13.5",
+]
 
 [project.scripts]
 story-workbench = "story_workbench.__main__:main"
