@@ -480,3 +480,61 @@ class SnapshotChain:
 class SnapshotDraft:
     facts: tuple[SnapshotFactRef, ...]
     open_questions: tuple[str, ...]
+
+
+# ------------------------------------------------ 故事条目与任务记录（G04）
+
+
+@dataclass(frozen=True, slots=True)
+class StoryItemRecord:
+    id: str
+    novel_id: str
+    logical_id: str
+    revision: int
+    kind: str
+    body: str
+    authority: Authority
+    lifecycle: Lifecycle
+    source_message_id: str
+    chapter_id: str | None = None
+    supersedes_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunRecord:
+    id: str
+    novel_id: str
+    chapter_id: str | None
+    task: TaskKind
+    status: RunStatus
+    basis_id: str | None
+    input_version_id: str | None
+    source_message_id: str
+    retry_of_id: str | None
+    partial_text: str
+    result_version_id: str | None
+    template_version: str
+    request_json: str
+    usage_json: str | None
+    error_code: str | None
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotFactDetail:
+    candidate_id: str | None
+    fact_revision_id: str | None
+    kind: FactKind
+    proposition: str
+    subject: str | None
+    story_time: str | None
+    chapter_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRecord:
+    id: str
+    role: MessageRole
+    body: str
+    chapter_id: str | None
+    created_at: str

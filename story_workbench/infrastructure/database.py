@@ -20,6 +20,7 @@ from story_workbench.domain.records import (
     AdoptionRecord,
     AdoptionResult,
     AuthorAction,
+    Authority,
     BasisRecord,
     CandidateFactRecord,
     ChapterRecord,
@@ -30,15 +31,22 @@ from story_workbench.domain.records import (
     FactKind,
     IssueKind,
     IssueRecord,
+    Lifecycle,
+    MessageRecord,
+    MessageRole,
     NovelRecord,
     PlanRecord,
+    ResolutionAction,
+    RunRecord,
     RunStatus,
     SaveResult,
     SnapshotChain,
     SnapshotDraft,
+    SnapshotFactDetail,
     SnapshotFactRef,
     SnapshotRecord,
     SnapshotStatus,
+    StoryItemRecord,
     SyncStatus,
     TaskKind,
     VersionOrigin,
@@ -47,7 +55,7 @@ from story_workbench.domain.records import (
     WorkcopyRecord,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # 共有字段说明：id TEXT 主键；created_at UTC ISO 文本；除 novel 外均有 novel_id。
 _SCHEMA_V1 = """
@@ -467,6 +475,26 @@ CREATE INDEX idx_snapshot_chapter ON snapshot(novel_id, chapter_id, status);
 CREATE INDEX idx_impact_chapter ON impact(novel_id, chapter_id, status);
 """
 
+# v2：拒绝稿只追加记录；story_item 可限定适用章节（NULL 表示全书规则）。
+_SCHEMA_V2 = """
+ALTER TABLE story_item ADD COLUMN chapter_id TEXT REFERENCES chapter(id);
+
+CREATE TABLE draft_rejection (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    author_message_id TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    UNIQUE (novel_id, id),
+    UNIQUE (novel_id, version_id),
+    FOREIGN KEY (novel_id, version_id) REFERENCES version(novel_id, id),
+    FOREIGN KEY (novel_id, author_message_id) REFERENCES message(novel_id, id)
+);
+"""
+
+_MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
+
 
 # ---------------------------------------------------------------- 基础工具
 
@@ -532,9 +560,9 @@ def migrate(conn: sqlite3.Connection) -> int:
     if current == SCHEMA_VERSION:
         return current
     with transaction(conn):
-        if current < 1:
+        for target in range(current + 1, SCHEMA_VERSION + 1):
             # executescript 会隐式提交，因此逐条执行以留在同一事务内。
-            for statement in _SCHEMA_V1.split(";"):
+            for statement in _MIGRATIONS[target].split(";"):
                 if statement.strip():
                     conn.execute(statement)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -994,6 +1022,15 @@ def commit_basis(
     """
     basis_id = new_id()
     with transaction(conn):
+        novel = get_novel(conn)
+        if novel is None or novel.id != novel_id:
+            raise WorkbenchError(ErrorCode.WRONG_SCOPE, "作品不匹配。")
+        if novel.design_revision != design_revision:
+            raise WorkbenchError(
+                ErrorCode.STALE_BASIS,
+                "作者规则或决定在构建上下文后发生了变化，请重新开始本次任务。",
+                {"design_revision": novel.design_revision},
+            )
         chapter = get_chapter(conn, novel_id, chapter_id)
         if plan_id is not None:
             plan = get_plan(conn, novel_id, plan_id)
@@ -1818,3 +1855,389 @@ def commit_fact_correction(
             (novel_id, novel_id),
         )
     return revision_id
+
+
+# ---------------------------------------------------------------- 故事条目与拒绝稿（schema v2）
+
+
+def _story_item(row: sqlite3.Row) -> StoryItemRecord:
+    return StoryItemRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        logical_id=row["logical_id"],
+        revision=row["revision"],
+        kind=row["kind"],
+        body=row["body"],
+        authority=Authority(row["authority"]),
+        lifecycle=Lifecycle(row["lifecycle"]),
+        source_message_id=row["source_message_id"],
+        chapter_id=row["chapter_id"],
+        supersedes_id=row["supersedes_id"],
+    )
+
+
+def list_story_items_current(conn: sqlite3.Connection, novel_id: str) -> list[StoryItemRecord]:
+    """每个 logical_id 的最新修订。"""
+    rows = conn.execute(
+        "SELECT s.* FROM story_item s JOIN ("
+        "  SELECT logical_id, MAX(revision) AS revision FROM story_item"
+        "  WHERE novel_id = ? GROUP BY logical_id"
+        ") m ON s.logical_id = m.logical_id AND s.revision = m.revision"
+        " WHERE s.novel_id = ? ORDER BY s.created_at, s.rowid",
+        (novel_id, novel_id),
+    ).fetchall()
+    return [_story_item(r) for r in rows]
+
+
+def get_story_item(conn: sqlite3.Connection, novel_id: str, item_id: str) -> StoryItemRecord:
+    row = conn.execute(
+        "SELECT * FROM story_item WHERE novel_id = ? AND id = ?", (novel_id, item_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "故事条目不存在。", {"story_item_id": item_id})
+    return _story_item(row)
+
+
+def commit_story_item(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    *,
+    kind: str,
+    body: str,
+    authority: Authority,
+    lifecycle: Lifecycle,
+    source_message_id: str,
+    chapter_id: str | None,
+    logical_id: str | None = None,
+    expected_revision_id: str | None = None,
+) -> StoryItemRecord:
+    """追加故事条目修订。作者决定的新增或变更会递增 design_revision，使旧依据保守过时。"""
+    with transaction(conn):
+        if logical_id is None:
+            logical_id = new_id()
+            revision = 1
+            if expected_revision_id is not None:
+                raise WorkbenchError(ErrorCode.INVALID_INPUT, "新条目不能带修订基准。")
+            previous: StoryItemRecord | None = None
+        else:
+            rows = [
+                r for r in list_story_items_current(conn, novel_id) if r.logical_id == logical_id
+            ]
+            if not rows:
+                raise WorkbenchError(
+                    ErrorCode.NOT_FOUND, "故事条目不存在。", {"logical_id": logical_id}
+                )
+            previous = rows[0]
+            if previous.id != expected_revision_id:
+                raise WorkbenchError(
+                    ErrorCode.STALE_BASIS,
+                    "这条内容已有更新的修订，请查看后再操作。",
+                    {"current_revision_id": previous.id},
+                )
+            revision = previous.revision + 1
+        if chapter_id is not None:
+            get_chapter(conn, novel_id, chapter_id)
+        item_id = new_id()
+        conn.execute(
+            "INSERT INTO story_item (id, novel_id, created_at, logical_id, revision, kind, body,"
+            " authority, lifecycle, source_message_id, supersedes_id, chapter_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                item_id,
+                novel_id,
+                now_utc(),
+                logical_id,
+                revision,
+                kind,
+                body,
+                authority.value,
+                lifecycle.value,
+                source_message_id,
+                None if previous is None else previous.id,
+                chapter_id,
+            ),
+        )
+        affects_rules = authority is Authority.AUTHOR_DECISION or (
+            previous is not None and previous.authority is Authority.AUTHOR_DECISION
+        )
+        if affects_rules:
+            conn.execute(
+                "UPDATE novel SET design_revision = design_revision + 1 WHERE id = ?", (novel_id,)
+            )
+        return get_story_item(conn, novel_id, item_id)
+
+
+def commit_draft_rejection(
+    conn: sqlite3.Connection, novel_id: str, version_id: str, author_message_id: str, reason: str
+) -> str:
+    """标记拒绝稿；只追加，不删除版本。已采用版本不能拒绝。"""
+    rejection_id = new_id()
+    with transaction(conn):
+        version = get_version(conn, novel_id, version_id)
+        chapter = get_chapter(conn, novel_id, version.chapter_id)
+        if chapter.adopted_id is not None:
+            adopted = get_adoption(conn, novel_id, chapter.adopted_id)
+            if adopted.version_id == version_id:
+                raise WorkbenchError(ErrorCode.INVALID_INPUT, "已采用的版本不能标记拒绝。")
+        exists = conn.execute(
+            "SELECT id FROM draft_rejection WHERE novel_id = ? AND version_id = ?",
+            (novel_id, version_id),
+        ).fetchone()
+        if exists:
+            return exists["id"]
+        conn.execute(
+            "INSERT INTO draft_rejection (id, novel_id, created_at, version_id, author_message_id,"
+            " reason) VALUES (?, ?, ?, ?, ?, ?)",
+            (rejection_id, novel_id, now_utc(), version_id, author_message_id, reason),
+        )
+        if chapter.current_draft_id == version_id:
+            parent = version.parent_id
+            conn.execute(
+                "UPDATE chapter SET current_draft_id = ? WHERE novel_id = ? AND id = ?",
+                (parent, novel_id, chapter.id),
+            )
+    return rejection_id
+
+
+def list_rejected_version_ids(conn: sqlite3.Connection, novel_id: str) -> set[str]:
+    rows = conn.execute(
+        "SELECT version_id FROM draft_rejection WHERE novel_id = ?", (novel_id,)
+    ).fetchall()
+    return {r["version_id"] for r in rows}
+
+
+def get_adopted_version_id(
+    conn: sqlite3.Connection, novel_id: str, chapter: ChapterRecord
+) -> str | None:
+    if chapter.adopted_id is None:
+        return None
+    return get_adoption(conn, novel_id, chapter.adopted_id).version_id
+
+
+# ---------------------------------------------------------------- 上下文来源读取与当前稿选择（G04）
+
+
+def list_snapshot_fact_details(
+    conn: sqlite3.Connection, novel_id: str, snapshot_id: str
+) -> tuple[SnapshotFactDetail, ...]:
+    """快照成员展开为可读事实（有效修订优先），附来源章节。"""
+    rows = conn.execute(
+        "SELECT sf.candidate_id, sf.fact_revision_id,"
+        " COALESCE(fr.kind, cf.kind) AS kind, COALESCE(fr.proposition, cf.proposition) AS prop,"
+        " COALESCE(fr.subject, cf.subject) AS subject,"
+        " COALESCE(fr.story_time, cf.story_time) AS story_time, cr.chapter_id AS chapter_id"
+        " FROM snapshot_fact sf"
+        " LEFT JOIN fact_revision fr ON fr.id = sf.fact_revision_id"
+        " LEFT JOIN candidate_fact cf ON cf.id = COALESCE(sf.candidate_id, fr.candidate_id)"
+        " JOIN check_result cr ON cr.id = cf.check_id"
+        " WHERE sf.novel_id = ? AND sf.snapshot_id = ? ORDER BY sf.rowid",
+        (novel_id, snapshot_id),
+    ).fetchall()
+    return tuple(
+        SnapshotFactDetail(
+            candidate_id=r["candidate_id"],
+            fact_revision_id=r["fact_revision_id"],
+            kind=FactKind(r["kind"]),
+            proposition=r["prop"],
+            subject=r["subject"],
+            story_time=r["story_time"],
+            chapter_id=r["chapter_id"],
+        )
+        for r in rows
+    )
+
+
+def latest_snapshot_status_for_chapter(
+    conn: sqlite3.Connection, novel_id: str, chapter_id: str
+) -> SnapshotStatus | None:
+    row = conn.execute(
+        "SELECT status FROM snapshot WHERE novel_id = ? AND chapter_id = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (novel_id, chapter_id),
+    ).fetchone()
+    return None if row is None else SnapshotStatus(row["status"])
+
+
+def list_messages(conn: sqlite3.Connection, novel_id: str) -> tuple[MessageRecord, ...]:
+    rows = conn.execute(
+        "SELECT id, role, body, chapter_id, created_at FROM message WHERE novel_id = ?"
+        " ORDER BY created_at, rowid",
+        (novel_id,),
+    ).fetchall()
+    return tuple(
+        MessageRecord(r["id"], MessageRole(r["role"]), r["body"], r["chapter_id"], r["created_at"])
+        for r in rows
+    )
+
+
+def get_review_check_id(conn: sqlite3.Connection, novel_id: str, review_id: str) -> str:
+    row = conn.execute(
+        "SELECT check_id FROM review WHERE novel_id = ? AND id = ?", (novel_id, review_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "审阅记录不存在。", {"review_id": review_id})
+    return row["check_id"]
+
+
+def list_resolved_issue_ids(conn: sqlite3.Connection, novel_id: str, review_id: str) -> set[str]:
+    rows = conn.execute(
+        "SELECT issue_id FROM resolution WHERE novel_id = ? AND review_id = ? AND action != ?",
+        (novel_id, review_id, ResolutionAction.KEEP_OPEN.value),
+    ).fetchall()
+    return {r["issue_id"] for r in rows}
+
+
+def commit_choose_current_draft(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    chapter_id: str,
+    version_id: str,
+    expected_current_draft_id: str | None,
+) -> None:
+    """作者明确选择某一稿作为当前编辑稿；不新建版本。"""
+    with transaction(conn):
+        chapter = get_chapter(conn, novel_id, chapter_id)
+        version = get_version(conn, novel_id, version_id)
+        if version.chapter_id != chapter_id:
+            raise WorkbenchError(
+                ErrorCode.WRONG_SCOPE, "版本不属于本章。", {"version_id": version_id}
+            )
+        if chapter.current_draft_id != expected_current_draft_id:
+            raise WorkbenchError(
+                ErrorCode.STALE_BASIS,
+                "当前编辑稿已变化，请重新查看后选择。",
+                {"current_draft_id": chapter.current_draft_id},
+            )
+        conn.execute(
+            "UPDATE chapter SET current_draft_id = ? WHERE novel_id = ? AND id = ?",
+            (version_id, novel_id, chapter_id),
+        )
+
+
+# ---------------------------------------------------------------- run 流保存、取消与迟到保护（G04）
+
+
+def get_run(conn: sqlite3.Connection, novel_id: str, run_id: str) -> RunRecord:
+    row = conn.execute(
+        "SELECT * FROM run WHERE novel_id = ? AND id = ?", (novel_id, run_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "任务不存在。", {"run_id": run_id})
+    return RunRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        chapter_id=row["chapter_id"],
+        task=TaskKind(row["task"]),
+        status=RunStatus(row["status"]),
+        basis_id=row["basis_id"],
+        input_version_id=row["input_version_id"],
+        source_message_id=row["source_message_id"],
+        retry_of_id=row["retry_of_id"],
+        partial_text=row["partial_text"],
+        result_version_id=row["result_version_id"],
+        template_version=row["template_version"],
+        request_json=row["request_json"],
+        usage_json=row["usage_json"],
+        error_code=row["error_code"],
+        created_at=row["created_at"],
+    )
+
+
+def any_run_in_flight(conn: sqlite3.Connection, novel_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT id FROM run WHERE novel_id = ? AND status IN ('pending', 'running')"
+        " ORDER BY created_at LIMIT 1",
+        (novel_id,),
+    ).fetchone()
+    return None if row is None else row["id"]
+
+
+def commit_run_chunk(conn: sqlite3.Connection, novel_id: str, run_id: str, text: str) -> bool:
+    """只有 running 的 run 可以追加流块；返回是否已保存（取消后返回 False）。"""
+    with transaction(conn):
+        cur = conn.execute(
+            "UPDATE run SET partial_text = partial_text || ? WHERE novel_id = ? AND id = ?"
+            " AND status = 'running'",
+            (text, novel_id, run_id),
+        )
+        return cur.rowcount == 1
+
+
+def commit_run_result(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    run_id: str,
+    body: str,
+    expected_current_draft_id: str | None,
+    usage_json: str | None,
+) -> SaveResult | None:
+    """生成完成：run 仍 running 时创建唯一结果版本并标 succeeded；否则（已取消/中断）返回 None。
+
+    若输入已变（当前编辑稿与任务开始时不同），保存为历史草稿并不移动指针。
+    """
+    with transaction(conn):
+        run = get_run(conn, novel_id, run_id)
+        if run.status is not RunStatus.RUNNING:
+            return None
+        if run.result_version_id is not None:
+            raise WorkbenchError(
+                ErrorCode.INVALID_INPUT, "该任务已有结果版本。", {"run_id": run_id}
+            )
+        assert run.chapter_id is not None
+        result = _insert_version(
+            conn,
+            novel_id,
+            run.chapter_id,
+            body,
+            VersionOrigin.GENERATED,
+            run.input_version_id,
+            expected_current_draft_id,
+            None,
+            run_id,
+            True,
+        )
+        conn.execute(
+            "UPDATE run SET status = 'succeeded', result_version_id = ?, partial_text = ?,"
+            " usage_json = COALESCE(?, usage_json) WHERE novel_id = ? AND id = ?",
+            (result.version_id, body, usage_json, novel_id, run_id),
+        )
+        return result
+
+
+def commit_run_cancel(conn: sqlite3.Connection, novel_id: str, run_id: str) -> bool:
+    """取消先落库：只有 pending/running 可取消；返回是否真的改变了状态。"""
+    with transaction(conn):
+        cur = conn.execute(
+            "UPDATE run SET status = 'cancelled' WHERE novel_id = ? AND id = ?"
+            " AND status IN ('pending', 'running')",
+            (novel_id, run_id),
+        )
+        return cur.rowcount == 1
+
+
+def list_open_issues_for_check(
+    conn: sqlite3.Connection, novel_id: str, check_id: str
+) -> tuple[IssueRecord, ...]:
+    return get_check(conn, novel_id, check_id).issues
+
+
+def list_issue_evidence(
+    conn: sqlite3.Connection, novel_id: str, issue_id: str
+) -> tuple[tuple[int | None, int | None, str], ...]:
+    rows = conn.execute(
+        "SELECT start, end, quote FROM issue_evidence WHERE novel_id = ? AND issue_id = ?"
+        " ORDER BY rowid",
+        (novel_id, issue_id),
+    ).fetchall()
+    return tuple((r["start"], r["end"], r["quote"]) for r in rows)
+
+
+def latest_check_for_version(
+    conn: sqlite3.Connection, novel_id: str, version_id: str
+) -> CheckRecord | None:
+    row = conn.execute(
+        "SELECT id FROM check_result WHERE novel_id = ? AND version_id = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (novel_id, version_id),
+    ).fetchone()
+    return None if row is None else get_check(conn, novel_id, row["id"])

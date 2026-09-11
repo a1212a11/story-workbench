@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from story_workbench.domain import rules
 from story_workbench.domain.records import (
+    Authority,
     ChapterRecord,
+    ErrorCode,
     Expected,
+    Lifecycle,
     MessageRole,
     PlanRecord,
     SaveResult,
+    StoryItemRecord,
     Target,
     VersionOrigin,
     VersionRecord,
+    WorkbenchError,
 )
 from story_workbench.infrastructure import database
 
@@ -108,4 +113,109 @@ def restore_version(project: Project, target: Target, expected: Expected) -> Sav
         parent_id=expected.current_draft_id,
         expected_current_draft_id=expected.current_draft_id,
         restored_from_id=source.id,
+    )
+
+
+# ---------------------------------------------------------------- 计划、故事条目、拒绝稿与稿件选择
+
+
+def get_current_plan(project: Project, chapter_id: str) -> PlanRecord | None:
+    chapter = database.get_chapter(project.conn, project.novel_id, chapter_id)
+    if chapter.current_plan_id is None:
+        return None
+    return database.get_plan(project.conn, project.novel_id, chapter.current_plan_id)
+
+
+def list_plans(project: Project, chapter_id: str) -> list[PlanRecord]:
+    return database.list_plans(project.conn, project.novel_id, chapter_id)
+
+
+def adopted_version_id(project: Project, chapter_id: str) -> str | None:
+    chapter = database.get_chapter(project.conn, project.novel_id, chapter_id)
+    return database.get_adopted_version_id(project.conn, project.novel_id, chapter)
+
+
+def list_story_items(project: Project) -> list[StoryItemRecord]:
+    return database.list_story_items_current(project.conn, project.novel_id)
+
+
+def record_item(
+    project: Project,
+    *,
+    kind: str,
+    body: str,
+    authority: Authority,
+    lifecycle: Lifecycle,
+    source_message_id: str,
+    chapter_id: str | None = None,
+) -> StoryItemRecord:
+    """新建故事条目。候选想法用 AUTHOR_IDEA/CANDIDATE；模型建议用 AI_SUGGESTION/DRAFT。"""
+    if lifecycle is Lifecycle.DECIDED and authority is not Authority.AUTHOR_DECISION:
+        raise WorkbenchError(ErrorCode.INVALID_INPUT, "只有作者决定才能标记为已确定。")
+    return database.commit_story_item(
+        project.conn,
+        project.novel_id,
+        kind=kind,
+        body=body,
+        authority=authority,
+        lifecycle=lifecycle,
+        source_message_id=source_message_id,
+        chapter_id=chapter_id,
+    )
+
+
+def decide_item(
+    project: Project,
+    item: StoryItemRecord,
+    *,
+    lifecycle: Lifecycle,
+    source_message_id: str,
+    body: str | None = None,
+    authorize_change: bool = False,
+) -> StoryItemRecord:
+    """作者对候选做决定、拒绝、归档或修订。
+
+    改变已确定的决定必须 authorize_change=True（先说明影响并获得同意）；
+    决定的新增或变更会递增 design_revision，使旧依据保守过时。
+    """
+    new_body = item.body if body is None else body
+    if item.lifecycle is Lifecycle.DECIDED and not authorize_change:
+        raise WorkbenchError(
+            ErrorCode.AUTHORIZATION_REQUIRED,
+            "这是已确定的内容，改变它需要明确授权。",
+            {"story_item_id": item.id},
+        )
+    authority = Authority.AUTHOR_DECISION if lifecycle is Lifecycle.DECIDED else item.authority
+    if (
+        lifecycle in (Lifecycle.REJECTED, Lifecycle.ARCHIVED)
+        and item.authority is Authority.AI_SUGGESTION
+    ):
+        authority = Authority.AI_SUGGESTION
+    return database.commit_story_item(
+        project.conn,
+        project.novel_id,
+        kind=item.kind,
+        body=new_body,
+        authority=authority,
+        lifecycle=lifecycle,
+        source_message_id=source_message_id,
+        chapter_id=item.chapter_id,
+        logical_id=item.logical_id,
+        expected_revision_id=item.id,
+    )
+
+
+def reject_draft(project: Project, target: Target, source_message_id: str, reason: str = "") -> str:
+    """标记拒绝稿：不删除版本，不进入正式上下文；若它是当前编辑稿则回退到其父版本。"""
+    version = get_version(project, target)
+    return database.commit_draft_rejection(
+        project.conn, project.novel_id, version.id, source_message_id, reason
+    )
+
+
+def choose_current_draft(project: Project, target: Target, expected: Expected) -> None:
+    """作者明确选择某一稿继续编辑；不新建版本。"""
+    version = get_version(project, target)
+    database.commit_choose_current_draft(
+        project.conn, project.novel_id, version.chapter_id, version.id, expected.current_draft_id
     )
