@@ -16,7 +16,7 @@
 | 运行架构 | 本地单进程、显式用例编排 | 现有方案 | 作者掌握正式采用权；每个项目最多一个模型请求在途，网络与数据库事务分离 |
 | 数据库 | SQLite + 标准库 sqlite3 | 现有方案 | 正文历史、授权、采用和状态引用保存在同一数据库，使用显式事务与关系约束 |
 | 正文交换 | Markdown | 现有方案 | 外部工作副本与导出；SQLite 保存权威历史，已有文件不自动覆盖 |
-| 终端交互 | prompt_toolkit | 推荐 | 对话与多行编辑优先；需实际验证中文输入、粘贴、长段落、保存/取消及流式输出共存 |
+| 终端交互 | prompt_toolkit 3.0.53 | 已验证（2026-09-11，P03） | 全屏 TextArea 编辑器通过管道输入自动化验证：多行中文、括号粘贴、光标移动后插入、保存/取消；asyncio 流每 10ms 追加输出时按键仍被处理、取消能停止流，因此模型客户端按架构 4.1 改为 asyncio 方案。输入法（IME）体验无法自动化，待人工 T05 验证 |
 | 模型接入 | Anthropic 官方 Python SDK，模型 Claude Sonnet 5 | 已确定（2026-09-11）；G05 接入时核对版本 | 客户端负责协议与网络，用例负责阶段保存和恢复；密钥走 `ANTHROPIC_API_KEY` 环境变量；不预建多供应商平台 |
 | 外部载荷校验 | Pydantic | 已确定；G03 时安装 | 只用于 ai/tasks 校验模型返回的检查载荷；内部业务记录继续用 dataclass |
 | 格式与 lint | Ruff 0.16.7 | 已安装 | 规则 E/F/W/I/UP/B，行宽 100；合并前 `uv run ruff check .` 必须通过 |
@@ -84,7 +84,7 @@ pytest 已确定；Ruff 同时提供 lint 与 formatter，mypy 提供静态类�
 
 - [x] 记录 uv 与 pytest 的已确定选择，并整理其余技术建议。
 - [x] P01–P02：初始化 Python/uv 项目与 pytest，固定解释器和依赖版本，提交锁文件，执行有效测试。证据见[项目计划](project-plan.md)。
-- [ ] P03：用中文长段落验证 prompt_toolkit；同时验证流式输出进行中仍可输入与取消。选择落定后再安装并更新选型状态。
+- [x] P03：prompt_toolkit 3.0.53 已安装并锁定。`tests/test_cli.py` 用 `create_pipe_input` + `DummyOutput` 验证：多行中文输入（test_editor_accepts_multiline_chinese_and_saves）、整段粘贴（test_editor_accepts_pasted_multiline_chinese_at_once）、光标移动后插入（test_editor_cursor_moves_then_inserts_in_the_middle）、保存返回修改后文本（test_editor_save_returns_modified_text_keeping_untouched_lines）、取消返回 None 且原文不变（test_editor_cancel_returns_none_and_leaves_original_untouched）；流式输出共存（test_stream_output_keeps_editor_input_and_cancel_responsive）：asyncio 任务每 10ms 向显示区追加中文时，管道按键被正常插入，Ctrl-C 触发的取消信号在 500 段产出前停止了流。结论：可以采用 asyncio 方案。输入法（IME）体验待人工 T05 验证。
 - [x] P04 决定：Anthropic + Claude Sonnet 5；输出上限 8000 token，上下文预算按 100k token 保守估算，章节目标 3000–5000 字。样本实测、精确 SDK 版本与费用记录在 G05 补。
 - [x] Ruff 已安装；Pydantic 在 G03 安装；mypy 暂不引入。
 - [ ] 资料与自主审稿进入实施前，补充功能范围、数据/工具合同、任务计划和验收，随后再选择所需扩展依赖。
