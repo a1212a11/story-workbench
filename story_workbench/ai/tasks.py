@@ -392,7 +392,12 @@ def _check_span(body: str, span: _EvidenceModel | _CandidateFactModel, loc: str)
     except WorkbenchError as exc:
         raise _model_failed(
             "模型给出的原文引用与正文不符。",
-            {"reason": "evidence_mismatch", "loc": loc, **exc.details},
+            {
+                **exc.details,
+                "cause": exc.details.get("reason"),
+                "reason": "evidence_mismatch",
+                "loc": loc,
+            },
         ) from exc
 
 
