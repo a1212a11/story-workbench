@@ -59,9 +59,9 @@ C 与固定客户端 G 在存储接口稳定后可独立推进；采用用例、
 
 触点：cli、启动装配与 authoring/projects；AI 讨论接入在 G 阶段完成。
 
-- [ ] C01 实现作品/章节选择、消息保存、候选想法和作者决定、计划编辑与全文查看。完成条件：作者可通过入口整理故事，候选不会自动成为决定或正式事实。 进度：作品/章节、消息、计划、全文查看已在 `cli.py`（提交 `90a0117`）；候选想法与作者决定入口待 authoring.decide_item。
+- [x] C01 实现作品/章节选择、消息保存、候选想法和作者决定、计划编辑与全文查看。完成条件：作者可通过入口整理故事，候选不会自动成为决定或正式事实。 证据：作品/章节、消息、计划、全文查看在 `cli.py`（提交 `90a0117`）；候选想法（d 记为候选 → `authoring.record_item` AUTHOR_IDEA/CANDIDATE）与作者决定（f 确定 → `decide_item`，改已确定内容须作者输入「授权」）见 `tests/test_cli.py::test_cli_candidate_and_decision_entries_require_authorization_to_change`；AI 讨论回复经 `generation.discuss` 流式打印，见 `test_cli_discussion_streams_reply_and_saves_messages`（回复只存 message，不自动抽取想法）。
 - [x] C02 接入普通多行编辑器。完成条件：保存/取消行为正确，保存失败保留缓冲，全程不要求 Markdown 语法或手工文件路径。 证据：提交 `d08d24d`/`90a0117`；`cli_editor.edit_text` 基于 prompt_toolkit 3.0.53，`tests/test_cli.py` 覆盖多行中文、粘贴、光标、保存、取消、保存失败保留缓冲与流式共存。
-- [ ] C03 实现检查展示、准确稿件选择与明确采用入口。完成条件：展示全文、新增设定、冲突及偏差；歧义“采用那版”不写正式记录；一次明确动作提交已读与必要授权。
+- [x] C03 实现检查展示、准确稿件选择与明确采用入口。完成条件：展示全文、新增设定、冲突及偏差；歧义“采用那版”不写正式记录；一次明确动作提交已读与必要授权。 证据：`cli.py` 的 w 写 / x 试写（`generation.write_chapter`，on_text 逐块输出，结束展示全文与检查）、k 检查、i 查看检查（实际剧情与结尾、六类问题中文标签、证据原文、建议、候选事实）、a 采用（绑定最近展示的稿，一句「已读，采用」后逐条处理授权，构造 AuthorAction 交 `adoption.adopt`）、j 拒绝；`tests/test_cli.py`：test_cli_plan_write_review_adopt_and_state_ready（计划→写→查看检查→采用→状态完成，同一稿重复采用提示无需重复）、test_cli_rejects_overreaching_draft_then_rewrites_and_adopts（越界稿不授权→列出未处理问题、零采用→拒绝→重写→采用）、test_cli_authorizes_new_setting_in_one_action、test_cli_exploratory_draft_requires_accepting_plot_and_ending、test_cli_ambiguous_adopt_lists_candidates_and_writes_nothing（两份候选稿“采用那版”零写入）、test_cli_stale_basis_after_plan_change_needs_recheck、test_cli_without_model_explains_and_unknown_command_is_explained；保存失败另存恢复文件见 test_cli_keeps_buffer_when_save_fails_and_allows_retry。未检查范围（coverage）尚未由 CheckRecord 暴露，待 A 线补读接口后展示。
 - [ ] C04 人工执行 T05 并保存交互记录。完成条件：中文编辑与取消可用，CLI 操作绑定正确版本。
 
 ## G AI 任务与上下文
