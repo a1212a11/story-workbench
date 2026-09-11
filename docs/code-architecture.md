@@ -1,6 +1,6 @@
 # 代码架构设计 V0.2
 
-日期：2026-09-10。状态：实现前设计；本文中的模块、函数、数据表与测试均待实现。本轮只补文档，不安装依赖、不调用真实模型。
+日期：2026-09-10，状态更新 2026-09-11。状态：首期代码已按本文实现，`story_workbench/` 的包结构、数据表、命名提交函数与测试文件与第 2、3、4、10 节对应；实现中的偏差与补充见第 12 节。
 
 依据：[需求基线](requirements.md)、[实施方案](implementation.md)、[三章走查](three-chapter-walkthrough.md)、[框架提案](../.omx/plans/prd-story-framework.md)和[验收规格](../.omx/plans/test-spec-story-framework.md)。本文细化实现合同；不扩大首期范围，也不将既有替代架构审查记为严格 Ralplan 共识门通过。
 
@@ -121,7 +121,7 @@ tests/                       仓库根目录，与包同级
 | --- | --- | --- |
 | novel | title, design_revision | 一库一作品；规则用 story_item 表达并保留历史；决定/规则变动递增 design_revision |
 | message | role, body, chapter_id? | 保留作者、模型原文；角色枚举，不执行正文中的指令 |
-| story_item | logical_id, revision, kind, body, authority, lifecycle, source_message_id, supersedes_id? | logical_id + revision 在作品内唯一；authority 与 lifecycle 分开；决定、拒绝、归档均追加修订 |
+| story_item | logical_id, revision, kind, body, authority, lifecycle, source_message_id, supersedes_id?, chapter_id?（v2） | logical_id + revision 在作品内唯一；authority 与 lifecycle 分开；决定、拒绝、归档均追加修订 |
 | chapter | number, current_plan_id?, current_draft_id?, adopted_id?, current_snapshot_id?, needs_review | number 在作品内唯一且大于零；current_draft 指向同章版本，正文草稿不决定采用指针 |
 | plan | chapter_id, revision, plot?, ending?, source_message_id | 修订不可变；正式写作要求两项非空，试写允许缺失 |
 | version | chapter_id, parent_id?, restored_from_id?, body, content_hash, origin, run_id? | 不可覆盖；origin 为 author/generated/external/restore；parent 与恢复来源必须同章 |
@@ -212,7 +212,7 @@ tests/                       仓库根目录，与包同级
 
 首期同项目最多一个模型请求在途。启动层提供一个网络执行线程和取消信号，网络线程只产出有界队列事件，不持有数据库连接；应用协调线程消费事件、保存流块和响应 CLI 动作。队列满时背压；取消置位后生产者可退出，不因队列写入永久阻塞。此方案保留编辑和取消响应，不引入后台服务或任务队列系统。
 
-2026-09-11 补充：若 P03 确认采用 prompt_toolkit，模型客户端改为 asyncio 调用，流式事件直接进入终端事件循环，取消使用 asyncio 取消信号，不再单独开网络线程。P03 验证时必须同时验证生成中仍可输入与取消；验证通过后本段以 asyncio 方案为准。
+2026-09-11 补充：P03 已用 prompt_toolkit 的 `run_async` 加模拟异步流验证“生成中可输入与取消”可行（`tests/test_cli.py::test_stream_output_keeps_editor_input_and_cancel_responsive`）。当前实现：应用层 `generation.write_chapter` 同步消费事件流并逐块落库回显，`cancel_run` 先落库再置位 `threading.Event`；CLI 在生成期间不接收输入，生成中取消尚未接入界面。接入时按 asyncio 方案改造 CLI 循环，不另开网络线程。
 
 取消首先由应用通过 database 将 run 从 running 改为 cancelled，成功后才报告取消已记录，再通知客户端尽力终止网络请求。排队中的迟到事件按 run 状态拒绝；未等旧网络请求结束时不启动下一次请求。关闭项目时停止接收动作、记录中断、关闭网络资源，最后关闭数据库并释放锁；超时退出后仅承诺已落库内容。
 
@@ -350,7 +350,7 @@ SQLite 与文件系统没有共同事务；外部编辑器也不遵守项目进�
 
 项目路径由启动参数决定；非敏感模型配置放项目外用户配置目录，密钥优先环境变量。支持模型名、输出上限、请求超时及用量预算；没有可靠价格信息时显示用量，不伪造费用。锁由操作系统持有，崩溃释放；macOS 首期可使用标准库平台锁，其他平台接入前补相应实现，不能单凭锁文件存在推断进程活着。
 
-数据库 schema 版本用 `PRAGMA user_version` 管理。初版建库一个迁移；将来升级先备份，在事务中迁移，失败回滚；遇更高版本只报告不兼容，不自动降级。备份使用数据库一致性备份能力并包含 work/recovery 文件、内容摘要和清单；短暂暂停应用写入，对外部文件前后复核，检测变化则重试或报告备份未完成。恢复只到空新目录，校验摘要、数据库完整性、外键及引用后开放使用；配置密钥不打包。
+数据库 schema 版本用 `PRAGMA user_version` 管理。v1 建库，v2 增加 `draft_rejection`（拒绝稿只追加记录）与 `story_item.chapter_id`（NULL 表示全书规则）；将来升级先备份，在事务中迁移，失败回滚；遇更高版本只报告不兼容，不自动降级。备份使用数据库一致性备份能力并包含 work/recovery 文件、内容摘要和清单；短暂暂停应用写入，对外部文件前后复核，检测变化则重试或报告备份未完成。恢复只到空新目录，校验摘要、数据库完整性、外键及引用后开放使用；配置密钥不打包。
 
 ## 10. 实现顺序与可执行验收落点
 
@@ -383,3 +383,5 @@ README 与实施方案已加入本文入口。修改文档的本地链接、代�
 V0.2 修订：以逻辑职责和数据所有权替换“一个文件一个模块”的表达；原 workflow 职责分给 application 用例，原 store 的文件责任移至 files，由 projects 协调，原 model 分为 AI 任务与供应商客户端。上下文改为接收来源记录的纯构建过程，规则可脱离 I/O 验证并在事务内复用。表结构、授权、版本与恢复合同沿用 V0.1；没有新增服务、框架或应用源码。V0.1 的六项审阅结论只对应当时版本，不自动算作本次架构修订通过。
 
 V0.2 独立 code-reviewer 审阅未发现所述依赖循环，确认事务责任和任务/客户端边界一致，提出两项补充：T03 的首阶段触点必须包含文件对账，以及 recompute_state 需列出接口合同。两项均已写入对应表格。最终文档链接、围栏、空白和旧接口残留检查通过；此次仍是设计审阅，尚无应用执行证据。
+
+2026-09-11 实现记录：首期代码按 V0.2 落地，与文档的差异如下。`Expected` 增加 `current_draft_id` 作为编辑与恢复基准；编辑基准冲突时新稿照样保存但不移动当前稿指针，由入口让作者选择。schema 升到 v2，新增 `draft_rejection` 表与 `story_item.chapter_id`。采用后由 `adoption.adopt` 自动调用 `recompute_state`，失败保留采用并返回状态待更新；后章过时时 `chapter.current_snapshot_id` 清空，指针只指向 ready 快照。`ContextSources` 等上下文输入记录定义在 `ai/context.py`，由 `application/generation.load_sources` 装配，database 只提供读函数，不 import ai。检查证据首期只接受本次正文区间引用，尚未接受对 context 来源的引用。讨论输出只存 message，不抽取结构化想法。发布、分支、伏笔仍未实现。

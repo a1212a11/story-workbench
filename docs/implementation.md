@@ -1,6 +1,6 @@
 # 实施方案草案
 
-本文为根据[需求基线](requirements.md)提出的工程方案。已确定先做 CLI，验证产品流程后再做 UI；建议采用 Python、Markdown 与 SQLite，模型供应商待定，尚未开始实现。已确定使用 uv 管理 Python 包与环境，使用 pytest 测试。
+本文为根据[需求基线](requirements.md)提出的工程方案。已确定先做 CLI，验证产品流程后再做 UI；采用 Python、Markdown 与 SQLite，模型供应商为 Anthropic。首期闭环的确定性部分已于 2026-09-11 实现，进度与证据见[项目计划](project-plan.md)，人工验收项见[验收记录](acceptance-log.md)。使用 uv 管理 Python 包与环境，pytest 测试。
 
 实现合同见[代码架构设计](code-architecture.md)，其中明确了数据表、接口、状态转换及验收落点。文件同步采用保守协议：已有外部工作副本不自动覆盖，新稿保存在数据库并可导出为独立文件，外部编辑按新版本导入。
 

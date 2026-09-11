@@ -1,6 +1,6 @@
 # 项目计划与进度
 
-更新日期：2026-09-11。当前阶段：应用开发已开始，P01/P02 与 S01/S02 完成并有测试证据。下一项：作者提供密钥后执行真实调用（G05 勾选）与 V01/V02/T05/T12 人工记录；未检查范围已进入 CheckRecord 供 CLI 展示。B 线 P03/C01–C02 与 C 线 G01–G03 并行进行中。
+更新日期：2026-09-11。当前阶段：P、S、C（除 C04 人工项）、G（除 G05 真实调用）、R 全部完成并有测试证据，`uv run pytest` 99 通过、1 跳过。剩余项都需要作者本人：提供密钥后执行真实调用（G05）、终端人工验证（C04/T05）、真实三章试用与语义、阅读体验记录（V01–V04）。
 
 `[x]` 表示已有对应交付证据；`[ ]` 表示尚未完成，包含未开始、进行中和待验证。写出设计、测试规格或纸面模拟，不等于代码实现和验收通过。任务只有满足完成条件后才能打勾；届时在该任务后补提交号、测试结果或验证记录链接。没有实际基线前不承诺工期或完成百分比。
 
@@ -41,7 +41,7 @@ C 与固定客户端 G 在存储接口稳定后可独立推进；采用用例、
 - [x] P01 将项目专属编码规则写入仓库级 AGENTS.md，并使用 uv 建立最小 Python 项目和启动入口。完成条件：规则引用 V0.2 边界；创建 `pyproject.toml` 与 `uv.lock`，环境目录不入库；`uv run python -m story_workbench --help` 可运行；不生成尚未使用的模块。证据：提交 `e820e89`；`.python-version` 固定 3.12。
 - [x] P02 建立 pytest 测试入口和首个有效检查。完成条件：pytest 作为开发依赖由 uv 管理，更新锁文件；`uv run pytest` 实际执行至少一个有行为断言的测试；记录首轮 Python/macOS 版本；不把空测试通过当作验证。证据：提交 `e820e89`；Python 3.12.12（uv 管理，系统自带 3.9.6 不满足要求）、pytest 9.1.1、ruff 0.16.7、macOS 26.1。
 - [x] P03 选择并验证终端编辑组件。完成条件：中文多行输入、粘贴、光标移动、保存/取消可操作；新增依赖按项目规则处理。必须在 C 阶段实现编辑器前完成。证据：提交 `99519a5`；prompt_toolkit 3.0.53 经 `uv add` 锁定；`tests/test_cli.py` 中 test_editor_accepts_multiline_chinese_and_saves、test_editor_accepts_pasted_multiline_chinese_at_once、test_editor_cursor_moves_then_inserts_in_the_middle、test_editor_save_returns_modified_text_keeping_untouched_lines、test_editor_cancel_returns_none_and_leaves_original_untouched 通过；流式共存 test_stream_output_keeps_editor_input_and_cancel_responsive 通过，架构 4.1 的 asyncio 方案成立。输入法（IME）体验待人工 T05 验证。
-- [ ] P04 确定模型供应商、模型、密钥配置、上下文和输出限制、超时及预算。完成条件：记录非敏感配置和费用控制方式，密钥置于项目外；真实调用前完成。
+- [x] P04 确定模型供应商、模型、密钥配置、上下文和输出限制、超时及预算。完成条件：记录非敏感配置和费用控制方式，密钥置于项目外；真实调用前完成。证据：[技术选型第 5 节](technology-decisions.md#5-落地与状态更新)的 P04 决定；`bootstrap.Settings` 默认值与配置文件规则；费用按用量展示，实测数字待 G05 真实调用。
 - [ ] P05 准备真实试用故事和人工核对样本。完成条件：作者提供或认可素材，记录已知事实、传闻、持久设定及预期知识边界；V 阶段前完成。
 
 ## S 保存、审阅与采用
