@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ from story_workbench.domain.records import (
     ReconcileOutcome,
     ReconcileResult,
     RecoveryNotice,
+    RunStatus,
     SyncStatus,
     WorkbenchError,
 )
@@ -229,3 +231,123 @@ def write_recovery(project: Project, chapter_id: str, text: str) -> str:
     stamp = database.now_utc().replace(":", "").replace("-", "")[:15]
     name = f"{files.RECOVERY_DIR}/chapter-{chapter.number:03d}-{stamp}.md"
     return files.write_new(project.root, name, text)
+
+
+# ---------------------------------------------------------------- 备份与恢复（R04）
+
+
+@dataclass(frozen=True, slots=True)
+class BackupReport:
+    destination: str
+    file_count: int
+    schema_version: int
+    interrupted_run_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreReport:
+    path: str
+    file_count: int
+    schema_version: int
+    interrupted_run_ids: tuple[str, ...]
+    problems: tuple[str, ...]
+
+
+def backup(project: Project, destination: Path) -> BackupReport:
+    """一致性备份到空新目录：数据库快照、work/exports/recovery 文件、清单。
+
+    备份前后复核外部文件；检测到变化则删除本次输出并报告未完成，不给出成功报告。
+    不包含项目锁与任何密钥。
+    """
+    destination = Path(destination)
+    files.require_empty_or_missing(destination)
+    before = files.snapshot_file_hashes(project.root)
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        database.backup_to(project.conn, destination / files.DB_FILENAME)
+        copied = files.copy_files(project.root, destination, sorted(before))
+        after = files.snapshot_file_hashes(project.root)
+        if before != after or copied != before:
+            raise WorkbenchError(
+                ErrorCode.STORAGE_FAILED,
+                "备份期间工作文件发生变化，本次备份未完成，请重试。",
+                {
+                    "changed": sorted(
+                        set(before) ^ set(after) | {k for k in before if after.get(k) != before[k]}
+                    )
+                },
+            )
+        schema_version = database.schema_version(project.conn)
+        interrupted = tuple(
+            database.list_runs_with_status(project.conn, project.novel_id, RunStatus.RUNNING)
+            + database.list_runs_with_status(project.conn, project.novel_id, RunStatus.PENDING)
+        )
+        manifest = {
+            "schema_version": schema_version,
+            "novel_id": project.novel_id,
+            "created_at": database.now_utc(),
+            "files": copied,
+            "database": files.DB_FILENAME,
+        }
+        (destination / files.MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        files.remove_tree(destination)
+        raise
+    return BackupReport(str(destination), len(copied), schema_version, interrupted)
+
+
+def restore_backup(source: Path, new_path: Path) -> RestoreReport:
+    """把备份恢复到空新目录并校验：清单摘要、数据库完整性、外键与引用。绝不覆盖原项目。"""
+    source, new_path = Path(source), Path(new_path)
+    manifest_path = source / files.MANIFEST_FILENAME
+    if not manifest_path.exists():
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "备份目录缺少清单文件。", {"path": str(source)})
+    files.require_empty_or_missing(new_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected: dict[str, str] = manifest["files"]
+    actual = files.snapshot_file_hashes(source)
+    if actual != expected:
+        raise WorkbenchError(
+            ErrorCode.STORAGE_FAILED,
+            "备份文件与清单不一致，拒绝恢复。",
+            {
+                "mismatch": sorted(
+                    set(actual) ^ set(expected)
+                    | {k for k in expected if actual.get(k) != expected[k]}
+                )
+            },
+        )
+    db_version, db_ok = database.verify_database_file(source / files.DB_FILENAME)
+    if not db_ok:
+        raise WorkbenchError(ErrorCode.STORAGE_FAILED, "备份数据库完整性检查未通过，拒绝恢复。")
+    if db_version > database.SCHEMA_VERSION:
+        raise WorkbenchError(
+            ErrorCode.INVALID_INPUT,
+            "备份来自更新版本的应用，当前应用无法恢复。",
+            {"db_version": db_version},
+        )
+    new_path.mkdir(parents=True, exist_ok=True)
+    try:
+        files.ensure_layout(new_path)
+        files.copy_files(source, new_path, [files.DB_FILENAME] + sorted(expected))
+        project, notice = open_project(new_path)
+        try:
+            problems = database.verify_references(project.conn, project.novel_id)
+            schema_version = database.schema_version(project.conn)
+            restored = files.snapshot_file_hashes(new_path)
+        finally:
+            project.close()
+        if restored != expected or problems:
+            raise WorkbenchError(
+                ErrorCode.STORAGE_FAILED,
+                "恢复后校验未通过。",
+                {"problems": problems, "file_mismatch": restored != expected},
+            )
+    except Exception:
+        files.remove_tree(new_path)
+        raise
+    return RestoreReport(
+        str(new_path), len(expected), schema_version, notice.interrupted_run_ids, tuple(problems)
+    )

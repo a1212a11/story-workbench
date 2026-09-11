@@ -2351,3 +2351,51 @@ def commit_revalidation(conn: sqlite3.Connection, action: AuthorAction) -> str:
         )
         _resolve_pending_impacts(conn, novel_id, chapter.id, review_id)
     return snapshot_id
+
+
+# ---------------------------------------------------------------- 备份（R04）
+
+
+def backup_to(conn: sqlite3.Connection, destination: Path) -> None:
+    """用 SQLite 一致性备份 API 复制数据库；目标文件必须不存在。"""
+    if destination.exists():
+        raise WorkbenchError(
+            ErrorCode.INVALID_INPUT, "备份目标已存在。", {"path": str(destination)}
+        )
+    target = sqlite3.connect(destination)
+    try:
+        conn.backup(target)
+    finally:
+        target.close()
+
+
+def verify_database_file(path: Path) -> tuple[int, bool]:
+    """返回 (schema 版本, 完整性与外键是否通过)。只读打开，不迁移。"""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        ok = conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        ok = ok and not conn.execute("PRAGMA foreign_key_check").fetchall()
+        return version, ok
+    finally:
+        conn.close()
+
+
+def verify_references(conn: sqlite3.Connection, novel_id: str) -> list[str]:
+    """跨行引用复核：章节指针指向的记录存在且属于同章；返回问题列表。"""
+    problems: list[str] = []
+    for chapter in list_chapters(conn, novel_id):
+        if chapter.adopted_id is not None:
+            adoption = get_adoption(conn, novel_id, chapter.adopted_id)
+            if adoption.chapter_id != chapter.id:
+                problems.append(f"第 {chapter.number} 章的采用记录不属于本章")
+        if chapter.current_snapshot_id is not None:
+            snapshot = get_snapshot(conn, novel_id, chapter.current_snapshot_id)
+            if snapshot.chapter_id != chapter.id or snapshot.status is not SnapshotStatus.READY:
+                problems.append(f"第 {chapter.number} 章的当前状态不是有效快照")
+        if chapter.current_draft_id is not None:
+            version = get_version(conn, novel_id, chapter.current_draft_id)
+            if version.chapter_id != chapter.id:
+                problems.append(f"第 {chapter.number} 章的当前编辑稿不属于本章")
+    return problems

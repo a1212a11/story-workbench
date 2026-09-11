@@ -137,3 +137,56 @@ def write_new(root: Path, relative_path: str, content: str) -> str:
     raise WorkbenchError(
         ErrorCode.STORAGE_FAILED, "无法为新文件找到可用名称。", {"relative_path": relative_path}
     )
+
+
+# ---------------------------------------------------------------- 备份文件处理（R04）
+
+MANIFEST_FILENAME = "manifest.json"
+BACKUP_DIRS = (WORK_DIR, EXPORTS_DIR, RECOVERY_DIR)
+
+
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def snapshot_file_hashes(root: Path) -> dict[str, str]:
+    """列出 work/exports/recovery 下全部普通文件及其摘要；跳过符号链接。"""
+    result: dict[str, str] = {}
+    for name in BACKUP_DIRS:
+        base = root / name
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            result[str(path.relative_to(root))] = _hash_bytes(path.read_bytes())
+    return result
+
+
+def copy_files(root: Path, destination: Path, relative_paths: list[str]) -> dict[str, str]:
+    """把列出的文件复制到目标目录（排他创建），返回复制后的摘要。"""
+    copied: dict[str, str] = {}
+    for rel in relative_paths:
+        data = (root / rel).read_bytes()
+        target = destination / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        copied[rel] = _hash_bytes(data)
+    return copied
+
+
+def require_empty_or_missing(path: Path) -> None:
+    if path.exists():
+        if not path.is_dir() or any(path.iterdir()):
+            raise WorkbenchError(
+                ErrorCode.INVALID_INPUT, "恢复目标必须是空目录或不存在的目录。", {"path": str(path)}
+            )
+
+
+def remove_tree(path: Path) -> None:
+    """只用于清理本次未完成的备份输出。"""
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
