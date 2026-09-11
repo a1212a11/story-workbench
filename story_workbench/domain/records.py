@@ -329,3 +329,115 @@ class RecoveryNotice:
     interrupted_run_ids: tuple[str, ...] = ()
     pending_workcopies: tuple[str, ...] = ()
     notes: tuple[str, ...] = field(default_factory=tuple)
+
+
+# ------------------------------------------------ 检查材料输入（ai 解析后交 database 保存）
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceInput:
+    """来源二选一：本次检查正文（version_id）或同一 basis 的来源（basis_source_id）。"""
+
+    quote: str
+    version_id: str | None = None
+    basis_source_id: str | None = None
+    start: int | None = None
+    end: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IssueInput:
+    kind: IssueKind
+    explanation: str
+    evidence: tuple[EvidenceInput, ...]
+    proposed_change: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateFactInput:
+    kind: FactKind
+    proposition: str
+    evidence_start: int
+    evidence_end: int
+    quote: str
+    subject: str | None = None
+    story_time: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CheckInput:
+    """一次通过结构校验的完整检查结果；空列表也必须显式给出。"""
+
+    coverage_json: str
+    actual_plot: str
+    actual_ending: str
+    issues: tuple[IssueInput, ...]
+    candidate_facts: tuple[CandidateFactInput, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IssueRecord:
+    id: str
+    check_id: str
+    kind: IssueKind
+    explanation: str
+    proposed_change: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CheckRecord:
+    id: str
+    novel_id: str
+    chapter_id: str
+    version_id: str
+    basis_id: str
+    run_id: str
+    actual_plot: str
+    actual_ending: str
+    issues: tuple[IssueRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BasisRecord:
+    id: str
+    novel_id: str
+    chapter_id: str
+    plan_id: str | None
+    previous_snapshot_id: str | None
+    design_revision: int
+    purpose: str
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotRecord:
+    id: str
+    novel_id: str
+    chapter_id: str
+    adoption_id: str
+    status: SnapshotStatus
+    previous_snapshot_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AdoptionRecord:
+    id: str
+    novel_id: str
+    chapter_id: str
+    version_id: str
+    review_id: str
+    request_id: str
+    previous_adoption_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AdoptionContext:
+    """采用校验所需的当前记录，由 database 在事务内读取后交给 rules。"""
+
+    novel: NovelRecord
+    chapter: ChapterRecord
+    check: CheckRecord
+    basis: BasisRecord
+    previous_chapter_snapshot: SnapshotRecord | None
+    previous_chapter_exists: bool
+    existing_adoption_for_request: AdoptionRecord | None
+    current_adoption: AdoptionRecord | None

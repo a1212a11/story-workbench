@@ -16,13 +16,25 @@ from pathlib import Path
 
 from story_workbench.domain import rules
 from story_workbench.domain.records import (
+    AdoptionContext,
+    AdoptionRecord,
+    AdoptionResult,
+    AuthorAction,
+    BasisRecord,
     ChapterRecord,
+    CheckInput,
+    CheckRecord,
     ErrorCode,
+    IssueKind,
+    IssueRecord,
     NovelRecord,
     PlanRecord,
     RunStatus,
     SaveResult,
+    SnapshotRecord,
+    SnapshotStatus,
     SyncStatus,
+    TaskKind,
     VersionOrigin,
     VersionRecord,
     WorkbenchError,
@@ -953,3 +965,596 @@ def commit_mark_runs_interrupted(conn: sqlite3.Connection, novel_id: str) -> tup
                 [(novel_id, i) for i in ids],
             )
     return ids
+
+
+# ---------------------------------------------------------------- 依据、任务与检查（S04）
+
+
+def commit_basis(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    chapter_id: str,
+    plan_id: str | None,
+    previous_snapshot_id: str | None,
+    design_revision: int,
+    purpose: str,
+    sources: list[tuple[str, dict[str, object]]],
+    omitted_json: str = "[]",
+) -> str:
+    """保存一次任务的不可变依据及其来源清单。
+
+    sources 每项为 (role, {version_id|story_item_id|snapshot_id|fact_revision_id|message_id,
+    excerpt_start?, excerpt_end?, quote})；每行恰有一个来源引用，由表约束保证。
+    """
+    basis_id = new_id()
+    with transaction(conn):
+        chapter = get_chapter(conn, novel_id, chapter_id)
+        if plan_id is not None:
+            plan = get_plan(conn, novel_id, plan_id)
+            if plan.chapter_id != chapter_id:
+                raise WorkbenchError(
+                    ErrorCode.WRONG_SCOPE, "计划不属于本章。", {"plan_id": plan_id}
+                )
+        for _role, ref in sources:
+            version_id = ref.get("version_id")
+            if version_id is not None:
+                src = get_version(conn, novel_id, str(version_id))
+                src_chapter = get_chapter(conn, novel_id, src.chapter_id)
+                if src_chapter.number > chapter.number:
+                    raise WorkbenchError(
+                        ErrorCode.WRONG_SCOPE,
+                        "依据不能引用目标章之后的正文。",
+                        {"version_id": version_id, "chapter_number": src_chapter.number},
+                    )
+        conn.execute(
+            "INSERT INTO basis (id, novel_id, created_at, chapter_id, plan_id,"
+            " previous_snapshot_id, design_revision, purpose, omitted_sources_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                basis_id,
+                novel_id,
+                now_utc(),
+                chapter_id,
+                plan_id,
+                previous_snapshot_id,
+                design_revision,
+                purpose,
+                omitted_json,
+            ),
+        )
+        for role, ref in sources:
+            conn.execute(
+                "INSERT INTO basis_source (id, novel_id, created_at, basis_id, version_id,"
+                " story_item_id, snapshot_id, fact_revision_id, message_id, role,"
+                " excerpt_start, excerpt_end, quote)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    novel_id,
+                    now_utc(),
+                    basis_id,
+                    ref.get("version_id"),
+                    ref.get("story_item_id"),
+                    ref.get("snapshot_id"),
+                    ref.get("fact_revision_id"),
+                    ref.get("message_id"),
+                    role,
+                    ref.get("excerpt_start"),
+                    ref.get("excerpt_end"),
+                    ref.get("quote", ""),
+                ),
+            )
+    return basis_id
+
+
+def get_basis(conn: sqlite3.Connection, novel_id: str, basis_id: str) -> BasisRecord:
+    row = conn.execute(
+        "SELECT * FROM basis WHERE novel_id = ? AND id = ?", (novel_id, basis_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "任务依据不存在。", {"basis_id": basis_id})
+    return BasisRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        chapter_id=row["chapter_id"],
+        plan_id=row["plan_id"],
+        previous_snapshot_id=row["previous_snapshot_id"],
+        design_revision=row["design_revision"],
+        purpose=row["purpose"],
+    )
+
+
+def list_basis_source_ids(conn: sqlite3.Connection, novel_id: str, basis_id: str) -> set[str]:
+    rows = conn.execute(
+        "SELECT id FROM basis_source WHERE novel_id = ? AND basis_id = ?", (novel_id, basis_id)
+    ).fetchall()
+    return {r["id"] for r in rows}
+
+
+def commit_run(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    *,
+    chapter_id: str | None,
+    task: TaskKind,
+    source_message_id: str,
+    template_version: str,
+    status: RunStatus,
+    basis_id: str | None = None,
+    input_version_id: str | None = None,
+    retry_of_id: str | None = None,
+    request_json: str = "{}",
+) -> str:
+    """建立一条任务阶段记录。流保存、取消与迟到保护在 G04 补充。"""
+    run_id = new_id()
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO run (id, novel_id, created_at, chapter_id, task, basis_id,"
+            " input_version_id, source_message_id, retry_of_id, status, template_version,"
+            " request_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                novel_id,
+                now_utc(),
+                chapter_id,
+                task.value,
+                basis_id,
+                input_version_id,
+                source_message_id,
+                retry_of_id,
+                status.value,
+                template_version,
+                request_json,
+            ),
+        )
+    return run_id
+
+
+def commit_run_status(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    run_id: str,
+    status: RunStatus,
+    *,
+    error_code: str | None = None,
+    usage_json: str | None = None,
+) -> None:
+    """终态不可回到 running；retry 创建新 run。"""
+    with transaction(conn):
+        row = conn.execute(
+            "SELECT status FROM run WHERE novel_id = ? AND id = ?", (novel_id, run_id)
+        ).fetchone()
+        if row is None:
+            raise WorkbenchError(ErrorCode.NOT_FOUND, "任务不存在。", {"run_id": run_id})
+        current = RunStatus(row["status"])
+        terminal = {
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.INTERRUPTED,
+        }
+        if current in terminal and status is not current:
+            raise WorkbenchError(
+                ErrorCode.INVALID_INPUT,
+                "任务已结束，不能改变状态；重试请新建任务。",
+                {"run_id": run_id, "status": current.value},
+            )
+        conn.execute(
+            "UPDATE run SET status = ?, error_code = COALESCE(?, error_code),"
+            " usage_json = COALESCE(?, usage_json) WHERE novel_id = ? AND id = ?",
+            (status.value, error_code, usage_json, novel_id, run_id),
+        )
+
+
+def commit_check_result(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    chapter_id: str,
+    version_id: str,
+    basis_id: str,
+    run_id: str,
+    payload: CheckInput,
+) -> str:
+    """只保存校验有效的完整结果：每条证据必须逐字匹配本次正文或属于同一依据。
+
+    校验失败抛 MODEL_FAILED 且不写入；run 状态由调用方记录。
+    """
+    check_id = new_id()
+    with transaction(conn):
+        version = get_version(conn, novel_id, version_id)
+        if version.chapter_id != chapter_id:
+            raise WorkbenchError(
+                ErrorCode.WRONG_SCOPE, "正文不属于本章。", {"version_id": version_id}
+            )
+        basis = get_basis(conn, novel_id, basis_id)
+        if basis.chapter_id != chapter_id:
+            raise WorkbenchError(ErrorCode.WRONG_SCOPE, "依据不属于本章。", {"basis_id": basis_id})
+        run_row = conn.execute(
+            "SELECT status FROM run WHERE novel_id = ? AND id = ?", (novel_id, run_id)
+        ).fetchone()
+        if run_row is None:
+            raise WorkbenchError(ErrorCode.NOT_FOUND, "检查任务不存在。", {"run_id": run_id})
+        allowed_sources = list_basis_source_ids(conn, novel_id, basis_id)
+        body = version.body
+        for index, fact in enumerate(payload.candidate_facts):
+            if not rules.validate_span(body, fact.evidence_start, fact.evidence_end, fact.quote):
+                raise WorkbenchError(
+                    ErrorCode.MODEL_FAILED,
+                    "候选事实的原文引用与正文不符，检查结果无效。",
+                    {"candidate_index": index},
+                )
+        for i_index, issue in enumerate(payload.issues):
+            if not issue.evidence:
+                raise WorkbenchError(
+                    ErrorCode.MODEL_FAILED, "问题缺少证据，检查结果无效。", {"issue_index": i_index}
+                )
+            for e_index, ev in enumerate(issue.evidence):
+                if ev.version_id is not None:
+                    if ev.version_id != version_id or ev.start is None or ev.end is None:
+                        raise WorkbenchError(
+                            ErrorCode.MODEL_FAILED,
+                            "问题证据引用了本次检查之外的正文。",
+                            {"issue_index": i_index, "evidence_index": e_index},
+                        )
+                    if not rules.validate_span(body, ev.start, ev.end, ev.quote):
+                        raise WorkbenchError(
+                            ErrorCode.MODEL_FAILED,
+                            "问题证据与正文不符，检查结果无效。",
+                            {"issue_index": i_index, "evidence_index": e_index},
+                        )
+                elif ev.basis_source_id is None or ev.basis_source_id not in allowed_sources:
+                    raise WorkbenchError(
+                        ErrorCode.MODEL_FAILED,
+                        "问题证据引用了不属于本次依据的来源。",
+                        {"issue_index": i_index, "evidence_index": e_index},
+                    )
+        created = now_utc()
+        conn.execute(
+            "INSERT INTO check_result (id, novel_id, created_at, chapter_id, version_id,"
+            " basis_id, run_id, coverage_json, actual_plot, actual_ending)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                check_id,
+                novel_id,
+                created,
+                chapter_id,
+                version_id,
+                basis_id,
+                run_id,
+                payload.coverage_json,
+                payload.actual_plot,
+                payload.actual_ending,
+            ),
+        )
+        for issue in payload.issues:
+            issue_id = new_id()
+            conn.execute(
+                "INSERT INTO issue (id, novel_id, created_at, check_id, kind, explanation,"
+                " proposed_change) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    issue_id,
+                    novel_id,
+                    created,
+                    check_id,
+                    issue.kind.value,
+                    issue.explanation,
+                    issue.proposed_change,
+                ),
+            )
+            for ev in issue.evidence:
+                conn.execute(
+                    "INSERT INTO issue_evidence (id, novel_id, created_at, issue_id, version_id,"
+                    " basis_source_id, start, end, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        new_id(),
+                        novel_id,
+                        created,
+                        issue_id,
+                        ev.version_id,
+                        ev.basis_source_id,
+                        ev.start,
+                        ev.end,
+                        ev.quote,
+                    ),
+                )
+        for fact in payload.candidate_facts:
+            conn.execute(
+                "INSERT INTO candidate_fact (id, novel_id, created_at, check_id, kind, subject,"
+                " proposition, story_time, evidence_start, evidence_end, quote)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    novel_id,
+                    created,
+                    check_id,
+                    fact.kind.value,
+                    fact.subject,
+                    fact.proposition,
+                    fact.story_time,
+                    fact.evidence_start,
+                    fact.evidence_end,
+                    fact.quote,
+                ),
+            )
+    return check_id
+
+
+def get_check(conn: sqlite3.Connection, novel_id: str, check_id: str) -> CheckRecord:
+    row = conn.execute(
+        "SELECT * FROM check_result WHERE novel_id = ? AND id = ?", (novel_id, check_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "检查结果不存在。", {"check_id": check_id})
+    issue_rows = conn.execute(
+        "SELECT * FROM issue WHERE novel_id = ? AND check_id = ? ORDER BY rowid",
+        (novel_id, check_id),
+    ).fetchall()
+    return CheckRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        chapter_id=row["chapter_id"],
+        version_id=row["version_id"],
+        basis_id=row["basis_id"],
+        run_id=row["run_id"],
+        actual_plot=row["actual_plot"],
+        actual_ending=row["actual_ending"],
+        issues=tuple(
+            IssueRecord(
+                id=r["id"],
+                check_id=r["check_id"],
+                kind=IssueKind(r["kind"]),
+                explanation=r["explanation"],
+                proposed_change=r["proposed_change"],
+            )
+            for r in issue_rows
+        ),
+    )
+
+
+# ---------------------------------------------------------------- 采用（S05）
+
+
+def _adoption(row: sqlite3.Row) -> AdoptionRecord:
+    return AdoptionRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        chapter_id=row["chapter_id"],
+        version_id=row["version_id"],
+        review_id=row["review_id"],
+        request_id=row["request_id"],
+        previous_adoption_id=row["previous_adoption_id"],
+    )
+
+
+def get_adoption(conn: sqlite3.Connection, novel_id: str, adoption_id: str) -> AdoptionRecord:
+    row = conn.execute(
+        "SELECT * FROM adoption WHERE novel_id = ? AND id = ?", (novel_id, adoption_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "采用记录不存在。", {"adoption_id": adoption_id})
+    return _adoption(row)
+
+
+def _snapshot(row: sqlite3.Row) -> SnapshotRecord:
+    return SnapshotRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        chapter_id=row["chapter_id"],
+        adoption_id=row["adoption_id"],
+        status=SnapshotStatus(row["status"]),
+        previous_snapshot_id=row["previous_snapshot_id"],
+    )
+
+
+def get_snapshot(conn: sqlite3.Connection, novel_id: str, snapshot_id: str) -> SnapshotRecord:
+    row = conn.execute(
+        "SELECT * FROM snapshot WHERE novel_id = ? AND id = ?", (novel_id, snapshot_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "状态快照不存在。", {"snapshot_id": snapshot_id})
+    return _snapshot(row)
+
+
+def _previous_chapter(
+    conn: sqlite3.Connection, novel_id: str, chapter: ChapterRecord
+) -> ChapterRecord | None:
+    row = conn.execute(
+        "SELECT * FROM chapter WHERE novel_id = ? AND number = ?", (novel_id, chapter.number - 1)
+    ).fetchone()
+    return None if row is None else _chapter(row)
+
+
+def load_adoption_context(conn: sqlite3.Connection, action: AuthorAction) -> AdoptionContext:
+    """读取采用校验所需的当前记录；预检与事务内复核共用。"""
+    novel_id = action.target.novel_id
+    novel = get_novel(conn)
+    if novel is None or novel.id != novel_id:
+        raise WorkbenchError(ErrorCode.WRONG_SCOPE, "采用目标不属于当前作品。")
+    if action.check_id is None:
+        raise WorkbenchError(ErrorCode.REVIEW_REQUIRED, "采用需要一份对应稿件的有效检查。")
+    chapter = get_chapter(conn, novel_id, action.target.chapter_id)
+    check = get_check(conn, novel_id, action.check_id)
+    basis = get_basis(conn, novel_id, check.basis_id)
+    previous = _previous_chapter(conn, novel_id, chapter)
+    previous_snapshot = None
+    if previous is not None and previous.current_snapshot_id is not None:
+        previous_snapshot = get_snapshot(conn, novel_id, previous.current_snapshot_id)
+    existing = conn.execute(
+        "SELECT * FROM adoption WHERE novel_id = ? AND request_id = ?",
+        (novel_id, action.request_id),
+    ).fetchone()
+    current_adoption = (
+        get_adoption(conn, novel_id, chapter.adopted_id) if chapter.adopted_id else None
+    )
+    return AdoptionContext(
+        novel=novel,
+        chapter=chapter,
+        check=check,
+        basis=basis,
+        previous_chapter_snapshot=previous_snapshot,
+        previous_chapter_exists=chapter.number > 1,
+        existing_adoption_for_request=None if existing is None else _adoption(existing),
+        current_adoption=current_adoption,
+    )
+
+
+def commit_adoption(conn: sqlite3.Connection, action: AuthorAction) -> AdoptionResult:
+    """采用事务：重读依据与权限，追加 review/resolution/adoption/candidate snapshot，
+    移动采用指针，使后续章节状态过时并登记影响。模型不在事务内调用。
+
+    重复 request_id 返回原结果；同一当前版本再次采用返回既有 adoption，不清除过时状态。
+    """
+    novel_id = action.target.novel_id
+    with transaction(conn):
+        context = load_adoption_context(conn, action)
+        existing = context.existing_adoption_for_request
+        if existing is not None:
+            return AdoptionResult(
+                adoption_id=existing.id,
+                version_id=existing.version_id,
+                state_status=_state_status_for(conn, novel_id, context.chapter),
+                already_adopted=True,
+            )
+        current = context.current_adoption
+        if current is not None and current.version_id == action.target.version_id:
+            return AdoptionResult(
+                adoption_id=current.id,
+                version_id=current.version_id,
+                state_status=_state_status_for(conn, novel_id, context.chapter),
+                already_adopted=True,
+            )
+        rules.validate_adoption(action, context)
+
+        created = now_utc()
+        chapter = context.chapter
+        review_id = new_id()
+        conn.execute(
+            "INSERT INTO review (id, novel_id, created_at, chapter_id, version_id, check_id,"
+            " basis_id, author_message_id, read_declared, accepted_plot, accepted_ending)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (
+                review_id,
+                novel_id,
+                created,
+                chapter.id,
+                action.target.version_id,
+                context.check.id,
+                context.basis.id,
+                action.source_message_id,
+                action.accepted_plot,
+                action.accepted_ending,
+            ),
+        )
+        for res in action.issue_resolutions:
+            conn.execute(
+                "INSERT INTO resolution (id, novel_id, created_at, review_id, issue_id, action,"
+                " author_message_id, explanation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    novel_id,
+                    created,
+                    review_id,
+                    res.issue_id,
+                    res.action.value,
+                    action.source_message_id,
+                    res.explanation,
+                ),
+            )
+        adoption_id = new_id()
+        conn.execute(
+            "INSERT INTO adoption (id, novel_id, created_at, chapter_id, version_id, review_id,"
+            " previous_adoption_id, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                adoption_id,
+                novel_id,
+                created,
+                chapter.id,
+                action.target.version_id,
+                review_id,
+                chapter.adopted_id,
+                action.request_id,
+            ),
+        )
+        # 本章的候选快照：状态待更新，直到 R01 重算成功才成为 current_snapshot。
+        snapshot_id = new_id()
+        conn.execute(
+            "INSERT INTO snapshot (id, novel_id, created_at, chapter_id, adoption_id, check_id,"
+            " review_id, basis_id, previous_snapshot_id, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate')",
+            (
+                snapshot_id,
+                novel_id,
+                created,
+                chapter.id,
+                adoption_id,
+                context.check.id,
+                review_id,
+                context.basis.id,
+                context.basis.previous_snapshot_id,
+            ),
+        )
+        old_snapshot_id = chapter.current_snapshot_id
+        conn.execute(
+            "UPDATE chapter SET adopted_id = ?, current_snapshot_id = NULL"
+            " WHERE novel_id = ? AND id = ?",
+            (adoption_id, novel_id, chapter.id),
+        )
+        if old_snapshot_id is not None:
+            conn.execute(
+                "UPDATE snapshot SET status = 'stale' WHERE novel_id = ? AND id = ?"
+                " AND status = 'ready'",
+                (novel_id, old_snapshot_id),
+            )
+        # 后续章节：累计快照依赖链保守失效，登记影响并标记待复核。
+        later = conn.execute(
+            "SELECT * FROM chapter WHERE novel_id = ? AND number > ? ORDER BY number",
+            (novel_id, chapter.number),
+        ).fetchall()
+        for row in later:
+            later_chapter = _chapter(row)
+            if later_chapter.adopted_id is None:
+                continue
+            if later_chapter.current_snapshot_id is not None:
+                conn.execute(
+                    "UPDATE snapshot SET status = 'stale' WHERE novel_id = ? AND id = ?"
+                    " AND status = 'ready'",
+                    (novel_id, later_chapter.current_snapshot_id),
+                )
+            conn.execute(
+                "UPDATE chapter SET needs_review = 1 WHERE novel_id = ? AND id = ?",
+                (novel_id, later_chapter.id),
+            )
+            conn.execute(
+                "INSERT INTO impact (id, novel_id, created_at, chapter_id, old_snapshot_id,"
+                " source_adoption_id, reason, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
+                (
+                    new_id(),
+                    novel_id,
+                    created,
+                    later_chapter.id,
+                    later_chapter.current_snapshot_id,
+                    adoption_id,
+                    f"第 {chapter.number} 章重新采用，本章依赖的前文状态需要复核。",
+                ),
+            )
+    return AdoptionResult(
+        adoption_id=adoption_id,
+        version_id=action.target.version_id,
+        state_status=SnapshotStatus.CANDIDATE,
+        already_adopted=False,
+    )
+
+
+def _state_status_for(
+    conn: sqlite3.Connection, novel_id: str, chapter: ChapterRecord
+) -> SnapshotStatus:
+    if chapter.current_snapshot_id is not None:
+        return get_snapshot(conn, novel_id, chapter.current_snapshot_id).status
+    if chapter.adopted_id is None:
+        return SnapshotStatus.CANDIDATE
+    row = conn.execute(
+        "SELECT status FROM snapshot WHERE novel_id = ? AND adoption_id = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (novel_id, chapter.adopted_id),
+    ).fetchone()
+    return SnapshotStatus(row["status"]) if row else SnapshotStatus.CANDIDATE
