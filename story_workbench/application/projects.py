@@ -6,7 +6,16 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from story_workbench.domain.records import ErrorCode, NovelRecord, RecoveryNotice, WorkbenchError
+from story_workbench.domain import rules
+from story_workbench.domain.records import (
+    ErrorCode,
+    NovelRecord,
+    ReconcileOutcome,
+    ReconcileResult,
+    RecoveryNotice,
+    SyncStatus,
+    WorkbenchError,
+)
 from story_workbench.infrastructure import database, files
 
 
@@ -80,3 +89,143 @@ def open_project(path: Path) -> tuple[Project, RecoveryNotice]:
         notes.append("上次有未完成的任务已标记为中断，可以查看后决定是否重试。")
     notice = RecoveryNotice(interrupted_run_ids=interrupted, notes=tuple(notes))
     return Project(root=root, novel=novel, conn=conn, lock=lock), notice
+
+
+# ---------------------------------------------------------------- 工作副本对账（S03）
+
+
+def _workcopy_path(chapter_number: int) -> str:
+    return f"{files.WORK_DIR}/chapter-{chapter_number:03d}.md"
+
+
+def create_workcopy(project: Project, chapter_id: str) -> ReconcileResult:
+    """为章节建立外部工作文件。
+
+    首次用排他创建写入当前编辑稿；若同名文件已存在，先把它作为外部稿导入，绝不覆盖。
+    """
+    chapter = database.get_chapter(project.conn, project.novel_id, chapter_id)
+    existing = database.get_workcopy(project.conn, project.novel_id, chapter_id)
+    if existing is not None:
+        return reconcile_workcopy(project, chapter_id)
+    relative_path = _workcopy_path(chapter.number)
+    observation = files.observe_workcopy(project.root, relative_path, None)
+    if observation.exists:
+        database.commit_workcopy_binding(
+            project.conn,
+            project.novel_id,
+            chapter_id,
+            relative_path,
+            None,
+            None,
+            SyncStatus.PENDING,
+        )
+        return reconcile_workcopy(project, chapter_id)
+    body = ""
+    if chapter.current_draft_id is not None:
+        body = database.get_version(project.conn, project.novel_id, chapter.current_draft_id).body
+    actual = files.write_new(project.root, relative_path, body)
+    database.commit_workcopy_binding(
+        project.conn,
+        project.novel_id,
+        chapter_id,
+        actual,
+        chapter.current_draft_id,
+        rules.content_hash(body),
+        SyncStatus.IN_SYNC,
+    )
+    return ReconcileResult(ReconcileOutcome.IN_SYNC, actual, message="已建立工作文件。")
+
+
+def reconcile_workcopy(project: Project, chapter_id: str) -> ReconcileResult:
+    """读取、生成、采用前调用：外部变化入库为新稿；遇冲突保留两稿，不覆盖文件。"""
+    wc = database.get_workcopy(project.conn, project.novel_id, chapter_id)
+    if wc is None:
+        return ReconcileResult(ReconcileOutcome.NO_WORKCOPY)
+    try:
+        observation = files.observe_workcopy(project.root, wc.relative_path, wc.base_hash)
+    except WorkbenchError as exc:
+        if exc.code is ErrorCode.WORKCOPY_CONFLICT:
+            database.commit_workcopy_status(
+                project.conn, project.novel_id, chapter_id, SyncStatus.PENDING
+            )
+            return ReconcileResult(
+                ReconcileOutcome.UNREADABLE, wc.relative_path, message=exc.message
+            )
+        raise
+    if not observation.exists:
+        if wc.base_hash is not None:
+            database.commit_workcopy_status(
+                project.conn, project.novel_id, chapter_id, SyncStatus.PENDING
+            )
+        return ReconcileResult(
+            ReconcileOutcome.FILE_MISSING,
+            wc.relative_path,
+            message="工作文件不存在；数据库中的稿件保留，未视为清空。",
+        )
+    if observation.decode_error:
+        database.commit_workcopy_status(
+            project.conn, project.novel_id, chapter_id, SyncStatus.PENDING
+        )
+        return ReconcileResult(
+            ReconcileOutcome.UNREADABLE,
+            wc.relative_path,
+            message="工作文件不是 UTF-8 文本，暂不导入；数据库稿件保留。",
+        )
+    if not observation.changed_from_baseline:
+        if wc.sync_status is not SyncStatus.IN_SYNC:
+            database.commit_workcopy_status(
+                project.conn, project.novel_id, chapter_id, SyncStatus.IN_SYNC
+            )
+        return ReconcileResult(ReconcileOutcome.IN_SYNC, wc.relative_path)
+    assert observation.content is not None
+    body = rules.normalize_newlines(observation.content)
+    chapter = database.get_chapter(project.conn, project.novel_id, chapter_id)
+    if chapter.current_draft_id is not None:
+        current = database.get_version(project.conn, project.novel_id, chapter.current_draft_id)
+        if current.content_hash == rules.content_hash(body):
+            # 文件内容已与当前稿一致（例如刚导出后未改），只更新基准，不新建版本。
+            database.commit_workcopy_binding(
+                project.conn,
+                project.novel_id,
+                chapter_id,
+                wc.relative_path,
+                current.id,
+                current.content_hash,
+                SyncStatus.IN_SYNC,
+            )
+            return ReconcileResult(ReconcileOutcome.IN_SYNC, wc.relative_path)
+    result = database.commit_external_import(
+        project.conn, project.novel_id, chapter_id, body, wc.base_version_id
+    )
+    if result.became_current:
+        return ReconcileResult(
+            ReconcileOutcome.IMPORTED,
+            wc.relative_path,
+            imported_version_id=result.version_id,
+            message="发现外部修改，已保存为新稿并作为当前编辑稿。",
+        )
+    return ReconcileResult(
+        ReconcileOutcome.CONFLICT,
+        wc.relative_path,
+        imported_version_id=result.version_id,
+        conflicting_current_id=result.conflicting_current_id,
+        message="外部修改与应用内新稿同时存在，两稿都已保留，请选择要继续的稿件。",
+    )
+
+
+def export_version(project: Project, chapter_id: str, version_id: str) -> str:
+    """把指定版本导出为独立新文件；不触碰工作文件。返回相对路径。"""
+    chapter = database.get_chapter(project.conn, project.novel_id, chapter_id)
+    version = database.get_version(project.conn, project.novel_id, version_id)
+    if version.chapter_id != chapter_id:
+        raise WorkbenchError(ErrorCode.WRONG_SCOPE, "版本不属于该章。", {"version_id": version_id})
+    name = f"{files.EXPORTS_DIR}/chapter-{chapter.number:03d}-{version.id[:8]}.md"
+    return files.write_new(project.root, name, version.body)
+
+
+def write_recovery(project: Project, chapter_id: str, text: str) -> str:
+    """数据库保存失败时把作者输入写成唯一恢复文件；返回相对路径。"""
+    chapter = database.get_chapter(project.conn, project.novel_id, chapter_id)
+    stamp = database.now_utc().replace(":", "").replace("-", "")[:15]
+    name = f"{files.RECOVERY_DIR}/chapter-{chapter.number:03d}-{stamp}.md"
+    return files.write_new(project.root, name, text)

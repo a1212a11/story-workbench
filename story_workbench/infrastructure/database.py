@@ -22,9 +22,11 @@ from story_workbench.domain.records import (
     PlanRecord,
     RunStatus,
     SaveResult,
+    SyncStatus,
     VersionOrigin,
     VersionRecord,
     WorkbenchError,
+    WorkcopyRecord,
 )
 
 SCHEMA_VERSION = 1
@@ -558,6 +560,19 @@ def _version(row: sqlite3.Row) -> VersionRecord:
     )
 
 
+def _workcopy(row: sqlite3.Row) -> WorkcopyRecord:
+    return WorkcopyRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        chapter_id=row["chapter_id"],
+        relative_path=row["relative_path"],
+        base_version_id=row["base_version_id"],
+        base_hash=row["base_hash"],
+        observed_version_id=row["observed_version_id"],
+        sync_status=SyncStatus(row["sync_status"]),
+    )
+
+
 def _plan(row: sqlite3.Row) -> PlanRecord:
     return PlanRecord(
         id=row["id"],
@@ -629,6 +644,13 @@ def list_plans(conn: sqlite3.Connection, novel_id: str, chapter_id: str) -> list
         (novel_id, chapter_id),
     ).fetchall()
     return [_plan(r) for r in rows]
+
+
+def get_workcopy(conn: sqlite3.Connection, novel_id: str, chapter_id: str) -> WorkcopyRecord | None:
+    row = conn.execute(
+        "SELECT * FROM workcopy WHERE novel_id = ? AND chapter_id = ?", (novel_id, chapter_id)
+    ).fetchone()
+    return None if row is None else _workcopy(row)
 
 
 def list_runs_with_status(conn: sqlite3.Connection, novel_id: str, status: RunStatus) -> list[str]:
@@ -731,6 +753,60 @@ def commit_plan(
     )
 
 
+def _insert_version(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    chapter_id: str,
+    body: str,
+    origin: VersionOrigin,
+    parent_id: str | None,
+    expected_current_draft_id: str | None,
+    restored_from_id: str | None,
+    run_id: str | None,
+    move_pointer: bool,
+) -> SaveResult:
+    """事务内的版本追加；调用方负责 transaction()。"""
+    version_id = new_id()
+    chapter = get_chapter(conn, novel_id, chapter_id)
+    for ref, what in ((parent_id, "父版本"), (restored_from_id, "恢复来源")):
+        if ref is not None:
+            ref_row = conn.execute(
+                "SELECT chapter_id FROM version WHERE novel_id = ? AND id = ?", (novel_id, ref)
+            ).fetchone()
+            if ref_row is None or ref_row["chapter_id"] != chapter_id:
+                raise WorkbenchError(
+                    ErrorCode.WRONG_SCOPE, f"{what}不属于本章。", {"version_id": ref}
+                )
+    conn.execute(
+        "INSERT INTO version (id, novel_id, created_at, chapter_id, parent_id,"
+        " restored_from_id, body, content_hash, origin, run_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            version_id,
+            novel_id,
+            now_utc(),
+            chapter_id,
+            parent_id,
+            restored_from_id,
+            body,
+            rules.content_hash(body),
+            origin.value,
+            run_id,
+        ),
+    )
+    became_current = move_pointer and chapter.current_draft_id == expected_current_draft_id
+    if became_current:
+        conn.execute(
+            "UPDATE chapter SET current_draft_id = ? WHERE novel_id = ? AND id = ?",
+            (version_id, novel_id, chapter_id),
+        )
+    return SaveResult(
+        version_id=version_id,
+        became_current=became_current,
+        conflicting_current_id=None if became_current else chapter.current_draft_id,
+    )
+
+
 def commit_version(
     conn: sqlite3.Connection,
     novel_id: str,
@@ -749,46 +825,118 @@ def commit_version(
     版本一定保存；只有当前编辑稿指针仍等于 expected_current_draft_id 且 move_pointer
     为真时才移动指针。基准不符时保留两稿并返回冲突，不丢作者输入、不自动合并。
     """
-    version_id = new_id()
     with transaction(conn):
-        chapter = get_chapter(conn, novel_id, chapter_id)
-        for ref, what in ((parent_id, "父版本"), (restored_from_id, "恢复来源")):
-            if ref is not None:
-                ref_row = conn.execute(
-                    "SELECT chapter_id FROM version WHERE novel_id = ? AND id = ?", (novel_id, ref)
-                ).fetchone()
-                if ref_row is None or ref_row["chapter_id"] != chapter_id:
-                    raise WorkbenchError(
-                        ErrorCode.WRONG_SCOPE, f"{what}不属于本章。", {"version_id": ref}
-                    )
+        return _insert_version(
+            conn,
+            novel_id,
+            chapter_id,
+            body,
+            origin,
+            parent_id,
+            expected_current_draft_id,
+            restored_from_id,
+            run_id,
+            move_pointer,
+        )
+
+
+def commit_workcopy_binding(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    chapter_id: str,
+    relative_path: str,
+    base_version_id: str | None,
+    base_hash: str | None,
+    sync_status: SyncStatus,
+) -> WorkcopyRecord:
+    """建立或更新章节与工作文件的绑定；每章一行。"""
+    with transaction(conn):
+        existing = get_workcopy(conn, novel_id, chapter_id)
+        if existing is None:
+            row_id = new_id()
+            conn.execute(
+                "INSERT INTO workcopy (id, novel_id, created_at, chapter_id, relative_path,"
+                " base_version_id, base_hash, observed_version_id, sync_status)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row_id,
+                    novel_id,
+                    now_utc(),
+                    chapter_id,
+                    relative_path,
+                    base_version_id,
+                    base_hash,
+                    base_version_id,
+                    sync_status.value,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE workcopy SET relative_path = ?, base_version_id = ?, base_hash = ?,"
+                " observed_version_id = ?, sync_status = ? WHERE novel_id = ? AND chapter_id = ?",
+                (
+                    relative_path,
+                    base_version_id,
+                    base_hash,
+                    base_version_id,
+                    sync_status.value,
+                    novel_id,
+                    chapter_id,
+                ),
+            )
+        result = get_workcopy(conn, novel_id, chapter_id)
+    assert result is not None
+    return result
+
+
+def commit_workcopy_status(
+    conn: sqlite3.Connection, novel_id: str, chapter_id: str, sync_status: SyncStatus
+) -> None:
+    with transaction(conn):
         conn.execute(
-            "INSERT INTO version (id, novel_id, created_at, chapter_id, parent_id,"
-            " restored_from_id, body, content_hash, origin, run_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "UPDATE workcopy SET sync_status = ? WHERE novel_id = ? AND chapter_id = ?",
+            (sync_status.value, novel_id, chapter_id),
+        )
+
+
+def commit_external_import(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    chapter_id: str,
+    body: str,
+    base_version_id: str | None,
+) -> SaveResult:
+    """把外部编辑的文件内容导入为 external 版本，并在同一事务更新工作副本基准。
+
+    观察稿仍等于基准时新稿成为当前稿；数据库已有新稿时保留两稿并返回冲突。
+    """
+    with transaction(conn):
+        result = _insert_version(
+            conn,
+            novel_id,
+            chapter_id,
+            body,
+            VersionOrigin.EXTERNAL,
+            base_version_id,
+            base_version_id,
+            None,
+            None,
+            True,
+        )
+        status = SyncStatus.IMPORTED if result.became_current else SyncStatus.CONFLICT
+        conn.execute(
+            "UPDATE workcopy SET base_version_id = ?, base_hash = ?, observed_version_id = ?,"
+            " sync_status = ? WHERE novel_id = ? AND chapter_id = ?",
             (
-                version_id,
-                novel_id,
-                now_utc(),
-                chapter_id,
-                parent_id,
-                restored_from_id,
-                body,
+                result.version_id,
                 rules.content_hash(body),
-                origin.value,
-                run_id,
+                result.version_id,
+                status.value,
+                novel_id,
+                chapter_id,
             ),
         )
-        became_current = move_pointer and chapter.current_draft_id == expected_current_draft_id
-        if became_current:
-            conn.execute(
-                "UPDATE chapter SET current_draft_id = ? WHERE novel_id = ? AND id = ?",
-                (version_id, novel_id, chapter_id),
-            )
-    return SaveResult(
-        version_id=version_id,
-        became_current=became_current,
-        conflicting_current_id=None if became_current else chapter.current_draft_id,
-    )
+    return result
 
 
 def commit_mark_runs_interrupted(conn: sqlite3.Connection, novel_id: str) -> tuple[str, ...]:

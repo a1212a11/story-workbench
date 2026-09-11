@@ -15,6 +15,7 @@ from story_workbench.domain.records import (
 )
 from story_workbench.infrastructure import database
 
+from . import projects
 from .projects import Project
 
 
@@ -65,10 +66,12 @@ def save_plan(
 def save_draft(project: Project, chapter_id: str, text: str, expected: Expected) -> SaveResult:
     """保存作者编辑稿。
 
+    先对账外部工作文件：若外部有修改会先导入为新稿，此时作者本次编辑的基准已过时，
+    本稿仍会保存但不抢占当前稿指针，由入口展示两稿供作者选择。
     编辑基准是 expected.current_draft_id：与章节当前编辑稿一致时新稿成为当前稿；
     不一致时保存为独立稿并返回冲突，不丢作者输入、不自动合并。
-    文件对账（S03）接入后在此之前调用 projects.reconcile_workcopy。
     """
+    projects.reconcile_workcopy(project, chapter_id)
     body = rules.normalize_newlines(text)
     return database.commit_version(
         project.conn,

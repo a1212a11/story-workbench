@@ -291,6 +291,38 @@ class NovelRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkcopyRecord:
+    id: str
+    novel_id: str
+    chapter_id: str
+    relative_path: str
+    base_version_id: str | None
+    base_hash: str | None
+    observed_version_id: str | None
+    sync_status: SyncStatus
+
+
+class ReconcileOutcome(StrEnum):
+    NO_WORKCOPY = "no_workcopy"
+    IN_SYNC = "in_sync"
+    IMPORTED = "imported"
+    CONFLICT = "conflict"
+    FILE_MISSING = "file_missing"
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileResult:
+    """一次文件对账的结果；imported_version_id 只在导入了新稿时有值。"""
+
+    outcome: ReconcileOutcome
+    relative_path: str | None = None
+    imported_version_id: str | None = None
+    conflicting_current_id: str | None = None
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryNotice:
     """打开项目时向作者报告的恢复提示。"""
 

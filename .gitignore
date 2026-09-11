@@ -22,3 +22,6 @@ project.lock
 # 密钥与本地配置
 .env
 .env.*
+
+# Claude Code 本地 worktree 与会话文件
+.claude/
