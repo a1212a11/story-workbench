@@ -58,8 +58,12 @@ def require_same_scope(expected_novel_id: str, actual_novel_id: str, what: str) 
 
 
 def validate_span(body: str, start: int, end: int, quote: str) -> bool:
-    """证据区间按 Python 字符索引 [start, end)，必须与原文逐字一致。"""
-    return 0 <= start < end <= len(body) and body[start:end] == quote
+    """validate_evidence_span 的布尔形式，供事务内逐条校验后统一报 MODEL_FAILED。"""
+    try:
+        validate_evidence_span(body, start, end, quote)
+    except WorkbenchError:
+        return False
+    return True
 
 
 _AUTHORIZATION_REQUIRED_KINDS = {
@@ -187,3 +191,36 @@ def compute_snapshot(
         if fact.kind is FactKind.UNCERTAIN:
             questions.append(fact.proposition)
     return SnapshotDraft(facts=tuple(facts), open_questions=tuple(questions))
+
+
+def validate_evidence_span(body: str, start: int, end: int, quote: str) -> None:
+    """证据区间必须按 Python 字符索引与正文准确匹配：body[start:end] == quote。
+
+    失败抛 INVALID_INPUT，details 只带定位信息，不带正文或引用全文。
+    模型返回的载荷由 ai/tasks 转记为 MODEL_FAILED；作者纠正直接使用本错误。
+    """
+    length = len(body)
+    if start < 0 or end < start or end > length:
+        raise WorkbenchError(
+            ErrorCode.INVALID_INPUT,
+            "证据区间超出正文范围。",
+            {"start": start, "end": end, "body_length": length, "reason": "span_out_of_range"},
+        )
+    if not quote:
+        raise WorkbenchError(
+            ErrorCode.INVALID_INPUT,
+            "证据引用不能为空。",
+            {"start": start, "end": end, "body_length": length, "reason": "empty_quote"},
+        )
+    if body[start:end] != quote:
+        raise WorkbenchError(
+            ErrorCode.INVALID_INPUT,
+            "证据引用与正文区间不一致。",
+            {
+                "start": start,
+                "end": end,
+                "body_length": length,
+                "quote_length": len(quote),
+                "reason": "quote_mismatch",
+            },
+        )
