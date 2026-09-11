@@ -308,11 +308,13 @@ def write_chapter(
     cancel: CancelSignal | None = None,
     on_text: OnText | None = None,
     retry_of: str | None = None,
+    as_candidate: bool = False,
 ) -> DraftResult:
     """正式写作或试写：对账、构建上下文、保存依据与 run、流式生成、保存结果、独立检查。
 
     不采用。缺口与假设在生成前已由 build_context 计算并写入 run.request_json。
     检查失败保留正文与失败原因，返回 check_id=None。
+    as_candidate=True 时结果只作候选稿，不替换当前编辑稿（用于诊断后的试改）。
     """
     projects.reconcile_workcopy(project, chapter_id)
     _ensure_idle(project)
@@ -383,7 +385,13 @@ def write_chapter(
             {"run_id": run_id, "status": final.value},
         )
     result = database.commit_run_result(
-        project.conn, project.novel_id, run_id, body, chapter.current_draft_id, usage_json
+        project.conn,
+        project.novel_id,
+        run_id,
+        body,
+        chapter.current_draft_id,
+        usage_json,
+        move_pointer=not as_candidate,
     )
     if result is None:
         raise WorkbenchError(
@@ -400,8 +408,123 @@ def write_chapter(
     return DraftResult(
         version_id=result.version_id,
         run_id=run_id,
-        based_on_old_inputs=not result.became_current,
+        based_on_old_inputs=not result.became_current and not as_candidate,
         check_id=check_id,
+    )
+
+
+def diagnose_draft(
+    project: Project,
+    target: Target,
+    author_feedback: str,
+    clients: Clients,
+    config: GenerationConfig,
+    *,
+    cancel: CancelSignal | None = None,
+) -> tuple[str, tasks.DiagnosisPayload]:
+    """按作者请求做阅读体验诊断：返回问题证据、修改选项与需授权的新设定；不生成改稿。
+
+    作者反馈只作为本次稿件的消息保存，不升级为整书规则。返回 (作者消息 ID, 诊断)。
+    """
+    if target.novel_id != project.novel_id:
+        raise WorkbenchError(ErrorCode.WRONG_SCOPE, "稿件不属于当前作品。")
+    version = database.get_version(project.conn, project.novel_id, target.version_id)
+    if version.chapter_id != target.chapter_id:
+        raise WorkbenchError(ErrorCode.WRONG_SCOPE, "稿件不属于该章。")
+    author_message_id = database.commit_message(
+        project.conn, project.novel_id, MessageRole.AUTHOR.value, author_feedback, target.chapter_id
+    )
+    _ensure_idle(project)
+    context = build_context(project, target.chapter_id, WriteMode.EXPLORATORY, config)
+    basis_id = save_basis(project, context, "diagnose")
+    request = _request(
+        TaskKind.DIAGNOSE,
+        basis_id,
+        author_message_id,
+        input_version_id=target.version_id,
+        output_limit=config.options.max_output_tokens,
+    )
+    run_id = database.commit_run(
+        project.conn,
+        project.novel_id,
+        chapter_id=target.chapter_id,
+        task=TaskKind.DIAGNOSE,
+        source_message_id=author_message_id,
+        template_version=prompts.TEMPLATE_VERSION,
+        status=RunStatus.RUNNING,
+        basis_id=basis_id,
+        input_version_id=target.version_id,
+        request_json=_request_json(request, {"feedback": author_feedback}),
+    )
+    try:
+        payload = tasks.diagnose(
+            request,
+            context,
+            version.body,
+            clients.complete,
+            options=config.options,
+            cancel=cancel or CancelSignal(),
+        )
+    except WorkbenchError as exc:
+        database.commit_run_status(
+            project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code=exc.code.value
+        )
+        raise
+    run = database.get_run(project.conn, project.novel_id, run_id)
+    if run.status is not RunStatus.RUNNING:
+        raise WorkbenchError(ErrorCode.MODEL_FAILED, "诊断已取消。", {"run_id": run_id})
+    summary = _diagnosis_text(payload)
+    database.commit_message(
+        project.conn, project.novel_id, MessageRole.MODEL.value, summary, target.chapter_id
+    )
+    database.commit_run_status(
+        project.conn,
+        project.novel_id,
+        run_id,
+        RunStatus.SUCCEEDED,
+        usage_json=json.dumps(payload.usage),
+    )
+    return author_message_id, payload
+
+
+def _diagnosis_text(payload: tasks.DiagnosisPayload) -> str:
+    lines = [f"诊断：{payload.verdict}"]
+    for problem in payload.problems:
+        quotes = "；".join(e.quote for e in problem.evidence)
+        lines.append(f"问题：{problem.explanation}（原文：{quotes}）")
+    for option in payload.options:
+        flag = "（需新增设定授权）" if option.requires_new_setting else ""
+        lines.append(f"可选修改：{option.description}{flag}")
+    for setting in payload.new_settings_requiring_authorization:
+        lines.append(f"需授权的新设定：{setting}")
+    return "\n".join(lines)
+
+
+def revise_draft(
+    project: Project,
+    target: Target,
+    chosen_option: str,
+    source_message_id: str,
+    clients: Clients,
+    config: GenerationConfig,
+    *,
+    cancel: CancelSignal | None = None,
+    on_text: OnText | None = None,
+) -> DraftResult:
+    """作者选定修改方向后生成候选稿：试写模式、结果不替换当前编辑稿、不采用。"""
+    if target.novel_id != project.novel_id:
+        raise WorkbenchError(ErrorCode.WRONG_SCOPE, "稿件不属于当前作品。")
+    return write_chapter(
+        project,
+        target.chapter_id,
+        WriteMode.EXPLORATORY,
+        source_message_id,
+        clients,
+        config,
+        assumptions=(f"按作者选定的修改方向重写：{chosen_option}",),
+        cancel=cancel,
+        on_text=on_text,
+        as_candidate=True,
     )
 
 

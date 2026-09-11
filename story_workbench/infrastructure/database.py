@@ -2172,10 +2172,13 @@ def commit_run_result(
     body: str,
     expected_current_draft_id: str | None,
     usage_json: str | None,
+    *,
+    move_pointer: bool = True,
 ) -> SaveResult | None:
     """生成完成：run 仍 running 时创建唯一结果版本并标 succeeded；否则（已取消/中断）返回 None。
 
     若输入已变（当前编辑稿与任务开始时不同），保存为历史草稿并不移动指针。
+    move_pointer=False 时结果只作候选稿（例如试改），不替换当前编辑稿。
     """
     with transaction(conn):
         run = get_run(conn, novel_id, run_id)
@@ -2196,7 +2199,7 @@ def commit_run_result(
             expected_current_draft_id,
             None,
             run_id,
-            True,
+            move_pointer,
         )
         conn.execute(
             "UPDATE run SET status = 'succeeded', result_version_id = ?, partial_text = ?,"

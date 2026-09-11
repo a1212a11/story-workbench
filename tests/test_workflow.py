@@ -679,3 +679,81 @@ def test_revalidation_with_unresolved_setting_keeps_chapter_pending(project):
     with pytest.raises(WorkbenchError) as wrong:
         _revalidate(project, ch2.id, other.version_id, cid_other)
     assert wrong.value.code is ErrorCode.INVALID_INPUT
+
+
+# ---------------------------------------------------------------- T12 阅读体验诊断与试改
+
+
+def diagnosis_json(body: str, quote: str) -> str:
+    return json.dumps(
+        {
+            "verdict": "开头平铺直叙，缺少悬念。",
+            "problems": [
+                {
+                    "explanation": "第一句直接交代结果，读者没有期待。",
+                    "evidence": [evidence(body, quote)],
+                }
+            ],
+            "options": [
+                {
+                    "description": "先写灯影，再让尸体从阴影里显出来。",
+                    "requires_new_setting": False,
+                },
+                {"description": "让沈砚认出尸体身上的师门信物。", "requires_new_setting": True},
+            ],
+            "new_settings_requiring_authorization": ["师门信物"],
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_t12_diagnosis_and_trial_revision_keep_original_and_do_not_change_rules(project):
+    ch1, msg1 = plan_chapter(project, 1, "调查旧井", "看到尸体")
+    body = "井底有一具尸体。沈砚把灯搁在井沿。"
+    r = generation.write_chapter(
+        project,
+        ch1.id,
+        WriteMode.FORMAL,
+        msg1,
+        clients_for(body, inspection_json(body, plot="调查旧井", ending="看到尸体")),
+        CONFIG,
+    )
+    target = Target(project.novel_id, ch1.id, r.version_id)
+    rules_before = authoring.list_story_items(project)
+    # 诊断：有证据、有选项、需授权设定单列；不生成改稿、不改规则
+    clients = generation.Clients(
+        stream=fixed_stream(["x"]),
+        complete=fixed_complete(diagnosis_json(body, "井底有一具尸体。")),
+    )
+    feedback_id, payload = generation.diagnose_draft(
+        project, target, "没意思，帮我看看节奏。", clients, CONFIG
+    )
+    assert payload.problems[0].evidence[0].quote == "井底有一具尸体。"
+    assert [o.requires_new_setting for o in payload.options] == [False, True]
+    assert payload.new_settings_requiring_authorization == ("师门信物",)
+    assert len(authoring.list_versions(project, ch1.id)) == 1
+    assert authoring.list_story_items(project) == rules_before
+    msgs = database.list_messages(project.conn, project.novel_id)
+    assert msgs[-2].body == "没意思，帮我看看节奏。" and msgs[-1].body.startswith("诊断：")
+    # 试改：候选稿不替换当前稿，原稿仍在；作者可保留或拒绝
+    revised = "灯影落稳之后，井壁下那团灰衣才慢慢显出人形。"
+    clients2 = clients_for(revised, inspection_json(revised, plot="调查旧井", ending="看到尸体"))
+    r2 = generation.revise_draft(
+        project, target, payload.options[0].description, feedback_id, clients2, CONFIG
+    )
+    assert authoring.get_chapter(project, ch1.id).current_draft_id == r.version_id
+    bodies = [v.body for v in authoring.list_versions(project, ch1.id)]
+    assert bodies == [body, revised]
+    run = database.get_run(project.conn, project.novel_id, r2.run_id)
+    assert "按作者选定的修改方向重写" in json.loads(run.request_json)["assumptions"][0]
+    # 作者不满意可拒绝候选稿，原稿不受影响
+    reject_msg = authoring.record_message(project, "还是不喜欢，不要这版。", ch1.id)
+    authoring.reject_draft(project, Target(project.novel_id, ch1.id, r2.version_id), reject_msg)
+    assert authoring.get_chapter(project, ch1.id).current_draft_id == r.version_id
+    # 作者喜欢则可选它为当前稿再走检查采用
+    authoring.choose_current_draft(
+        project,
+        Target(project.novel_id, ch1.id, r2.version_id),
+        Expected(current_draft_id=r.version_id),
+    )
+    assert authoring.get_chapter(project, ch1.id).current_draft_id == r2.version_id
