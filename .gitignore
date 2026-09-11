@@ -1,0 +1,24 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# 会话与运行期状态
+.omx/state/
+
+# 本地小说项目数据（测试与试用时生成）
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+project.lock
+
+# 密钥与本地配置
+.env
+.env.*

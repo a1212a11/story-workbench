@@ -4,10 +4,11 @@ AI 小说创作与故事工程系统。作者决定故事，AI 帮助讨论、�
 
 当前阶段：需求与方案整理，尚未实现应用。
 
-交付方向：先用本地 CLI 验证创作流程，产品稳定后再做 UI。建议使用 Python、Markdown 正文和 SQLite；模型供应商待定。
+交付方向：先用本地 CLI 验证创作流程，产品稳定后再做 UI。建议使用 Python、Markdown 正文和 SQLite；模型供应商待定。Python 包与环境管理采用 uv，测试采用 pytest（已确定，待初始化）。
 
 ## 文档
 
+- [技术选型](docs/technology-decisions.md)：已确定工具、推荐依赖及选择理由，含审稿 Agent 与资料查阅的扩展方向。
 - [项目计划与进度](docs/project-plan.md)：任务依赖、交付物、完成条件与勾选状态；已完成项附证据，应用开发待开始。
 - [代码架构设计 V0.2](docs/code-architecture.md)：逻辑职责、数据所有权、依赖边界、模块接口、状态转换与恢复；实现前设计，尚无应用代码。
 - [需求基线](docs/requirements.md)：产品边界、功能需求、权限规则与验收场景。
