@@ -1,6 +1,6 @@
-"""启动入口：解析参数、装配项目资源、退出与清理。
+"""启动入口：解析参数、装配终端输入与项目资源、退出与清理。
 
-首期只提供 --help 和项目目录参数校验；作品交互入口随 C 阶段接入。
+作者交互见 cli.run；此处只负责确认终端可用并把项目目录交给 CLI。
 """
 
 from __future__ import annotations
@@ -32,9 +32,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.project is None:
         build_parser().print_help()
         return 0
-    print("作者交互入口尚未接入；当前只完成参数解析。", file=sys.stderr)
-    print(f"项目目录：{args.project}", file=sys.stderr)
-    return 2
+    try:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError, OSError):
+        interactive = False
+    if not interactive:
+        print("创作工作台需要在交互终端里运行。", file=sys.stderr)
+        print(f"项目目录：{args.project}", file=sys.stderr)
+        return 2
+
+    from story_workbench import cli
+
+    return cli.run(args.project)
 
 
 if __name__ == "__main__":
