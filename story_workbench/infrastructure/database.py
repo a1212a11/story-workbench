@@ -21,16 +21,22 @@ from story_workbench.domain.records import (
     AdoptionResult,
     AuthorAction,
     BasisRecord,
+    CandidateFactRecord,
     ChapterRecord,
     CheckInput,
     CheckRecord,
     ErrorCode,
+    FactCorrection,
+    FactKind,
     IssueKind,
     IssueRecord,
     NovelRecord,
     PlanRecord,
     RunStatus,
     SaveResult,
+    SnapshotChain,
+    SnapshotDraft,
+    SnapshotFactRef,
     SnapshotRecord,
     SnapshotStatus,
     SyncStatus,
@@ -1558,3 +1564,257 @@ def _state_status_for(
         (novel_id, chapter.adopted_id),
     ).fetchone()
     return SnapshotStatus(row["status"]) if row else SnapshotStatus.CANDIDATE
+
+
+# ---------------------------------------------------------------- 快照与纠正（R01）
+
+
+def list_candidate_facts(
+    conn: sqlite3.Connection, novel_id: str, check_id: str
+) -> tuple[CandidateFactRecord, ...]:
+    rows = conn.execute(
+        "SELECT * FROM candidate_fact WHERE novel_id = ? AND check_id = ? ORDER BY rowid",
+        (novel_id, check_id),
+    ).fetchall()
+    return tuple(
+        CandidateFactRecord(
+            id=r["id"],
+            check_id=r["check_id"],
+            kind=FactKind(r["kind"]),
+            proposition=r["proposition"],
+            evidence_start=r["evidence_start"],
+            evidence_end=r["evidence_end"],
+            quote=r["quote"],
+            subject=r["subject"],
+            story_time=r["story_time"],
+        )
+        for r in rows
+    )
+
+
+def get_fact_heads(
+    conn: sqlite3.Connection, novel_id: str, candidate_ids: tuple[str, ...]
+) -> dict[str, str]:
+    if not candidate_ids:
+        return {}
+    marks = ",".join("?" for _ in candidate_ids)
+    rows = conn.execute(
+        f"SELECT candidate_id, current_revision_id FROM fact_head"
+        f" WHERE novel_id = ? AND candidate_id IN ({marks})",
+        (novel_id, *candidate_ids),
+    ).fetchall()
+    return {r["candidate_id"]: r["current_revision_id"] for r in rows}
+
+
+def list_snapshot_facts(
+    conn: sqlite3.Connection, novel_id: str, snapshot_id: str
+) -> tuple[SnapshotFactRef, ...]:
+    rows = conn.execute(
+        "SELECT candidate_id, fact_revision_id FROM snapshot_fact"
+        " WHERE novel_id = ? AND snapshot_id = ? ORDER BY rowid",
+        (novel_id, snapshot_id),
+    ).fetchall()
+    return tuple(
+        SnapshotFactRef(candidate_id=r["candidate_id"], fact_revision_id=r["fact_revision_id"])
+        for r in rows
+    )
+
+
+def get_snapshot_check_id(conn: sqlite3.Connection, novel_id: str, snapshot_id: str) -> str:
+    row = conn.execute(
+        "SELECT check_id FROM snapshot WHERE novel_id = ? AND id = ?", (novel_id, snapshot_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "状态快照不存在。", {"snapshot_id": snapshot_id})
+    return row["check_id"]
+
+
+def latest_snapshot_for_adoption(
+    conn: sqlite3.Connection, novel_id: str, adoption_id: str
+) -> SnapshotRecord | None:
+    row = conn.execute(
+        "SELECT * FROM snapshot WHERE novel_id = ? AND adoption_id = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (novel_id, adoption_id),
+    ).fetchone()
+    return None if row is None else _snapshot(row)
+
+
+def commit_snapshot(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    snapshot_id: str,
+    draft: SnapshotDraft,
+    expected_chain: SnapshotChain,
+) -> SnapshotStatus:
+    """比较整个来源链后提交：匹配则 ready 并成为章节当前状态；不匹配只存历史（stale）。"""
+    with transaction(conn):
+        snapshot = get_snapshot(conn, novel_id, snapshot_id)
+        if snapshot.status is SnapshotStatus.READY:
+            return SnapshotStatus.READY
+        chapter = get_chapter(conn, novel_id, snapshot.chapter_id)
+        previous = _previous_chapter(conn, novel_id, chapter)
+        previous_current = None if previous is None else previous.current_snapshot_id
+        heads = get_fact_heads(conn, novel_id, tuple(c for c, _ in expected_chain.head_revisions))
+        chain_ok = (
+            chapter.adopted_id == expected_chain.adoption_id == snapshot.adoption_id
+            and previous_current == expected_chain.previous_snapshot_id
+            and snapshot.previous_snapshot_id == expected_chain.previous_snapshot_id
+            and all(heads.get(c) == r for c, r in expected_chain.head_revisions)
+            and (previous is None or previous_current is not None)
+        )
+        if previous is not None and previous_current is not None:
+            chain_ok = chain_ok and (
+                get_snapshot(conn, novel_id, previous_current).status is SnapshotStatus.READY
+            )
+        if not chain_ok:
+            conn.execute(
+                "UPDATE snapshot SET status = 'stale' WHERE novel_id = ? AND id = ?",
+                (novel_id, snapshot_id),
+            )
+            return SnapshotStatus.STALE
+        created = now_utc()
+        for ref in draft.facts:
+            conn.execute(
+                "INSERT INTO snapshot_fact (id, novel_id, created_at, snapshot_id, candidate_id,"
+                " fact_revision_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (new_id(), novel_id, created, snapshot_id, ref.candidate_id, ref.fact_revision_id),
+            )
+        conn.execute(
+            "UPDATE snapshot SET status = 'ready', error_code = NULL WHERE novel_id = ? AND id = ?",
+            (novel_id, snapshot_id),
+        )
+        conn.execute(
+            "UPDATE chapter SET current_snapshot_id = ? WHERE novel_id = ? AND id = ?",
+            (snapshot_id, novel_id, chapter.id),
+        )
+    return SnapshotStatus.READY
+
+
+def commit_snapshot_failed(
+    conn: sqlite3.Connection, novel_id: str, snapshot_id: str, error_code: str
+) -> None:
+    with transaction(conn):
+        conn.execute(
+            "UPDATE snapshot SET status = 'failed', error_code = ? WHERE novel_id = ? AND id = ?"
+            " AND status IN ('candidate', 'failed')",
+            (error_code, novel_id, snapshot_id),
+        )
+
+
+def commit_snapshot_retry(conn: sqlite3.Connection, novel_id: str, failed_snapshot_id: str) -> str:
+    """为失败或过时的快照建立新的候选记录（同一采用），不新增采用。"""
+    new_snapshot_id = new_id()
+    with transaction(conn):
+        old = conn.execute(
+            "SELECT * FROM snapshot WHERE novel_id = ? AND id = ?", (novel_id, failed_snapshot_id)
+        ).fetchone()
+        if old is None:
+            raise WorkbenchError(ErrorCode.NOT_FOUND, "状态快照不存在。")
+        chapter = get_chapter(conn, novel_id, old["chapter_id"])
+        previous = _previous_chapter(conn, novel_id, chapter)
+        conn.execute(
+            "INSERT INTO snapshot (id, novel_id, created_at, chapter_id, adoption_id, check_id,"
+            " review_id, basis_id, previous_snapshot_id, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate')",
+            (
+                new_snapshot_id,
+                novel_id,
+                now_utc(),
+                old["chapter_id"],
+                old["adoption_id"],
+                old["check_id"],
+                old["review_id"],
+                old["basis_id"],
+                None if previous is None else previous.current_snapshot_id,
+            ),
+        )
+    return new_snapshot_id
+
+
+def commit_fact_correction(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    candidate_id: str,
+    correction: FactCorrection,
+    author_message_id: str,
+    expected_head_revision_id: str | None,
+) -> str:
+    """追加 fact_revision 并原子更新 fact_head；使用该候选的 ready 快照过时。"""
+    revision_id = new_id()
+    with transaction(conn):
+        cand = conn.execute(
+            "SELECT check_id FROM candidate_fact WHERE novel_id = ? AND id = ?",
+            (novel_id, candidate_id),
+        ).fetchone()
+        if cand is None:
+            raise WorkbenchError(
+                ErrorCode.NOT_FOUND, "候选事实不存在。", {"candidate_id": candidate_id}
+            )
+        check = get_check(conn, novel_id, cand["check_id"])
+        body = get_version(conn, novel_id, check.version_id).body
+        if not rules.validate_span(
+            body, correction.evidence_start, correction.evidence_end, correction.quote
+        ):
+            raise WorkbenchError(ErrorCode.INVALID_INPUT, "纠正的原文引用与正文不符。")
+        head = conn.execute(
+            "SELECT current_revision_id FROM fact_head WHERE novel_id = ? AND candidate_id = ?",
+            (novel_id, candidate_id),
+        ).fetchone()
+        current_head = None if head is None else head["current_revision_id"]
+        if current_head != expected_head_revision_id:
+            raise WorkbenchError(
+                ErrorCode.STALE_BASIS,
+                "这条事实已有更新的纠正，请查看后再操作。",
+                {"current_revision_id": current_head},
+            )
+        created = now_utc()
+        conn.execute(
+            "INSERT INTO fact_revision (id, novel_id, created_at, candidate_id,"
+            " previous_revision_id, kind, subject, proposition, story_time, evidence_start,"
+            " evidence_end, quote, author_message_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                revision_id,
+                novel_id,
+                created,
+                candidate_id,
+                current_head,
+                correction.kind.value,
+                correction.subject,
+                correction.proposition,
+                correction.story_time,
+                correction.evidence_start,
+                correction.evidence_end,
+                correction.quote,
+                author_message_id,
+            ),
+        )
+        if head is None:
+            conn.execute(
+                "INSERT INTO fact_head (id, novel_id, created_at, candidate_id,"
+                " current_revision_id) VALUES (?, ?, ?, ?, ?)",
+                (new_id(), novel_id, created, candidate_id, revision_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE fact_head SET current_revision_id = ?"
+                " WHERE novel_id = ? AND candidate_id = ?",
+                (revision_id, novel_id, candidate_id),
+            )
+        # 依赖该候选（原始或旧修订）的 ready 快照过时；历史快照仍引用旧修订，不漂移。
+        conn.execute(
+            "UPDATE snapshot SET status = 'stale' WHERE novel_id = ? AND status = 'ready'"
+            " AND id IN ("
+            " SELECT sf.snapshot_id FROM snapshot_fact sf"
+            " LEFT JOIN fact_revision fr ON fr.id = sf.fact_revision_id"
+            " WHERE sf.novel_id = ? AND (sf.candidate_id = ? OR fr.candidate_id = ?))",
+            (novel_id, novel_id, candidate_id, candidate_id),
+        )
+        conn.execute(
+            "UPDATE chapter SET current_snapshot_id = NULL WHERE novel_id = ?"
+            " AND current_snapshot_id IN"
+            " (SELECT id FROM snapshot WHERE novel_id = ? AND status = 'stale')",
+            (novel_id, novel_id),
+        )
+    return revision_id

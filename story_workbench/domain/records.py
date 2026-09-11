@@ -441,3 +441,42 @@ class AdoptionContext:
     previous_chapter_exists: bool
     existing_adoption_for_request: AdoptionRecord | None
     current_adoption: AdoptionRecord | None
+
+
+# ------------------------------------------------ 快照计算（R01）
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateFactRecord:
+    id: str
+    check_id: str
+    kind: FactKind
+    proposition: str
+    evidence_start: int
+    evidence_end: int
+    quote: str
+    subject: str | None = None
+    story_time: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotFactRef:
+    """二选一：原始候选或作者纠正后的有效修订。"""
+
+    candidate_id: str | None = None
+    fact_revision_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotChain:
+    """提交快照前必须逐项比较的来源链；任一变化即 stale。"""
+
+    adoption_id: str
+    previous_snapshot_id: str | None
+    head_revisions: tuple[tuple[str, str | None], ...]  # (candidate_id, current_revision_id)
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotDraft:
+    facts: tuple[SnapshotFactRef, ...]
+    open_questions: tuple[str, ...]

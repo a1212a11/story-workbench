@@ -7,9 +7,13 @@ import hashlib
 from story_workbench.domain.records import (
     AdoptionContext,
     AuthorAction,
+    CandidateFactRecord,
     ErrorCode,
+    FactKind,
     IssueKind,
     ResolutionAction,
+    SnapshotDraft,
+    SnapshotFactRef,
     SnapshotStatus,
     WorkbenchError,
     WriteMode,
@@ -157,3 +161,29 @@ def validate_adoption(action: AuthorAction, current: AdoptionContext) -> None:
         raise WorkbenchError(
             ErrorCode.REVIEW_REQUIRED, "试写稿采用时需要明确接受探索出的剧情与结尾。"
         )
+
+
+# ---------------------------------------------------------------- 快照计算
+
+
+def compute_snapshot(
+    reviewed_facts: tuple[CandidateFactRecord, ...],
+    corrections: dict[str, str],
+    previous_facts: tuple[SnapshotFactRef, ...],
+) -> SnapshotDraft:
+    """章节边界的全量事实快照：继承前章事实，加入本章已审阅候选及其有效纠正。
+
+    不做“后写覆盖前写”的字典合并；不同主体、不同故事时间、不确定项都保留。
+    corrections 是 candidate_id → 有效 fact_revision_id。不查询、不写入、不调用模型。
+    """
+    facts: list[SnapshotFactRef] = list(previous_facts)
+    questions: list[str] = []
+    for fact in reviewed_facts:
+        revision = corrections.get(fact.id)
+        if revision is not None:
+            facts.append(SnapshotFactRef(fact_revision_id=revision))
+        else:
+            facts.append(SnapshotFactRef(candidate_id=fact.id))
+        if fact.kind is FactKind.UNCERTAIN:
+            questions.append(fact.proposition)
+    return SnapshotDraft(facts=tuple(facts), open_questions=tuple(questions))

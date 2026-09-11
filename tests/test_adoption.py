@@ -9,6 +9,7 @@ import pytest
 
 from story_workbench.application import adoption, authoring
 from story_workbench.application.projects import create_project, create_workcopy, open_project
+from story_workbench.domain import rules
 from story_workbench.domain.records import (
     AuthorAction,
     CandidateFactInput,
@@ -260,8 +261,10 @@ def test_t01_old_review_cannot_adopt_new_draft(project, planned_chapter):
     # 对第一稿本身采用可以成功，一次动作完成已读与采用
     result = adoption.adopt(project, _action(project, ch, v1.version_id, check1))
     assert not result.already_adopted
-    assert result.state_status is SnapshotStatus.CANDIDATE
-    assert authoring.get_chapter(project, ch.id).adopted_id == result.adoption_id
+    assert result.state_status is SnapshotStatus.READY
+    ch_after = authoring.get_chapter(project, ch.id)
+    assert ch_after.adopted_id == result.adoption_id
+    assert ch_after.current_snapshot_id is not None
 
 
 def test_t02_repeat_adoption_is_idempotent_and_restore_needs_new_adoption(project, planned_chapter):
@@ -439,11 +442,21 @@ def test_fake_evidence_makes_check_invalid_and_unsaved(project, planned_chapter)
     )
 
 
-def test_chapter_two_needs_ready_snapshot_of_chapter_one(project, planned_chapter):
+def test_chapter_two_blocked_until_chapter_one_state_ready(project, planned_chapter, monkeypatch):
     ch1 = planned_chapter
     v1 = authoring.save_draft(project, ch1.id, "第一章正文", Expected())
     check1, _ = _check_for(project, ch1, v1.version_id)
-    adoption.adopt(project, _action(project, ch1, v1.version_id, check1))  # 状态待更新
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("模拟重算超时")
+
+    monkeypatch.setattr(rules, "compute_snapshot", boom)
+    first = adoption.adopt(project, _action(project, ch1, v1.version_id, check1))
+    assert first.state_status is SnapshotStatus.FAILED  # 采用保留，状态待更新
+    ch1_now = authoring.get_chapter(project, ch1.id)
+    assert ch1_now.adopted_id == first.adoption_id and ch1_now.current_snapshot_id is None
+    monkeypatch.undo()
+
     ch2 = authoring.create_chapter(project, 2)
     msg = authoring.record_message(project, "第二章计划", ch2.id)
     authoring.save_plan(project, ch2.id, "进旧屋", "停在内门前", Expected(), msg)
@@ -453,6 +466,16 @@ def test_chapter_two_needs_ready_snapshot_of_chapter_one(project, planned_chapte
         adoption.adopt(project, _action(project, ch2, v2.version_id, check2))
     assert exc.value.code is ErrorCode.STALE_BASIS
     assert "上一章" in exc.value.message
+
+    # 重试重算：不新增采用，状态 ready 后第二章可采用（需按新前章状态重新建立依据）
+    assert adoption.recompute_state(project, ch1.id) is SnapshotStatus.READY
+    assert project.conn.execute("SELECT COUNT(*) FROM adoption").fetchone()[0] == 1
+    with pytest.raises(WorkbenchError) as stale:
+        adoption.adopt(project, _action(project, ch2, v2.version_id, check2))
+    assert stale.value.code is ErrorCode.STALE_BASIS  # 旧依据的 previous_snapshot 为空
+    check2b, _ = _check_for(project, ch2, v2.version_id)
+    second = adoption.adopt(project, _action(project, ch2, v2.version_id, check2b))
+    assert second.state_status is SnapshotStatus.READY
 
 
 def test_readoption_of_chapter_one_marks_later_chapters_for_review(project, planned_chapter):
