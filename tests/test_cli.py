@@ -1,6 +1,7 @@
-"""作者交互入口：编辑器能力验证（P03）与 CLI 流程（C01/C02）。
+"""作者交互入口：编辑器能力验证（P03）与 CLI 流程（C01–C03）。
 
-编辑器与 CLI 都通过 prompt_toolkit 的管道输入和空输出驱动，不需要真实终端。
+编辑器与 CLI 都通过 prompt_toolkit 的管道输入和空输出驱动，不需要真实终端；
+写作、检查与讨论用固定客户端函数注入，不绕过任务解析与证据校验。
 输入法（IME）体验无法在此自动化，留待人工 T05 验证。
 """
 
@@ -17,11 +18,15 @@ from prompt_toolkit.output import DummyOutput
 
 from story_workbench import cli
 from story_workbench.__main__ import main
-from story_workbench.application import authoring
+from story_workbench.ai.context import ContextLimits
+from story_workbench.application import authoring, generation
 from story_workbench.application.projects import Project, open_project
 from story_workbench.cli_editor import StreamPane, build_editor, edit_text
-from story_workbench.domain.records import ErrorCode, Expected, WorkbenchError
+from story_workbench.domain.records import ErrorCode, Expected, Lifecycle, WorkbenchError
 from story_workbench.infrastructure import database
+from story_workbench.infrastructure.provider import CallOptions
+from tests.conftest import fixed_complete, fixed_stream
+from tests.test_workflow import belief_fact, inspection_json, setting_issue
 
 ENTER = "\r"
 CTRL_S = "\x13"
@@ -141,12 +146,48 @@ def test_stream_output_keeps_editor_input_and_cancel_responsive(pipe):
 # ---------------------------------------------------------------- C01/C02 CLI 流程
 
 
-def run_cli(pipe: PipeInput, path: Path, keystrokes: str) -> str:
+CONFIG = generation.GenerationConfig(
+    options=CallOptions(model="fixed", max_output_tokens=2000, timeout_seconds=5),
+    limits=ContextLimits(total_tokens=20000, template_reserve=500, output_reserve=2000),
+)
+
+
+def run_cli(
+    pipe: PipeInput,
+    path: Path,
+    keystrokes: str,
+    *,
+    clients: generation.Clients | None = None,
+    emit: list[str] | None = None,
+) -> str:
     """把整段按键预先送进管道后运行 CLI；未处理的按键会顺延给下一个提示或编辑器。"""
     lines: list[str] = []
     pipe.send_text(keystrokes)
-    assert cli.run(path, say=lines.append) == 0
+    config = CONFIG if clients is not None else None
+    chunks = emit if emit is not None else []
+    assert cli.run(path, say=lines.append, clients=clients, config=config, emit=chunks.append) == 0
     return "\n".join(lines)
+
+
+def sequenced_clients(*rounds: tuple[str, str]) -> generation.Clients:
+    """每次生成依次返回下一份正文（分两块流式输出），每次检查依次返回下一份检查结果。"""
+    bodies = [body for body, _ in rounds]
+    checks = [check for _, check in rounds]
+
+    def stream(messages, options, cancel):
+        body = bodies.pop(0)
+        yield from fixed_stream([body[:5], body[5:]])(messages, options, cancel)
+
+    def complete(messages, options, cancel):
+        return fixed_complete(checks.pop(0))(messages, options, cancel)
+
+    return generation.Clients(stream=stream, complete=complete)
+
+
+def count(path: Path, table: str) -> int:
+    for project in reopen(path):
+        return project.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    return -1
 
 
 def reopen(path: Path) -> Iterator[Project]:
@@ -183,7 +224,7 @@ def test_cli_creates_project_plans_edits_and_shows_body(pipe, tmp_path):
     out = run_cli(pipe, path, script)
     assert "这里还没有作品" in out
     assert "已新建第一章" in out
-    assert "已记录你的话" in out and "AI 讨论尚未接入" in out
+    assert "已记录你的话" in out and "模型尚未接入" in out
     assert "剧情与结尾已记录（第 1 次）" in out
     assert "已保存，这是第一章现在的编辑稿" in out
     assert "已取消编辑，正文没有改变" in out
@@ -243,8 +284,14 @@ def test_cli_keeps_buffer_when_save_fails_and_allows_retry(pipe, tmp_path, monke
     )
     out = run_cli(pipe, path, script)
     assert out.count("保存没有成功：磁盘暂时不可写。 你刚写的文字还在") == 2
+    assert out.count("已把这段文字另存为恢复文件：") == 2
     assert "已保存，这是第一章现在的编辑稿" in out
     assert bodies(path) == ["作者刚写的一段。回到编辑器再补一句。"]
+    recovered = (path / "recovery").glob("chapter-001-*.md")
+    assert {f.read_text(encoding="utf-8") for f in recovered} == {
+        "作者刚写的一段。",
+        "作者刚写的一段。回到编辑器再补一句。",
+    }
 
 
 def test_cli_abandon_after_save_failure_leaves_previous_draft(pipe, tmp_path, monkeypatch):
@@ -309,12 +356,21 @@ def test_cli_conflicting_save_keeps_both_drafts_and_lets_author_pick(pipe, tmp_p
     ]
 
 
-def test_cli_adopt_is_placeholder_and_unknown_command_is_explained(pipe, tmp_path):
-    script = "井下回声" + ENTER + "a" + ENTER + "xyz" + ENTER + "e" + ENTER + "q" + ENTER
+def test_cli_without_model_explains_and_unknown_command_is_explained(pipe, tmp_path):
+    script = "".join(
+        [
+            "井下回声" + ENTER + "a" + ENTER + "xyz" + ENTER + "e" + ENTER,
+            "n" + ENTER + "w" + ENTER + "k" + ENTER + "a" + ENTER + "i" + ENTER,
+            "q" + ENTER,
+        ]
+    )
     out = run_cli(pipe, tmp_path / "novel", script)
-    assert "采用功能尚未接入" in out
+    assert out.count("还没有选中章节") == 2
     assert "不认识「xyz」" in out
-    assert "还没有选中章节" in out
+    assert "模型尚未接入，暂时不能写作" in out
+    assert "模型尚未接入，暂时不能检查" in out
+    assert "第一章没有可以采用的稿件" in out
+    assert "第一章还没有正文" in out
 
 
 def test_main_without_terminal_exits_two_and_names_directory(tmp_path, capsys):
@@ -322,3 +378,258 @@ def test_main_without_terminal_exits_two_and_names_directory(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "交互终端" in err and str(tmp_path) in err
     assert not any(tmp_path.iterdir())
+
+
+# ---------------------------------------------------------------- C03 写作、检查与采用
+
+PLAN = "p" + ENTER + "沈砚下井发现尸体" + ENTER + "沈砚在井底，怀疑尸体是师父" + ENTER
+ADOPT = "a" + ENTER + "已读，采用" + ENTER
+BODY_1 = "沈砚把灯搁在井沿。井底有一具尸体，他怀疑是师父。"
+CHECK_1 = inspection_json(
+    BODY_1,
+    facts=[belief_fact(BODY_1, "他怀疑是师父", "沈砚", "沈砚怀疑尸体是师父")],
+    plot="沈砚下井发现尸体",
+    ending="沈砚在井底，怀疑尸体是师父",
+)
+
+
+def test_cli_plan_write_review_adopt_and_state_ready(pipe, tmp_path):
+    """计划→写→查看检查→采用→状态完成；已读声明缺失不采用；同一稿重复采用提示无需重复。"""
+    path = tmp_path / "novel"
+    chunks: list[str] = []
+    script = "".join(
+        [
+            NEW_NOVEL + PLAN,
+            "w" + ENTER + ENTER,  # 无额外要求
+            "i" + ENTER,
+            "a" + ENTER + ENTER,  # 回车取消，没有声明已读
+            ADOPT,
+            ADOPT,  # 同一稿再次采用
+            "l" + ENTER + "q" + ENTER,
+        ]
+    )
+    out = run_cli(pipe, path, script, clients=sequenced_clients((BODY_1, CHECK_1)), emit=chunks)
+    assert chunks == [BODY_1[:5], BODY_1[5:], "\n"]
+    assert "开始写作，输出会逐段显示" in out
+    assert "生成结束。以下是完整正文：\n第一章 · 写作稿 · 未采用\n\n" + BODY_1 in out
+    assert "实际剧情：沈砚下井发现尸体" in out
+    assert "未发现需要处理的问题" in out
+    assert "人物认知 · 沈砚：沈砚怀疑尸体是师父（原文：「他怀疑是师父」）" in out
+    assert "第一章 · 写作稿 · 未采用 的最新检查" in out
+    assert "没有采用。采用需要明确声明已读全文并采用" in out
+    assert "已采用第一章这一稿，故事状态更新完成" in out
+    assert "当前稿已采用，无需重复操作" in out
+    assert "第一章 · 有正文 · 已有剧情与结尾 · 已采用" in out
+    assert count(path, "adoption") == 1
+    for project in reopen(path):
+        chapter = authoring.list_chapters(project)[0]
+        assert chapter.adopted_id is not None and chapter.current_snapshot_id is not None
+        assert authoring.adopted_version_id(project, chapter.id) == chapter.current_draft_id
+
+
+def test_cli_rejects_overreaching_draft_then_rewrites_and_adopts(pipe, tmp_path):
+    """越界稿：不接受新增设定→列出未处理问题、零采用；拒绝→重写→采用。"""
+    path = tmp_path / "novel"
+    bad = "沈砚从袖中抽出细铁丝，凭着早年练熟的手艺拨动锁簧。"
+    bad_check = inspection_json(
+        bad,
+        issues=[setting_issue(bad, "从袖中抽出细铁丝", "新增开锁能力与工具")],
+        plot="开锁",
+        ending="门外",
+    )
+    script = "".join(
+        [
+            NEW_NOVEL + PLAN,
+            "w" + ENTER + ENTER,
+            "a" + ENTER + "已读，采用" + ENTER + "不接受" + ENTER,
+            "j" + ENTER + "不加开锁能力" + ENTER,
+            "w" + ENTER + ENTER,
+            ADOPT,
+            "q" + ENTER,
+        ]
+    )
+    clients = sequenced_clients((bad, bad_check), (BODY_1, CHECK_1))
+    out = run_cli(pipe, path, script, clients=clients)
+    assert "问题 1 · 新增持久设定：新增开锁能力与工具\n    原文：「从袖中抽出细铁丝」" in out
+    assert "    建议：删除该段。" in out
+    assert "这一稿有未处理的问题，没有采用：\n  · 新增持久设定：新增开锁能力与工具" in out
+    assert "这一稿已标记拒绝，不会进入正式故事记录" in out
+    assert "这一章现在没有编辑稿" in out
+    assert "已采用第一章这一稿，故事状态更新完成" in out
+    assert count(path, "adoption") == 1
+    for project in reopen(path):
+        chapter = authoring.list_chapters(project)[0]
+        adopted = authoring.adopted_version_id(project, chapter.id)
+        versions = {v.id: v.body for v in authoring.list_versions(project, chapter.id)}
+        assert versions[adopted] == BODY_1
+        assert database.list_rejected_version_ids(project.conn, project.novel_id) == {
+            next(vid for vid, body in versions.items() if body == bad)
+        }
+
+
+def test_cli_authorizes_new_setting_in_one_action(pipe, tmp_path):
+    body = "沈砚从袖中抽出细铁丝，拨动锁簧。"
+    check = inspection_json(
+        body,
+        issues=[setting_issue(body, "从袖中抽出细铁丝", "新增开锁能力")],
+        plot="开锁",
+        ending="门外",
+    )
+    script = NEW_NOVEL + PLAN + "w" + ENTER + ENTER + ADOPT + "接受" + ENTER + "q" + ENTER
+    out = run_cli(pipe, tmp_path / "novel", script, clients=sequenced_clients((body, check)))
+    assert "已采用第一章这一稿，故事状态更新完成" in out
+    for project in reopen(tmp_path / "novel"):
+        rows = project.conn.execute("SELECT action, explanation FROM resolution").fetchall()
+        assert [(r["action"], r["explanation"]) for r in rows] == [
+            ("authorize_setting", "作者接受")
+        ]
+
+
+def test_cli_exploratory_draft_requires_accepting_plot_and_ending(pipe, tmp_path):
+    path = tmp_path / "novel"
+    body = "门板贴着耳侧。他轻轻敲了三下。门内没有回答。"
+    check = inspection_json(
+        body,
+        facts=[belief_fact(body, "门内没有回答", "沈砚", "敲门后没有回应")],
+        plot="敲门",
+        ending="门外等待",
+    )
+    script = "".join(
+        [
+            NEW_NOVEL,
+            "w" + ENTER + ENTER + ENTER,  # 正式写作缺两项，留空 → 不开始
+            "x" + ENTER + "门内有轻微声响" + ENTER,
+            ADOPT + ENTER + ENTER + "放弃" + ENTER,
+            ADOPT + "听见声响后敲门" + ENTER + ENTER + "接受" + ENTER,
+            "q" + ENTER,
+        ]
+    )
+    out = run_cli(pipe, path, script, clients=sequenced_clients((body, check)))
+    assert "正式写作需要本章剧情和结尾状态，现在还缺剧情和结尾状态" in out
+    assert "仍有缺项，没有开始写作" in out
+    assert "试写：第一章的剧情和结尾状态还没有确定" in out
+    assert "这是试写稿，采用时需要接受探索出的剧情与结尾" in out
+    assert "没有采用。试写稿需要明确接受剧情与结尾" in out
+    assert "已采用第一章这一稿，故事状态更新完成" in out
+    assert count(path, "adoption") == 1
+    for project in reopen(path):
+        row = project.conn.execute("SELECT accepted_plot, accepted_ending FROM review").fetchone()
+        assert (row["accepted_plot"], row["accepted_ending"]) == ("听见声响后敲门", "门外等待")
+        run = project.conn.execute(
+            "SELECT request_json FROM run WHERE task = 'generate'"
+        ).fetchone()
+        assert "门内有轻微声响" in run["request_json"]
+
+
+def test_cli_ambiguous_adopt_lists_candidates_and_writes_nothing(pipe, tmp_path):
+    """两份未采用稿且没有展示过：“采用那版”列出候选，adoption 计数与 adopted_id 都不变。"""
+    path = tmp_path / "novel"
+    run_cli(
+        pipe,
+        path,
+        NEW_NOVEL
+        + PLAN
+        + "w"
+        + ENTER
+        + ENTER
+        + "e"
+        + ENTER
+        + END
+        + "作者补一句。"
+        + CTRL_S
+        + "q"
+        + ENTER,
+        clients=sequenced_clients((BODY_1, CHECK_1)),
+    )
+    before = count(path, "adoption")
+    script = "".join(
+        [
+            "c" + ENTER + "1" + ENTER,
+            "采用那版" + ENTER + ENTER,  # 回车取消
+            "采用那版" + ENTER + "2" + ENTER,  # 查看稿二（修改稿，尚无检查）
+            "a" + ENTER,
+            "q" + ENTER,
+        ]
+    )
+    out = run_cli(pipe, path, script)
+    assert out.count("第一章有多份稿件，无法确定“那版”指哪一稿；没有做任何采用记录") == 2
+    assert "写作稿 · 沈砚把灯搁在井沿。井底有一具尸体，他怀疑是师父。" in out
+    assert (
+        "修改稿 · 现在的编辑稿 · 沈砚把灯搁在井沿。井底有一具尸体，他怀疑是师父。作者补一句。"
+        in out
+    )
+    assert "看完后用 a 采用这一稿" in out
+    assert "这一稿还没有检查，不能采用。先用 k 检查" in out
+    assert count(path, "adoption") == before == 0
+    assert count(path, "review") == 0
+    for project in reopen(path):
+        assert authoring.list_chapters(project)[0].adopted_id is None
+
+
+def test_cli_stale_basis_after_plan_change_needs_recheck(pipe, tmp_path):
+    body = BODY_1
+    check_after = inspection_json(body, plot="改后的剧情", ending="改后的结尾")
+    script = "".join(
+        [
+            NEW_NOVEL + PLAN + "w" + ENTER + ENTER,
+            "p" + ENTER + "改后的剧情" + ENTER + "改后的结尾" + ENTER,
+            ADOPT,
+            "k" + ENTER,
+            ADOPT,
+            "q" + ENTER,
+        ]
+    )
+    clients = sequenced_clients((body, CHECK_1), ("", check_after))
+    out = run_cli(pipe, tmp_path / "novel", script, clients=clients)
+    assert "没有采用：相关依据已经变化" in out and "请用 k 重新检查后再采用" in out
+    assert "已完成对 第一章 · 写作稿 · 未采用 的检查" in out
+    assert "实际剧情：改后的剧情" in out
+    assert "已采用第一章这一稿，故事状态更新完成" in out
+
+
+def test_cli_discussion_streams_reply_and_saves_messages(pipe, tmp_path):
+    path = tmp_path / "novel"
+    chunks: list[str] = []
+    clients = generation.Clients(
+        stream=fixed_stream(["可以让他", "先在井口犹豫。"]), complete=fixed_complete("{}")
+    )
+    script = NEW_NOVEL + "t" + ENTER + "第一章从哪写起？" + ENTER + "q" + ENTER
+    out = run_cli(pipe, path, script, clients=clients, emit=chunks)
+    assert "AI：" in out
+    assert chunks == ["可以让他", "先在井口犹豫。", "\n"]
+    for project in reopen(path):
+        msgs = database.list_messages(project.conn, project.novel_id)
+        assert [(m.role.value, m.body) for m in msgs] == [
+            ("author", "第一章从哪写起？"),
+            ("model", "可以让他先在井口犹豫。"),
+        ]
+        assert authoring.list_story_items(project) == []
+
+
+def test_cli_candidate_and_decision_entries_require_authorization_to_change(pipe, tmp_path):
+    path = tmp_path / "novel"
+    script = "".join(
+        [
+            NEW_NOVEL,
+            "d" + ENTER + "师父可能是反派" + ENTER,
+            "f" + ENTER + "1" + ENTER,
+            "f" + ENTER + "1" + ENTER + "师父是反派" + ENTER + "不" + ENTER,
+            "f" + ENTER + "1" + ENTER + "师父是反派" + ENTER + "授权" + ENTER,
+            "f" + ENTER + "师父右腕有旧伤" + ENTER,
+            "q" + ENTER,
+        ]
+    )
+    out = run_cli(pipe, path, script)
+    assert "已记为候选想法。候选不会自动成为决定或正式事实" in out
+    assert "  1. 候选想法 · 师父可能是反派" in out
+    assert "已确定：师父可能是反派" in out
+    assert "没有授权，已确定的内容保持不变" in out
+    assert "已按你的授权修改这条决定：师父是反派" in out
+    assert "已确定：师父右腕有旧伤" in out
+    for project in reopen(path):
+        items = authoring.list_story_items(project)
+        assert [(i.body, i.lifecycle) for i in items] == [
+            ("师父是反派", Lifecycle.DECIDED),
+            ("师父右腕有旧伤", Lifecycle.DECIDED),
+        ]
+        assert project.novel.design_revision >= 3

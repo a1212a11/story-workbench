@@ -43,7 +43,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from story_workbench import cli
 
-    return cli.run(args.project)
+    # 模型客户端与生成配置在 G05 由此处装配；接入前传 None，CLI 对写作、检查与 AI 讨论
+    # 提示“模型尚未接入”，其余操作照常。
+    return cli.run(args.project, clients=None, config=None)
 
 
 if __name__ == "__main__":
