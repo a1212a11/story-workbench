@@ -128,3 +128,27 @@ def correct_fact(
         author_message_id,
         expected_head_revision_id,
     )
+
+
+def revalidate_chapter(project: Project, action: AuthorAction) -> SnapshotStatus:
+    """前章变化而本章正文未变：用已完成的新检查与作者动作保存新审阅并重算状态。
+
+    不发起检查、不新建正文、不重复采用。新检查由 generation.check_draft 先完成。
+    """
+    rules.require_same_scope(project.novel_id, action.target.novel_id, "复核目标")
+    reconcile = projects.reconcile_workcopy(project, action.target.chapter_id)
+    if reconcile.outcome in (ReconcileOutcome.IMPORTED, ReconcileOutcome.CONFLICT):
+        raise WorkbenchError(
+            ErrorCode.WORKCOPY_CONFLICT,
+            "发现尚未展示的外部修改稿，已保存为新稿；复核前请先查看。",
+            {"imported_version_id": reconcile.imported_version_id},
+        )
+    database.commit_revalidation(project.conn, action)
+    try:
+        return recompute_state(project, action.target.chapter_id)
+    except WorkbenchError:
+        return SnapshotStatus.FAILED
+
+
+def pending_impacts(project: Project, chapter_id: str) -> tuple[tuple[str, str], ...]:
+    return database.list_pending_impacts(project.conn, project.novel_id, chapter_id)

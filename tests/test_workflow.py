@@ -16,7 +16,9 @@ from story_workbench.domain.records import (
     Authority,
     ErrorCode,
     Expected,
+    IssueResolution,
     Lifecycle,
+    ResolutionAction,
     RunStatus,
     SnapshotStatus,
     Target,
@@ -436,3 +438,244 @@ def test_discussion_reply_is_saved_as_message_only(project):
         ("model", "可以让他先在井口犹豫。"),
     ]
     assert authoring.list_story_items(project) == []  # 不自动抽取想法
+
+
+# ---------------------------------------------------------------- T10 回改第一章，逐章复核
+
+
+def _write_and_adopt(project, number, plot, ending, body, fact_quote, fact_prop):
+    ch, msg = plan_chapter(project, number, plot, ending)
+    check = inspection_json(
+        body, facts=[belief_fact(body, fact_quote, "沈砚", fact_prop)], plot=plot, ending=ending
+    )
+    r = generation.write_chapter(
+        project, ch.id, WriteMode.FORMAL, msg, clients_for(body, check), CONFIG
+    )
+    a = adopt_current(project, ch.id, r)
+    assert a.state_status is SnapshotStatus.READY
+    return ch, msg, r, body
+
+
+def _revalidate(project, chapter_id, version_id, check_id, resolutions=()):
+    ch = authoring.get_chapter(project, chapter_id)
+    prev = [c for c in authoring.list_chapters(project) if c.number == ch.number - 1]
+    prev_snapshot = prev[0].current_snapshot_id if prev else None
+    msg = authoring.record_message(project, "重新检查看完了，确认无需改动。", chapter_id)
+    action = AuthorAction(
+        request_id=uuid.uuid4().hex,
+        source_message_id=msg,
+        target=Target(project.novel_id, chapter_id, version_id),
+        expected=Expected(
+            adopted_id=ch.adopted_id, plan_id=ch.current_plan_id, previous_snapshot_id=prev_snapshot
+        ),
+        check_id=check_id,
+        read_declared=True,
+        issue_resolutions=tuple(resolutions),
+    )
+    return adoption.revalidate_chapter(project, action)
+
+
+def test_t10_readopt_chapter_one_then_revalidate_later_chapters_without_new_adoption(project):
+    ch1, msg1, r1, body1 = _write_and_adopt(
+        project,
+        1,
+        "调查旧井",
+        "看到疑似师父的尸体",
+        "井底有一具尸体，他怀疑是师父。",
+        "他怀疑是师父",
+        "沈砚怀疑尸体是师父",
+    )
+    ch2, msg2, r2, body2 = _write_and_adopt(
+        project,
+        2,
+        "进旧屋",
+        "停在内门前",
+        "他还疑心井底那人就是师父。他停在内门前。",
+        "他停在内门前",
+        "沈砚在内门前",
+    )
+    ch3, msg3, r3, body3 = _write_and_adopt(
+        project,
+        3,
+        "敲门",
+        "门外等待",
+        "他敲了一下。门内没有回答。",
+        "门内没有回答",
+        "敲门后没有回应",
+    )
+    counts_before = {
+        t: project.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        for t in ("adoption", "version")
+    }
+
+    # 回改第一章：保存、检查、重新采用
+    new_body1 = body1 + "他拨开尸体右腕的袖子，没有师父那道旧伤。"
+    saved = authoring.save_draft(
+        project, ch1.id, new_body1, Expected(current_draft_id=r1.version_id)
+    )
+    check1b = inspection_json(
+        new_body1,
+        facts=[belief_fact(new_body1, "没有师父那道旧伤", "沈砚", "沈砚怀疑尸体不是师父")],
+        plot="调查旧井",
+        ending="怀疑尸体不是师父",
+    )
+    cid = generation.check_draft(
+        project,
+        Target(project.novel_id, ch1.id, saved.version_id),
+        msg1,
+        clients_for("", check1b),
+        CONFIG,
+    )
+
+    class R:  # 复用 adopt_current 的结构
+        version_id = saved.version_id
+        check_id = cid
+
+    a1b = adopt_current(project, ch1.id, R)
+    assert a1b.state_status is SnapshotStatus.READY
+    for ch in (ch2, ch3):
+        c = authoring.get_chapter(project, ch.id)
+        assert c.needs_review and c.current_snapshot_id is None
+        assert adoption.pending_impacts(project, ch.id)
+
+    # 依赖过时状态的续写被阻断
+    ch4, msg4 = plan_chapter(project, 4, "进门", "看见屋内")
+    with pytest.raises(WorkbenchError) as blocked:
+        generation.write_chapter(
+            project, ch4.id, WriteMode.FORMAL, msg4, clients_for("x", "{}"), CONFIG
+        )
+    assert blocked.value.code is ErrorCode.STALE_BASIS
+
+    # 第二章：旧检查不能复核（依据里的前章快照已变）
+    old_check2 = database.latest_check_for_version(project.conn, project.novel_id, r2.version_id)
+    with pytest.raises(WorkbenchError) as stale:
+        _revalidate(project, ch2.id, r2.version_id, old_check2.id)
+    assert stale.value.code is ErrorCode.STALE_BASIS
+    # 新检查 + 复核：无新正文、无新采用，影响解除，状态 ready
+    check2b = inspection_json(
+        body2,
+        facts=[belief_fact(body2, "他停在内门前", "沈砚", "沈砚在内门前")],
+        plot="进旧屋",
+        ending="停在内门前",
+    )
+    cid2 = generation.check_draft(
+        project,
+        Target(project.novel_id, ch2.id, r2.version_id),
+        msg2,
+        clients_for("", check2b),
+        CONFIG,
+    )
+    assert _revalidate(project, ch2.id, r2.version_id, cid2) is SnapshotStatus.READY
+    c2 = authoring.get_chapter(project, ch2.id)
+    assert not c2.needs_review and c2.current_snapshot_id is not None
+    assert adoption.pending_impacts(project, ch2.id) == ()
+    # 第三章同样复核
+    check3b = inspection_json(
+        body3,
+        facts=[belief_fact(body3, "门内没有回答", "沈砚", "敲门后没有回应")],
+        plot="敲门",
+        ending="门外等待",
+    )
+    cid3 = generation.check_draft(
+        project,
+        Target(project.novel_id, ch3.id, r3.version_id),
+        msg3,
+        clients_for("", check3b),
+        CONFIG,
+    )
+    assert _revalidate(project, ch3.id, r3.version_id, cid3) is SnapshotStatus.READY
+    counts_after = {
+        t: project.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        for t in ("adoption", "version")
+    }
+    assert counts_after["adoption"] == counts_before["adoption"] + 1  # 只有第一章重新采用
+    assert counts_after["version"] == counts_before["version"] + 1  # 只有第一章新稿
+    # 第三章快照继承新的第一章事实
+    snap3 = authoring.get_chapter(project, ch3.id).current_snapshot_id
+    props = [
+        d.proposition
+        for d in database.list_snapshot_fact_details(project.conn, project.novel_id, snap3)
+    ]
+    assert props == ["沈砚怀疑尸体不是师父", "沈砚在内门前", "敲门后没有回应"]
+    # 第四章现在可以写
+    r4 = generation.write_chapter(
+        project,
+        ch4.id,
+        WriteMode.FORMAL,
+        msg4,
+        clients_for(
+            "他推门进去。", inspection_json("他推门进去。", plot="进门", ending="看见屋内")
+        ),
+        CONFIG,
+    )
+    assert r4.check_id is not None
+
+
+def test_revalidation_with_unresolved_setting_keeps_chapter_pending(project):
+    ch1, msg1, r1, body1 = _write_and_adopt(
+        project, 1, "调查旧井", "看到尸体", "井底有尸体。", "井底有尸体", "井底有尸体"
+    )
+    ch2, msg2, r2, body2 = _write_and_adopt(
+        project, 2, "进旧屋", "内门前", "他撬开了锁。", "他撬开了锁", "沈砚开了锁"
+    )
+    # 回改第一章
+    saved = authoring.save_draft(
+        project, ch1.id, body1 + "灯灭了。", Expected(current_draft_id=r1.version_id)
+    )
+    cid = generation.check_draft(
+        project,
+        Target(project.novel_id, ch1.id, saved.version_id),
+        msg1,
+        clients_for("", inspection_json(body1 + "灯灭了。", plot="调查旧井", ending="灯灭")),
+        CONFIG,
+    )
+
+    class R:
+        version_id = saved.version_id
+        check_id = cid
+
+    adopt_current(project, ch1.id, R)
+    # 第二章重新检查时发现新增持久设定，作者不授权 → 复核被拒，仍待复核
+    check2b = inspection_json(
+        body2,
+        issues=[setting_issue(body2, "撬开了锁", "新增开锁能力")],
+        plot="进旧屋",
+        ending="内门前",
+    )
+    cid2 = generation.check_draft(
+        project,
+        Target(project.novel_id, ch2.id, r2.version_id),
+        msg2,
+        clients_for("", check2b),
+        CONFIG,
+    )
+    with pytest.raises(WorkbenchError) as exc:
+        _revalidate(project, ch2.id, r2.version_id, cid2)
+    assert exc.value.code is ErrorCode.AUTHORIZATION_REQUIRED
+    c2 = authoring.get_chapter(project, ch2.id)
+    assert c2.needs_review and adoption.pending_impacts(project, ch2.id)
+    # 授权后复核通过
+    issue_id = database.get_check(project.conn, project.novel_id, cid2).issues[0].id
+    status = _revalidate(
+        project,
+        ch2.id,
+        r2.version_id,
+        cid2,
+        resolutions=[IssueResolution(issue_id, ResolutionAction.AUTHORIZE_SETTING, "接受开锁能力")],
+    )
+    assert status is SnapshotStatus.READY
+    assert not authoring.get_chapter(project, ch2.id).needs_review
+    # 复核不针对非当前采用版本
+    other = authoring.save_draft(
+        project, ch2.id, "另一稿", Expected(current_draft_id=r2.version_id)
+    )
+    cid_other = generation.check_draft(
+        project,
+        Target(project.novel_id, ch2.id, other.version_id),
+        msg2,
+        clients_for("", inspection_json("另一稿", plot="进旧屋", ending="内门前")),
+        CONFIG,
+    )
+    with pytest.raises(WorkbenchError) as wrong:
+        _revalidate(project, ch2.id, other.version_id, cid_other)
+    assert wrong.value.code is ErrorCode.INVALID_INPUT

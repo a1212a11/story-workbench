@@ -1538,10 +1538,11 @@ def commit_adoption(conn: sqlite3.Connection, action: AuthorAction) -> AdoptionR
         )
         old_snapshot_id = chapter.current_snapshot_id
         conn.execute(
-            "UPDATE chapter SET adopted_id = ?, current_snapshot_id = NULL"
+            "UPDATE chapter SET adopted_id = ?, current_snapshot_id = NULL, needs_review = 0"
             " WHERE novel_id = ? AND id = ?",
             (adoption_id, novel_id, chapter.id),
         )
+        _resolve_pending_impacts(conn, novel_id, chapter.id, review_id)
         if old_snapshot_id is not None:
             conn.execute(
                 "UPDATE snapshot SET status = 'stale' WHERE novel_id = ? AND id = ?"
@@ -1564,7 +1565,8 @@ def commit_adoption(conn: sqlite3.Connection, action: AuthorAction) -> AdoptionR
                     (novel_id, later_chapter.current_snapshot_id),
                 )
             conn.execute(
-                "UPDATE chapter SET needs_review = 1 WHERE novel_id = ? AND id = ?",
+                "UPDATE chapter SET needs_review = 1, current_snapshot_id = NULL"
+                " WHERE novel_id = ? AND id = ?",
                 (novel_id, later_chapter.id),
             )
             conn.execute(
@@ -2241,3 +2243,111 @@ def latest_check_for_version(
         (novel_id, version_id),
     ).fetchone()
     return None if row is None else get_check(conn, novel_id, row["id"])
+
+
+# ---------------------------------------------------------------- 逐章复核（R02）
+
+
+def _resolve_pending_impacts(
+    conn: sqlite3.Connection, novel_id: str, chapter_id: str, review_id: str
+) -> int:
+    cur = conn.execute(
+        "UPDATE impact SET status = 'resolved', resolved_review_id = ?"
+        " WHERE novel_id = ? AND chapter_id = ? AND status = 'pending'",
+        (review_id, novel_id, chapter_id),
+    )
+    return cur.rowcount
+
+
+def list_pending_impacts(
+    conn: sqlite3.Connection, novel_id: str, chapter_id: str
+) -> tuple[tuple[str, str], ...]:
+    rows = conn.execute(
+        "SELECT id, reason FROM impact WHERE novel_id = ? AND chapter_id = ? AND status = 'pending'"
+        " ORDER BY created_at, rowid",
+        (novel_id, chapter_id),
+    ).fetchall()
+    return tuple((r["id"], r["reason"]) for r in rows)
+
+
+def commit_revalidation(conn: sqlite3.Connection, action: AuthorAction) -> str:
+    """前文变化、本章正文未变：保存新审阅与新的候选快照，解除待复核；不新增正文或采用。
+
+    目标必须是本章当前已采用版本；新检查必须基于当前依据。返回新快照 ID。
+    """
+    novel_id = action.target.novel_id
+    with transaction(conn):
+        context = load_adoption_context(conn, action)
+        current = context.current_adoption
+        if current is None or current.version_id != action.target.version_id:
+            raise WorkbenchError(
+                ErrorCode.INVALID_INPUT,
+                "复核只针对本章当前已采用的正文；正文有变化请走采用流程。",
+                {"adopted_version_id": None if current is None else current.version_id},
+            )
+        rules.validate_adoption(action, context)
+        created = now_utc()
+        chapter = context.chapter
+        review_id = new_id()
+        conn.execute(
+            "INSERT INTO review (id, novel_id, created_at, chapter_id, version_id, check_id,"
+            " basis_id, author_message_id, read_declared, accepted_plot, accepted_ending)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (
+                review_id,
+                novel_id,
+                created,
+                chapter.id,
+                action.target.version_id,
+                context.check.id,
+                context.basis.id,
+                action.source_message_id,
+                action.accepted_plot,
+                action.accepted_ending,
+            ),
+        )
+        for res in action.issue_resolutions:
+            conn.execute(
+                "INSERT INTO resolution (id, novel_id, created_at, review_id, issue_id, action,"
+                " author_message_id, explanation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    novel_id,
+                    created,
+                    review_id,
+                    res.issue_id,
+                    res.action.value,
+                    action.source_message_id,
+                    res.explanation,
+                ),
+            )
+        snapshot_id = new_id()
+        conn.execute(
+            "INSERT INTO snapshot (id, novel_id, created_at, chapter_id, adoption_id, check_id,"
+            " review_id, basis_id, previous_snapshot_id, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate')",
+            (
+                snapshot_id,
+                novel_id,
+                created,
+                chapter.id,
+                current.id,
+                context.check.id,
+                review_id,
+                context.basis.id,
+                context.basis.previous_snapshot_id,
+            ),
+        )
+        if chapter.current_snapshot_id is not None:
+            conn.execute(
+                "UPDATE snapshot SET status = 'stale' WHERE novel_id = ? AND id = ?"
+                " AND status = 'ready'",
+                (novel_id, chapter.current_snapshot_id),
+            )
+        conn.execute(
+            "UPDATE chapter SET current_snapshot_id = NULL, needs_review = 0"
+            " WHERE novel_id = ? AND id = ?",
+            (novel_id, chapter.id),
+        )
+        _resolve_pending_impacts(conn, novel_id, chapter.id, review_id)
+    return snapshot_id
