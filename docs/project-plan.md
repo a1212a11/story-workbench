@@ -72,7 +72,7 @@ C 与固定客户端 G 在存储接口稳定后可独立推进；采用用例、
 - [x] G02 实现讨论、正式写作和试写任务合同。完成条件：最小输入可写，试写先展示缺口与假设，委托限本次请求本章；正常请求一次生成、一次检查，不自动润色。 证据：提交 `f030f77`；`ai/tasks.generate/discuss`，试写提示含缺口与假设，委托范围限本次本章，模板版本受校验。
 - [x] G03 实现检查与候选事实提取。完成条件：必填字段、枚举和原文引用受校验；假引用/截断结果不能标检查成功；提取不自动成为 Canon。 证据：提交 `f030f77`/`4312fce`；`ai/tasks.inspect/diagnose` 用 Pydantic strict 校验，缺字段、多余字段、假引用、截断均为 MODEL_FAILED；`database.commit_check_result` 事务内再次逐条校验。
 - [x] G04 实现 run 阶段记录、流保存、取消与迟到结果保护。完成条件：只有已保存流块可恢复；取消先落库；迟到结果不能切换当前稿；同项目最多一个模型请求在途。 证据：`application/generation.py` 的 write_chapter/check_draft/discuss/cancel_run/retry_run；`database.commit_run_chunk/commit_run_result/commit_run_cancel` 只在 running 时生效；`tests/test_workflow.py` 覆盖取消先落库、迟到块丢弃、截断为失败、在途拒绝、生成期间编辑保存为历史稿。schema v2 增加 draft_rejection 与 story_item.chapter_id。
-- [ ] G05 实现单个供应商客户端并接入真实配置（依赖 P04）。完成条件：协议、流、超时、取消及用量得到验证；不自动重试付费请求，密钥不进入项目数据和日志。
+- [ ] G05 实现单个供应商客户端并接入真实配置（依赖 P04）。完成条件：协议、流、超时、取消及用量得到验证；不自动重试付费请求，密钥不进入项目数据和日志。 进度：`provider.make_anthropic_clients`（anthropic 1.5.0，max_retries=0，取消关闭流，max_tokens 归一为 truncated，密钥只在闭包）与 `bootstrap.py`（配置文件不得含密钥，密钥只读环境变量）已实现，假 SDK 测试通过；真实调用、用量与费用记录待 `STORY_WORKBENCH_LIVE=1 uv run pytest tests/test_provider_live.py`，需作者提供密钥后勾选。
 - [x] G06 用固定客户端执行 T06–T08 的确定性部分（依赖 R01）。完成条件：三章调用次数、拒绝稿隔离、无效检查与容量边界断言通过；语义准确性留待 V02。 证据：`tests/test_workflow.py::test_t06_three_chapters_with_rejection_and_exploratory`（一次生成一次检查、拒绝稿不入依据、试写记缺口与假设、三章事实链）及无效检查只重试检查；T07 语义部分留 V02。
 
 ## R 状态、回改与失败恢复

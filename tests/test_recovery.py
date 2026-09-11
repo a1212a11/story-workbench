@@ -423,3 +423,131 @@ def test_restore_rejects_tampered_backup(project_dir, tmp_path):
         restore_backup(tmp_path / "backup", tmp_path / "restored")
     assert exc.value.code is ErrorCode.STORAGE_FAILED
     assert not (tmp_path / "restored").exists()
+
+
+# ------------------------------------------------ G05 供应商客户端（假 SDK 验证协议归一化）
+
+
+class _FakeStream:
+    def __init__(self, chunks, stop_reason):
+        self.text_stream = iter(chunks)
+        self._stop = stop_reason
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        self.closed = True
+
+    def get_final_message(self):
+        class U:
+            input_tokens, output_tokens = 12, 34
+
+        class M:
+            usage = U()
+            stop_reason = self._stop
+
+        return M()
+
+
+def _fake_anthropic(monkeypatch, chunks, stop_reason="end_turn", raise_error=None):
+    import anthropic
+
+    captured = {}
+
+    class Messages:
+        def stream(self, **kwargs):
+            captured.update(kwargs)
+            if raise_error:
+                raise raise_error
+            return _FakeStream(chunks, stop_reason)
+
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            if raise_error:
+                raise raise_error
+
+            class Block:
+                type, text = "text", "".join(chunks)
+
+            class U:
+                input_tokens, output_tokens = 5, 6
+
+            class M:
+                content = [Block()]
+                usage = U()
+
+            M.stop_reason = stop_reason
+            return M()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+            self.messages = Messages()
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+    return captured
+
+
+def test_anthropic_client_normalizes_events_and_never_leaks_key(monkeypatch):
+    from story_workbench.infrastructure.provider import (
+        CallOptions,
+        CancelSignal,
+        ChatMessage,
+        EventKind,
+        make_anthropic_clients,
+    )
+
+    captured = _fake_anthropic(monkeypatch, ["井口", "很凉"], stop_reason="max_tokens")
+    stream, complete = make_anthropic_clients("sk-ant-secret")
+    options = CallOptions(model="claude-sonnet-5", max_output_tokens=50, timeout_seconds=9)
+    msgs = [ChatMessage("system", "系统"), ChatMessage("user", "写")]
+    events = list(stream(msgs, options, CancelSignal()))
+    assert [e.kind for e in events] == [
+        EventKind.TEXT,
+        EventKind.TEXT,
+        EventKind.USAGE,
+        EventKind.TRUNCATED,
+    ]
+    assert captured["init"]["max_retries"] == 0 and captured["init"]["timeout"] == 9
+    assert captured["system"] == "系统" and captured["messages"] == [
+        {"role": "user", "content": "写"}
+    ]
+    assert "sk-ant-secret" not in repr(events)
+    result = complete(msgs, options, CancelSignal())
+    assert (
+        result.text == "井口很凉"
+        and result.truncated
+        and result.usage == {"input_tokens": 5, "output_tokens": 6}
+    )
+
+
+def test_anthropic_client_cancel_and_errors(monkeypatch):
+    from story_workbench.infrastructure.provider import (
+        CallOptions,
+        CancelSignal,
+        ChatMessage,
+        EventKind,
+        ProviderError,
+        make_anthropic_clients,
+    )
+
+    _fake_anthropic(monkeypatch, ["一", "二", "三"])
+    stream, complete = make_anthropic_clients("k")
+    options = CallOptions(model="m", max_output_tokens=10, timeout_seconds=1)
+    cancel = CancelSignal()
+    kinds = []
+    for e in stream([ChatMessage("user", "x")], options, cancel):
+        kinds.append(e.kind)
+        cancel.set()
+    assert kinds == [EventKind.TEXT, EventKind.ERROR]
+    _fake_anthropic(monkeypatch, [], raise_error=TimeoutError("slow"))
+    stream2, complete2 = make_anthropic_clients("k")
+    events = list(stream2([ChatMessage("user", "x")], options, CancelSignal()))
+    assert events[-1].kind is EventKind.ERROR and events[-1].error == "TimeoutError"
+    with pytest.raises(ProviderError):
+        complete2([ChatMessage("user", "x")], options, CancelSignal())
