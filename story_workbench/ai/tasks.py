@@ -257,6 +257,8 @@ def build_generate_messages(
         lines.append("### 本次试写采用的假设（只对本次本章有效）")
         lines.extend(f"- {item}" for item in request.assumptions or ("无",))
         gap_block = "\n".join(lines) + "\n\n"
+    if input_body is not None:
+        system += prompts.REVISION_SYSTEM
     scope = request.delegation_scope
     if scope and scope.may_choose_plot:
         delegation_line = (

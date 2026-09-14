@@ -587,7 +587,8 @@ def test_compatible_provider_rejects_incomplete_end_and_pre_cancelled_requests(m
         complete(messages, options, CancelSignal())
 
 
-def test_deepseek_uses_real_sdk_for_stream_and_complete_without_network(monkeypatch):
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_deepseek_uses_real_sdk_for_stream_and_complete_without_network(monkeypatch, asynchronous):
     import json
 
     import anthropic
@@ -639,18 +640,44 @@ def test_deepseek_uses_real_sdk_for_stream_and_complete_without_network(monkeypa
         body = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
         return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
 
-    original = anthropic.Anthropic
-    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
-        monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: original(http_client=http, **kw))
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only")
-        settings = bootstrap.Settings(provider="deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only")
+    settings = bootstrap.Settings(provider="deepseek")
+    options = bootstrap.build_generation_config(settings).options
+    messages = [ChatMessage("user", "写一句")]
+    if asynchronous:
+        import asyncio
+
+        original = anthropic.AsyncAnthropic
+        connections = []
+
+        def make_client(**kwargs):
+            http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            connections.append(http)
+            return original(http_client=http, **kwargs)
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", make_client)
         clients = bootstrap.build_clients(settings)
-        options = bootstrap.build_generation_config(settings).options
-        messages = [ChatMessage("user", "写一句")]
-        events = list(clients.stream(messages, options, CancelSignal()))
-        assert events[-1].kind is EventKind.COMPLETED
-        assert "".join(e.text for e in events) == "井底。"
-        assert next(e.usage for e in events if e.kind is EventKind.USAGE) == final["usage"]
-        result = clients.complete(messages, options, CancelSignal())
-        assert result.text == "井底。" and result.usage == final["usage"] and not result.truncated
+
+        async def call():
+            events = [
+                event async for event in clients.async_stream(messages, options, CancelSignal())
+            ]
+            result = await clients.async_complete(messages, options, CancelSignal())
+            return events, result
+
+        events, result = asyncio.run(call())
+        assert all(http.is_closed for http in connections)
+    else:
+        original = anthropic.Anthropic
+        with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+            monkeypatch.setattr(
+                anthropic, "Anthropic", lambda **kw: original(http_client=http, **kw)
+            )
+            clients = bootstrap.build_clients(settings)
+            events = list(clients.stream(messages, options, CancelSignal()))
+            result = clients.complete(messages, options, CancelSignal())
+    assert events[-1].kind is EventKind.COMPLETED
+    assert "".join(e.text for e in events) == "井底。"
+    assert next(e.usage for e in events if e.kind is EventKind.USAGE) == final["usage"]
+    assert result.text == "井底。" and result.usage == final["usage"] and not result.truncated
     assert len(requests) == 2

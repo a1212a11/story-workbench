@@ -13,7 +13,11 @@ from pathlib import Path
 
 from story_workbench.ai.context import ContextLimits
 from story_workbench.application.generation import Clients, GenerationConfig
-from story_workbench.infrastructure.provider import CallOptions, make_anthropic_clients
+from story_workbench.infrastructure.provider import (
+    CallOptions,
+    make_anthropic_clients,
+    make_async_anthropic_clients,
+)
 
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 CONFIG_ENV = "STORY_WORKBENCH_CONFIG"
@@ -101,10 +105,11 @@ def build_clients(settings: Settings) -> Clients | None:
     api_key = os.environ.get(settings.api_key_env, "").strip()
     if not api_key:
         return None
-    if settings.provider == "deepseek":
-        stream, complete = make_anthropic_clients(
-            api_key, base_url="https://api.deepseek.com/anthropic", disable_thinking=True
-        )
-    else:
-        stream, complete = make_anthropic_clients(api_key)
-    return Clients(stream=stream, complete=complete)
+    kwargs = (
+        {"base_url": "https://api.deepseek.com/anthropic", "disable_thinking": True}
+        if settings.provider == "deepseek"
+        else {}
+    )
+    stream, complete = make_anthropic_clients(api_key, **kwargs)
+    async_stream, async_complete = make_async_anthropic_clients(api_key, **kwargs)
+    return Clients(stream, complete, async_stream, async_complete)

@@ -731,3 +731,293 @@ def test_cli_trial_revision_does_not_replace_draft_changed_during_diagnosis(
         versions = authoring.list_versions(project, chapter.id)
         assert [v.body for v in versions] == [body, "诊断期间的新编辑稿。", revised]
         assert chapter.current_draft_id == versions[1].id
+
+
+@pytest.mark.parametrize("interrupt_kind", ["key", "signal"])
+@pytest.mark.parametrize("suppress_cancel", [False, True])
+@pytest.mark.parametrize("phase", ["write", "discuss", "check", "diagnose", "revise", "auto_check"])
+def test_cli_cancel_records_before_stopping_and_waits_for_late_client(
+    pipe, tmp_path, monkeypatch, phase, suppress_cancel, interrupt_kind
+):
+    from story_workbench.domain.records import RunStatus
+    from story_workbench.infrastructure.provider import CompleteResult, EventKind, StreamEvent
+
+    body = "井底有一具尸体。"
+    fresh_body = "灯影下显出人形。"
+    state = {"closed": False, "cancelled": False}
+    original_cancel = generation.cancel_run
+    original_show = cli.Workbench.show_chapters
+    original_close = Project.close
+
+    def cancel_run(project, run_id, signal):
+        assert not signal.is_set()
+        result = original_cancel(project, run_id, signal)
+        assert (
+            database.get_run(project.conn, project.novel_id, run_id).status is RunStatus.CANCELLED
+        )
+        state["cancelled"] = result
+        return result
+
+    def show_chapters(self):
+        if state["cancelled"]:
+            assert state["closed"], "旧客户端关闭之前不能接受下一条命令"
+        return original_show(self)
+
+    def close_project(project):
+        assert database.any_run_in_flight(project.conn, project.novel_id) is None
+        original_close(project)
+
+    monkeypatch.setattr(generation, "cancel_run", cancel_run)
+    monkeypatch.setattr(cli.Workbench, "show_chapters", show_chapters)
+    monkeypatch.setattr(Project, "close", close_project)
+
+    async def slow(signal):
+        def interrupt():
+            if interrupt_kind == "signal":
+                import signal
+
+                signal.raise_signal(signal.SIGINT)
+                pipe.send_text("l\rq\r")
+            else:
+                pipe.send_text(CTRL_C + "l\rq\r")
+
+        asyncio.get_running_loop().call_later(0.01, interrupt)
+        try:
+            await asyncio.sleep(3)
+            pytest.fail("Ctrl-C 没有中止请求")
+        except asyncio.CancelledError:
+            assert state["cancelled"] and signal.is_set()
+            if not suppress_cancel:
+                raise
+            # 故意在取消后继续收尾并返回，不能抢先开始下一条命令或保存迟到结果。
+            await asyncio.sleep(0.01)
+
+    async def stream(messages, options, signal):
+        if phase == "auto_check":
+            yield StreamEvent(EventKind.TEXT, text=fresh_body)
+            yield StreamEvent(EventKind.COMPLETED)
+            return
+        try:
+            yield StreamEvent(EventKind.TEXT, text="已经落库的部分。")
+            await slow(signal)
+            yield StreamEvent(EventKind.TEXT, text="不能保存的迟到内容。")
+            yield StreamEvent(EventKind.COMPLETED)
+        finally:
+            await asyncio.sleep(0.01)
+            state["closed"] = True
+
+    async def complete(messages, options, signal):
+        if phase == "revise":
+            return CompleteResult(diagnosis_json(body, body), {}, False)
+        try:
+            await slow(signal)
+            response = diagnosis_json(body, body) if phase == "diagnose" else inspection_json(body)
+            return CompleteResult(response, {}, False)
+        finally:
+            state["closed"] = True
+
+    def no_sync(*args):
+        pytest.fail("CLI 应使用异步供应商入口")
+
+    clients = generation.Clients(no_sync, no_sync, stream, complete)
+    scripts = {
+        "write": "x\r\r",
+        "discuss": "t\r看看节奏\r",
+        "check": "k\r",
+        "diagnose": "b\r看看节奏\r",
+        "revise": "b\r看看节奏\r1\r",
+        "auto_check": "x\r\r",
+    }
+    path = tmp_path / phase
+    output = run_cli(
+        pipe, path, NEW_NOVEL + "e\r" + body + CTRL_S + scripts[phase], clients=clients
+    )
+    assert state == {"closed": True, "cancelled": True}
+    assert "取消已记录" in output
+    assert "任务已结束，不能改变状态" not in output
+    for project in reopen(path):
+        statuses = [row[0] for row in project.conn.execute("SELECT status FROM run")]
+        assert statuses.count("cancelled") == 1
+        assert set(statuses) <= {"succeeded", "cancelled"}
+        chapter = authoring.list_chapters(project)[0]
+        current = database.get_version(project.conn, project.novel_id, chapter.current_draft_id)
+        assert current.body == (fresh_body if phase == "auto_check" else body)
+        assert project.conn.execute("SELECT COUNT(*) FROM check_result").fetchone()[0] == 0
+        chunks = project.conn.execute("SELECT partial_text FROM run").fetchall()
+        assert not any("迟到" in row[0] for row in chunks)
+        assert project.conn.execute("SELECT COUNT(*) FROM adoption").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("command", ["t\r看看节奏\r", "k\r"])
+def test_cli_async_request_failure_leaves_no_running_job_or_retry(pipe, tmp_path, command):
+    calls = []
+
+    async def stream(*args):
+        calls.append("stream")
+        raise TimeoutError("不应出现在界面的供应商详情")
+        yield  # 异步流客户端合同
+
+    async def complete(*args):
+        calls.append("complete")
+        raise TimeoutError("不应出现在界面的供应商详情")
+
+    clients = generation.Clients(fixed_stream([]), fixed_complete(""), stream, complete)
+    path = tmp_path / "novel"
+    output = run_cli(
+        pipe, path, NEW_NOVEL + "e\r原稿。" + CTRL_S + command + "q\r", clients=clients
+    )
+    assert len(calls) == 1
+    assert "没有完成" in output and "供应商详情" not in output
+    for project in reopen(path):
+        assert [row[0] for row in project.conn.execute("SELECT status FROM run")] == ["failed"]
+
+
+def test_cli_revalidates_adopted_chapters_in_order_without_changing_drafts(pipe, tmp_path):
+    bodies_to_write = ["井底有一个人。", "他走进旧屋。", "他在门外等待。"]
+    changed = bodies_to_write[0] + "那人没有旧伤。"
+    checks = [inspection_json(body) for body in [*bodies_to_write, changed, *bodies_to_write[1:]]]
+    streams = iter(bodies_to_write)
+    checked_bodies = []
+
+    def complete(messages, options, cancel):
+        checked_bodies.append(messages[-1].content)
+        return fixed_complete(checks.pop(0))(messages, options, cancel)
+
+    clients = generation.Clients(lambda *args: fixed_stream([next(streams)])(*args), complete)
+    path = tmp_path / "novel"
+    script = NEW_NOVEL + PLAN + "w\r\r" + ADOPT
+    script += "n\r" + PLAN + "w\r\r" + ADOPT
+    script += "n\r" + PLAN + "w\r\r" + ADOPT
+    script += "c\r1\re\r" + END + "那人没有旧伤。" + CTRL_S + "k\r" + ADOPT
+    # 待复核不能被“再次采用”静默重算；另存编辑稿后复核仍准确绑定采用稿。
+    script += "c\r3\rv\ra\rc\r2\re\r" + END + "这是未采用的编辑。" + CTRL_S
+    script += "u\r已读，复核\r"  # 旧检查被拒绝，当前选定的是采用稿
+    script += "k\ru\r已读，复核\r"
+    script += "c\r3\ru\r\rk\ru\r已读，复核\rl\rq\r"
+    output = run_cli(pipe, path, script, clients=clients)
+    assert "待复核" in output and "复核没有完成" in output
+    assert output.count("复核完成，故事状态更新完成") == 2
+    assert count(path, "version") == 5
+    assert count(path, "adoption") == 4
+    assert len(checked_bodies) == 6 and not checks
+    assert "这是未采用的编辑。" not in checked_bodies[-2]
+    for project in reopen(path):
+        chapters = authoring.list_chapters(project)
+        assert all(not ch.needs_review and ch.current_snapshot_id for ch in chapters)
+        current = database.get_version(project.conn, project.novel_id, chapters[1].current_draft_id)
+        assert current.body.endswith("这是未采用的编辑。")
+        assert authoring.adopted_version_id(project, chapters[1].id) != current.id
+
+
+def test_cli_retry_check_does_not_generate_another_draft(pipe, tmp_path):
+    path = tmp_path / "novel"
+    calls = []
+    responses = iter(["invalid", CHECK_1])
+
+    def stream(*args):
+        calls.append("write")
+        return fixed_stream([BODY_1])(*args)
+
+    def complete(*args):
+        calls.append("check")
+        return fixed_complete(next(responses))(*args)
+
+    script = NEW_NOVEL + PLAN + "w\r\ry\r1\rq\r"
+    output = run_cli(pipe, path, script, clients=generation.Clients(stream, complete))
+    assert "检查已完成" in output
+    assert calls == ["write", "check", "check"]
+    assert count(path, "version") == 1
+    for project in reopen(path):
+        rows = project.conn.execute(
+            "SELECT id, task, status, retry_of_id FROM run ORDER BY rowid"
+        ).fetchall()
+        assert rows[-1][1:3] == ("inspect", "succeeded")
+        assert rows[-1][3] == rows[-2][0]
+
+
+def test_cli_unresolved_issue_keeps_adopted_chapter_pending(pipe, tmp_path):
+    body2 = "他走进旧屋。"
+    changed = BODY_1 + "那人没有旧伤。"
+    responses = iter(
+        [
+            CHECK_1,
+            inspection_json(body2),
+            inspection_json(changed),
+            inspection_json(body2, issues=[setting_issue(body2, "旧屋", "新增房屋设定")]),
+        ]
+    )
+    texts = iter([BODY_1, body2])
+    clients = generation.Clients(
+        lambda *args: fixed_stream([next(texts)])(*args),
+        lambda *args: fixed_complete(next(responses))(*args),
+    )
+    path = tmp_path / "novel"
+    script = NEW_NOVEL + PLAN + "w\r\r" + ADOPT
+    script += "n\r" + PLAN + "w\r\r" + ADOPT
+    script += "c\r1\re\r" + END + "那人没有旧伤。" + CTRL_S + "k\r" + ADOPT
+    script += "c\r2\ru\r\rk\ru\r已读，复核\r不接受\ry\rq\r"
+    output = run_cli(pipe, path, script, clients=clients)
+    assert "未处理的问题，没有复核" in output
+    assert "没有可重试的失败阶段" in output
+    for project in reopen(path):
+        chapter = authoring.list_chapters(project)[1]
+        assert chapter.needs_review and chapter.current_snapshot_id is None
+        assert project.conn.execute("SELECT COUNT(*) FROM adoption").fetchone()[0] == 3
+        assert project.conn.execute("SELECT COUNT(*) FROM version").fetchone()[0] == 3
+        assert project.conn.execute("SELECT COUNT(*) FROM review").fetchone()[0] == 3
+
+
+@pytest.mark.parametrize("command", ["y\r1\r", "u\r"])
+def test_cli_failed_state_only_recomputes_without_new_review(pipe, tmp_path, monkeypatch, command):
+    from story_workbench.domain import rules
+
+    original = rules.compute_snapshot
+    calls = []
+
+    def compute(*args):
+        calls.append("state")
+        if len(calls) == 1:
+            raise RuntimeError("模拟计算失败")
+        return original(*args)
+
+    monkeypatch.setattr(rules, "compute_snapshot", compute)
+    path = tmp_path / "novel"
+    script = NEW_NOVEL + PLAN + "w\r\r" + ADOPT + command + "q\r"
+    output = run_cli(pipe, path, script, clients=sequenced_clients((BODY_1, CHECK_1)))
+    assert "故事状态更新完成" in output
+    assert calls == ["state", "state"]
+    for project in reopen(path):
+        chapter = authoring.list_chapters(project)[0]
+        assert chapter.current_snapshot_id and not chapter.needs_review
+        for table in ("version", "adoption", "review", "check_result"):
+            assert project.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 1
+        assert project.conn.execute("SELECT COUNT(*) FROM run").fetchone()[0] == 2
+
+
+def test_cli_retry_generation_creates_one_new_attempt(pipe, tmp_path):
+    from story_workbench.infrastructure.provider import EventKind, StreamEvent
+
+    attempts = []
+
+    def stream(*args):
+        attempts.append("write")
+        if len(attempts) == 1:
+            yield StreamEvent(EventKind.ERROR, error="timeout")
+        else:
+            yield from fixed_stream([BODY_1])(*args)
+
+    path = tmp_path / "novel"
+    output = run_cli(
+        pipe,
+        path,
+        NEW_NOVEL + PLAN + "w\r\ry\r1\rq\r",
+        clients=generation.Clients(stream, fixed_complete(CHECK_1)),
+    )
+    assert "写作没有完成" in output and BODY_1 in output
+    assert len(attempts) == 2 and count(path, "version") == 1
+    for project in reopen(path):
+        rows = project.conn.execute(
+            "SELECT id, status, retry_of_id FROM run ORDER BY rowid"
+        ).fetchall()
+        assert [row[1] for row in rows] == ["failed", "succeeded", "succeeded"]
+        assert rows[1][2] == rows[0][0]

@@ -330,6 +330,29 @@ def test_formal_generate_rejects_missing_inputs():
     assert exc.value.code is ErrorCode.INVALID_INPUT
 
 
+@pytest.mark.parametrize("task", [TaskKind.INSPECT, TaskKind.DIAGNOSE])
+def test_sent_structured_prompt_contains_valid_json_example(task):
+    draft = build_chapter_two()
+    build = (
+        tasks.build_inspect_messages if task is TaskKind.INSPECT else tasks.build_diagnose_messages
+    )
+    system, _ = build(request(task), draft, BODY)
+    example = json.loads(system.content[system.content.index("{") : system.content.rindex("}") + 1])
+    assert ("issues" if task is TaskKind.INSPECT else "problems") in example
+
+
+def test_revision_instructions_only_apply_when_rewriting_existing_body():
+    draft = build_chapter_two(WriteMode.EXPLORATORY)
+    req = request(TaskKind.GENERATE, assumptions=("删除敲门声；结尾停在内门前，最多两段。",))
+    original_system, _ = tasks.build_generate_messages(req, draft)
+    system, user = tasks.build_generate_messages(req, draft, BODY)
+    assert prompts.REVISION_SYSTEM not in original_system.content
+    assert prompts.REVISION_SYSTEM in system.content
+    assert prompts.COMMON_SYSTEM in system.content
+    assert BODY in user.content
+    assert req.assumptions[0] in user.content
+
+
 def test_delegation_scope_only_this_request_this_chapter():
     draft = build_chapter_two()
     ok = DelegationScope(chapter_id=CH2, request_message_id="m1", may_choose_plot=True)

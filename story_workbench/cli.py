@@ -19,6 +19,7 @@ from prompt_toolkit import PromptSession
 from story_workbench.application import adoption, authoring, generation, projects
 from story_workbench.application.projects import Project, create_project, open_project
 from story_workbench.cli_editor import edit_text
+from story_workbench.cli_model import run_model
 from story_workbench.domain.records import (
     AuthorAction,
     Authority,
@@ -32,8 +33,10 @@ from story_workbench.domain.records import (
     IssueResolution,
     Lifecycle,
     ResolutionAction,
+    RunStatus,
     SnapshotStatus,
     Target,
+    TaskKind,
     VersionOrigin,
     VersionRecord,
     WorkbenchError,
@@ -78,7 +81,7 @@ HELP = (
     "  t 讨论        p 剧情与结尾    d 记为候选      f 确定\n"
     "  w 写          x 试写          v 查看全文      e 编辑正文\n"
     "  k 检查        i 查看检查      a 采用          j 拒绝\n"
-    "  b 阅读诊断与试改\n"
+    "  b 阅读诊断与试改  u 复核已采用正文  y 重试失败阶段\n"
     "  r 恢复历史版本  h 帮助        q 退出"
 )
 
@@ -177,12 +180,26 @@ class Workbench:
             (("a", "采用", "采用那版", "采用此稿"), self.adopt),
             (("j", "拒绝", "不要这版"), self.reject),
             (("r", "恢复历史版本", "恢复"), self.restore),
+            (("u", "复核"), self.revalidate),
+            (("y", "重试"), self.retry),
             (("h", "帮助", "?"), self.help),
         ):
             for key in keys:
                 self.commands[key] = handler
 
     # ------------------------------------------------------------ 输入输出
+
+    def run_model(self, operation, *args, **kwargs):
+        return run_model(
+            self.project,
+            self.session,
+            self.say,
+            self.clients,
+            self.config,
+            operation,
+            *args,
+            **kwargs,
+        )
 
     def ask(self, prompt: str) -> str:
         return self.session.prompt(prompt).strip()
@@ -286,6 +303,10 @@ class Workbench:
                 marks.append("已有剧情与结尾")
             if chapter.adopted_id:
                 marks.append("已采用")
+                if chapter.needs_review:
+                    marks.append("待复核")
+                elif chapter.current_snapshot_id is None:
+                    marks.append("故事状态待更新")
             if self.chapter is not None and chapter.id == self.chapter.id:
                 marks.append("当前")
             self.say(f"  {chapter.number:>3}. {chapter_label(chapter)} · {' · '.join(marks)}")
@@ -331,9 +352,7 @@ class Workbench:
             return True
         self.say("AI：")
         try:
-            generation.discuss(
-                self.project, chapter.id, text, self.clients, self.config, on_text=self.emit
-            )
+            self.run_model(generation.discuss, chapter.id, text, on_text=self.emit)
         except WorkbenchError as exc:
             self.emit("\n")
             self.say(f"讨论回复没有完成：{exc.message} 你的话已记录。")
@@ -500,13 +519,11 @@ class Workbench:
         message_id = authoring.record_message(self.project, text, chapter.id)
         self.say("开始写作，输出会逐段显示；结束后展示全文与检查。")
         try:
-            result = generation.write_chapter(
-                self.project,
+            result = self.run_model(
+                generation.write_chapter,
                 chapter.id,
                 mode,
                 message_id,
-                self.clients,
-                self.config,
                 assumptions=assumptions,
                 on_text=self.emit,
             )
@@ -547,12 +564,10 @@ class Workbench:
         message_id = authoring.record_message(self.project, f"检查{label}。", chapter.id)
         self.say(f"正在检查 {label}……")
         try:
-            check_id = generation.check_draft(
-                self.project,
+            check_id = self.run_model(
+                generation.check_draft,
                 Target(self.project.novel_id, chapter.id, target.id),
                 message_id,
-                self.clients,
-                self.config,
             )
         except WorkbenchError as exc:
             self.say(f"检查没有完成：{exc.message} 可以再次 k 重试。")
@@ -624,8 +639,10 @@ class Workbench:
         if not feedback:
             return True
         target = Target(self.project.novel_id, chapter.id, version.id)
-        _, payload = generation.diagnose_draft(
-            self.project, target, feedback, self.clients, self.config
+        _, payload = self.run_model(
+            generation.diagnose_draft,
+            target,
+            feedback,
         )
         self.say(f"阅读诊断：{payload.verdict}")
         for problem in payload.problems:
@@ -650,13 +667,11 @@ class Workbench:
         )
         self.say("开始试改，生成候选稿；新增设定仍需在采用时明确授权。")
         try:
-            result = generation.revise_draft(
-                self.project,
+            result = self.run_model(
+                generation.revise_draft,
                 target,
                 option.description,
                 message_id,
-                self.clients,
-                self.config,
                 on_text=self.emit,
             )
         except WorkbenchError as exc:
@@ -735,33 +750,62 @@ class Workbench:
         self.say("看完后用 a 采用这一稿。")
         return None
 
-    def adopt(self) -> bool:
+    def revalidate(self) -> bool:
+        return self.adopt(revalidate=True)
+
+    def adopt(self, *, revalidate: bool = False) -> bool:
         chapter = self.require_chapter()
         if chapter is None:
             return True
-        target = self.bind_target(chapter)
-        if target is None:
-            return True
-        if target.id == self.adopted_version_id(chapter):
-            self.report_already_adopted(chapter)
-            return True
-        self.say("采用前请再看一遍要采用的稿件与检查：")
+        if revalidate:
+            version_id = self.adopted_version_id(chapter)
+            if version_id is None:
+                self.say("本章尚未采用，没有需要复核的正式正文。")
+                return True
+            if not chapter.needs_review:
+                self.report_already_adopted(chapter)
+                return True
+            target = self.version(chapter, version_id)
+        else:
+            target = self.bind_target(chapter)
+            if target is None:
+                return True
+            if target.id == self.adopted_version_id(chapter):
+                self.report_already_adopted(chapter)
+                return True
+        previous = [
+            c for c in authoring.list_chapters(self.project) if c.number == chapter.number - 1
+        ]
+        expected = Expected(
+            adopted_id=chapter.adopted_id,
+            plan_id=chapter.current_plan_id,
+            previous_snapshot_id=previous[0].current_snapshot_id if previous else None,
+        )
+        verb = "复核" if revalidate else "采用"
+        self.say(
+            f"{verb}前请再看一遍正文与检查："
+            if revalidate
+            else "采用前请再看一遍要采用的稿件与检查："
+        )
         self.display_draft(chapter, target, explicit=True)
+        if revalidate:
+            self.say("复核只针对这份已采用正文。用 k 更新检查，再用 u 明确复核。")
         check = self.latest_check(target)
         if check is None:
-            self.say("这一稿还没有检查，不能采用。先用 k 检查。")
+            self.say(f"这一稿还没有检查，不能{verb}。先用 k 检查。")
             return True
         self.show_check(check)
-        answer = self.ask("读完全文和检查后，输入「已读，采用」完成采用（回车取消）：")
-        if answer not in READ_DECLARATIONS:
-            self.say("没有采用。采用需要明确声明已读全文并采用。")
+        answer = self.ask(f"读完全文和检查后，输入「已读，{verb}」完成{verb}（回车取消）：")
+        declarations = {text.replace("采用", verb) for text in READ_DECLARATIONS}
+        if answer not in declarations:
+            self.say(f"没有{verb}。{verb}需要明确声明已读全文并{verb}。")
             return True
-        notes: list[str] = [f"已阅读{chapter_label(chapter)}全文与检查，采用这一稿。"]
+        notes: list[str] = [f"已阅读{chapter_label(chapter)}全文与检查，{verb}这一稿。"]
         resolutions, plot, ending, declined = self.resolve_issues(check, notes)
         if declined:
-            self.say("这一稿有未处理的问题，没有采用：")
+            self.say(f"这一稿有未处理的问题，没有{verb}：")
             self.list_issues(declined)
-            self.say("可以用 e 修改稿件、j 拒绝这一稿，或再次 a 采用并给出授权。")
+            self.say("可以修改后采用新稿，或重新审阅并处理这些问题。")
             return True
         basis = database.get_basis(self.project.conn, self.project.novel_id, check.basis_id)
         if basis.purpose == "exploratory" and not (plot and ending):
@@ -771,20 +815,12 @@ class Workbench:
             if plot is None:
                 self.say("没有采用。试写稿需要明确接受剧情与结尾。")
                 return True
-        chapter = self.refresh() or chapter
-        previous = [
-            c for c in authoring.list_chapters(self.project) if c.number == chapter.number - 1
-        ]
         message_id = authoring.record_message(self.project, "\n".join(notes), chapter.id)
         action = AuthorAction(
             request_id=uuid.uuid4().hex,
             source_message_id=message_id,
             target=Target(self.project.novel_id, chapter.id, target.id),
-            expected=Expected(
-                adopted_id=chapter.adopted_id,
-                plan_id=chapter.current_plan_id,
-                previous_snapshot_id=previous[0].current_snapshot_id if previous else None,
-            ),
+            expected=expected,
             check_id=check.id,
             read_declared=True,
             issue_resolutions=tuple(resolutions),
@@ -792,9 +828,21 @@ class Workbench:
             accepted_ending=ending,
         )
         try:
+            if revalidate:
+                status = adoption.revalidate_chapter(self.project, action)
+                self.refresh()
+                self.say(
+                    "复核完成，故事状态更新完成；正文未改动，仍沿用原来的采用结果。"
+                    if status is SnapshotStatus.READY
+                    else "复核已保存，故事状态仍待更新；用 y 重试状态更新。"
+                )
+                return True
             result = adoption.adopt(self.project, action)
         except WorkbenchError as exc:
-            self.explain_adoption_failure(exc, check)
+            if revalidate:
+                self.say(f"复核没有完成：{exc.message} 如依据已变化，请用 k 重新检查后再 u 复核。")
+            else:
+                self.explain_adoption_failure(exc, check)
             return True
         self.refresh()
         if result.already_adopted:
@@ -882,6 +930,13 @@ class Workbench:
         return plot, ending
 
     def report_already_adopted(self, chapter: ChapterRecord) -> None:
+        chapter = authoring.get_chapter(self.project, chapter.id)
+        if chapter.needs_review:
+            self.say(
+                "这一稿已采用，但前文依据已变化，仍待复核。"
+                "用 u 查看已采用正文、k 更新检查，再 u 复核。"
+            )
+            return
         if chapter.current_snapshot_id is not None:
             snapshot = database.get_snapshot(
                 self.project.conn, self.project.novel_id, chapter.current_snapshot_id
@@ -899,6 +954,82 @@ class Workbench:
             self.say("故事状态更新完成。")
         else:
             self.say("状态更新仍未完成，可稍后再试；正文仍是已采用版本。")
+
+    def retry(self) -> bool:
+        chapter = self.require_chapter()
+        if chapter is None:
+            return True
+        runs = [
+            database.get_run(self.project.conn, self.project.novel_id, run_id)
+            for status in (RunStatus.FAILED, RunStatus.INTERRUPTED, RunStatus.CANCELLED)
+            for run_id in database.list_runs_with_status(
+                self.project.conn, self.project.novel_id, status
+            )
+        ]
+        runs = sorted(
+            (
+                run
+                for run in runs
+                if run.chapter_id == chapter.id
+                and run.task in (TaskKind.GENERATE, TaskKind.INSPECT)
+            ),
+            key=lambda run: run.created_at,
+            reverse=True,
+        )
+        state_pending = bool(
+            chapter.adopted_id and not chapter.needs_review and chapter.current_snapshot_id is None
+        )
+        choices = ([None] if state_pending else []) + runs
+        if not choices:
+            self.say("本章没有可重试的失败阶段。待复核请用 u；讨论或诊断可重新提出请求。")
+            return True
+        self.say("选择失败阶段：状态更新不调用模型；写作或检查会发起一次新的模型请求。")
+        for index, run in enumerate(choices, 1):
+            if run is None:
+                label = "故事状态更新（保留已采用正文）"
+            else:
+                label = (
+                    "检查（只重新检查原稿）" if run.task is TaskKind.INSPECT else "写作（重新生成）"
+                )
+                label += f" · {local_time(run.created_at)}"
+                if run.input_version_id:
+                    label += f" · {first_line(self.version(chapter, run.input_version_id).body)}"
+            self.say(f"  {index}. {label}")
+        answer = self.ask("重试第几个阶段（输入序号，回车取消）：")
+        if not answer:
+            return True
+        if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
+            self.say("没有这个序号。")
+            return True
+        run = choices[int(answer) - 1]
+        if run is None:
+            self.report_already_adopted(chapter)
+            self.refresh()
+            return True
+        if not self.model_ready("重试"):
+            return True
+        if run.task is TaskKind.INSPECT:
+            self.display_draft(chapter, self.version(chapter, run.input_version_id), explicit=True)
+        message_id = authoring.record_message(self.project, "重试选中的失败阶段。", chapter.id)
+        try:
+            result = self.run_model(generation.retry_run, run.id, message_id, on_text=self.emit)
+        except WorkbenchError as exc:
+            self.say(f"重试没有完成：{exc.message}")
+            return True
+        self.emit("\n")
+        if isinstance(result, str):
+            self.show_check(database.get_check(self.project.conn, self.project.novel_id, result))
+            self.say("检查已完成；已采用正文待复核时用 u，其他稿件用 a 审阅采用。")
+        else:
+            fresh = self.refresh() or chapter
+            self.display_draft(fresh, self.version(fresh, result.version_id), explicit=True)
+            if result.check_id:
+                self.show_check(
+                    database.get_check(self.project.conn, self.project.novel_id, result.check_id)
+                )
+            else:
+                self.say("正文已保存，检查没有完成；可用 y 仅重试检查。")
+        return True
 
     def explain_adoption_failure(self, exc: WorkbenchError, check: CheckRecord) -> None:
         if exc.code is ErrorCode.REVIEW_REQUIRED:

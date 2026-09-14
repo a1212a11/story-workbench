@@ -30,6 +30,8 @@ from story_workbench.domain.records import (
 )
 from story_workbench.infrastructure import database
 from story_workbench.infrastructure.provider import (
+    AsyncCompleteCall,
+    AsyncStreamCall,
     CallOptions,
     CancelSignal,
     CompleteCall,
@@ -47,6 +49,8 @@ class Clients:
 
     stream: StreamCall
     complete: CompleteCall
+    async_stream: AsyncStreamCall | None = None
+    async_complete: AsyncCompleteCall | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +247,13 @@ def _ensure_idle(project: Project) -> None:
         )
 
 
+def _fail_run(project: Project, run_id: str, code: str) -> None:
+    if database.get_run(project.conn, project.novel_id, run_id).status is RunStatus.RUNNING:
+        database.commit_run_status(
+            project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code=code
+        )
+
+
 def _request(
     task: TaskKind,
     basis_id: str,
@@ -294,19 +305,32 @@ def _run_stream(
     parts: list[str] = []
     usage_json: str | None = None
     final = EventKind.ERROR
-    for event in events:
-        if event.kind is EventKind.TEXT:
-            if not database.commit_run_chunk(project.conn, project.novel_id, run_id, event.text):
-                final = EventKind.ERROR  # 已取消，丢弃迟到块
-                break
-            parts.append(event.text)
-            if on_text is not None:
-                on_text(event.text)
-        elif event.kind is EventKind.USAGE:
-            usage_json = json.dumps(event.usage)
-        else:
-            final = event.kind
-            break
+    try:
+        try:
+            for event in events:
+                if event.kind is EventKind.TEXT:
+                    if not database.commit_run_chunk(
+                        project.conn, project.novel_id, run_id, event.text
+                    ):
+                        final = EventKind.ERROR  # 已取消，丢弃迟到块
+                        break
+                    parts.append(event.text)
+                    if on_text is not None:
+                        on_text(event.text)
+                elif event.kind is EventKind.USAGE:
+                    usage_json = json.dumps(event.usage)
+                else:
+                    final = event.kind
+                    break
+        finally:
+            close = getattr(events, "close", None)
+            if close is not None:
+                close()
+    except Exception as exc:
+        _fail_run(project, run_id, "MODEL_FAILED")
+        if isinstance(exc, WorkbenchError):
+            raise
+        raise WorkbenchError(ErrorCode.MODEL_FAILED, "模型请求失败。") from None
     return "".join(parts), usage_json, final
 
 
@@ -393,16 +417,14 @@ def write_chapter(
         )
         body, usage_json, final = _run_stream(project, run_id, events, on_text)
     except WorkbenchError as exc:
-        database.commit_run_status(
-            project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code=exc.code.value
-        )
+        _fail_run(project, run_id, exc.code.value)
         raise
     except Exception as exc:
-        database.commit_run_status(
-            project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code="MODEL_FAILED"
-        )
+        _fail_run(project, run_id, "MODEL_FAILED")
         raise WorkbenchError(
-            ErrorCode.MODEL_FAILED, "模型请求失败。", {"run_id": run_id, "error": repr(exc)}
+            ErrorCode.MODEL_FAILED,
+            "模型请求失败。",
+            {"run_id": run_id, "error_type": type(exc).__name__},
         ) from exc
     if final is not EventKind.COMPLETED:
         run = database.get_run(project.conn, project.novel_id, run_id)
@@ -442,7 +464,14 @@ def write_chapter(
     check_id: str | None
     try:
         check_id = check_draft(
-            project, target, source_message_id, clients, config, basis_id=basis_id, context=draft
+            project,
+            target,
+            source_message_id,
+            clients,
+            config,
+            basis_id=basis_id,
+            context=draft,
+            cancel=cancel,
         )
     except WorkbenchError:
         check_id = None
@@ -509,14 +538,10 @@ def diagnose_draft(
             cancel=cancel or CancelSignal(),
         )
     except WorkbenchError as exc:
-        database.commit_run_status(
-            project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code=exc.code.value
-        )
+        _fail_run(project, run_id, exc.code.value)
         raise
     except Exception as exc:
-        database.commit_run_status(
-            project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code="MODEL_FAILED"
-        )
+        _fail_run(project, run_id, "MODEL_FAILED")
         raise WorkbenchError(
             ErrorCode.MODEL_FAILED,
             "模型请求失败。",
@@ -688,10 +713,13 @@ def check_draft(
             check_input,
         )
     except WorkbenchError as exc:
-        database.commit_run_status(
-            project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code=exc.code.value
-        )
+        _fail_run(project, run_id, exc.code.value)
         raise
+    except Exception as exc:
+        _fail_run(project, run_id, "MODEL_FAILED")
+        raise WorkbenchError(
+            ErrorCode.MODEL_FAILED, "模型检查请求失败。", {"error_type": type(exc).__name__}
+        ) from None
     database.commit_run_status(
         project.conn,
         project.novel_id,
@@ -734,17 +762,23 @@ def discuss(
         basis_id=basis_id,
         request_json=_request_json(request),
     )
-    events = tasks.discuss(
-        request,
-        draft,
-        author_text,
-        clients.stream,
-        options=config.options,
-        cancel=cancel or CancelSignal(),
-    )
-    body, usage_json, final = _run_stream(project, run_id, events, on_text)
-    if final is not EventKind.COMPLETED:
-        run = database.get_run(project.conn, project.novel_id, run_id)
+    try:
+        events = tasks.discuss(
+            request,
+            draft,
+            author_text,
+            clients.stream,
+            options=config.options,
+            cancel=cancel or CancelSignal(),
+        )
+        body, usage_json, final = _run_stream(project, run_id, events, on_text)
+    except Exception as exc:
+        _fail_run(project, run_id, "MODEL_FAILED")
+        if isinstance(exc, WorkbenchError):
+            raise
+        raise WorkbenchError(ErrorCode.MODEL_FAILED, "讨论请求失败。") from None
+    run = database.get_run(project.conn, project.novel_id, run_id)
+    if final is not EventKind.COMPLETED or run.status is not RunStatus.RUNNING:
         if run.status is RunStatus.RUNNING:
             database.commit_run_status(
                 project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code=final.value
