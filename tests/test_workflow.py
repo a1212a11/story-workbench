@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +38,38 @@ from tests.conftest import fixed_complete, fixed_stream
 OPTIONS = CallOptions(model="fixed", max_output_tokens=2000, timeout_seconds=5)
 LIMITS = ContextLimits(total_tokens=20000, template_reserve=500, output_reserve=2000)
 CONFIG = generation.GenerationConfig(options=OPTIONS, limits=LIMITS)
+
+
+@pytest.mark.parametrize("variant", ["original", "missing", "ambiguous"])
+def test_deepseek_real_response_locations_are_repaired_before_commit(project, variant):
+    sample = json.loads(
+        (Path(__file__).parent / "fixtures" / "deepseek-inspection-offsets.json").read_text()
+    )
+    body, payload = sample["body"], sample["response"]
+    if variant == "missing":
+        payload["candidate_facts"][1]["quote"] = "正文没有这句话。"
+    elif variant == "ambiguous":
+        body += body
+    chapter, message = plan_chapter(project, 1, "沈砚观察井沿", "仍站在井边")
+    saved = authoring.save_draft(project, chapter.id, body, Expected())
+    target = Target(project.novel_id, chapter.id, saved.version_id)
+    clients = clients_for("", json.dumps(payload, ensure_ascii=False))
+    if variant != "original":
+        with pytest.raises(WorkbenchError) as exc:
+            generation.check_draft(project, target, message, clients, CONFIG)
+        assert exc.value.code is ErrorCode.MODEL_FAILED
+        assert database.list_runs_with_status(project.conn, project.novel_id, RunStatus.FAILED)
+        assert (
+            database.latest_check_for_version(project.conn, project.novel_id, saved.version_id)
+            is None
+        )
+        assert project.conn.execute("SELECT COUNT(*) FROM candidate_fact").fetchone()[0] == 0
+        return
+    check_id = generation.check_draft(project, target, message, clients, CONFIG)
+    facts = database.list_candidate_facts(project.conn, project.novel_id, check_id)
+    assert [(f.evidence_start, f.evidence_end) for f in facts] == [(0, 49), (14, 32)]
+    assert all(body[f.evidence_start : f.evidence_end] == f.quote for f in facts)
+    assert authoring.get_chapter(project, chapter.id).adopted_id is None
 
 
 def evidence(body: str, quote: str) -> dict:
@@ -256,7 +289,7 @@ def test_invalid_check_keeps_draft_and_retry_only_reruns_check(project):
                 "story_time": None,
                 "start": 0,
                 "end": 3,
-                "quote": "井沿",
+                "quote": "井中有鱼",
             }
         ],
     )
@@ -757,3 +790,214 @@ def test_t12_diagnosis_and_trial_revision_keep_original_and_do_not_change_rules(
         Expected(current_draft_id=r.version_id),
     )
     assert authoring.get_chapter(project, ch1.id).current_draft_id == r2.version_id
+
+
+def test_t12_revision_uses_selected_history_version_and_feedback_survives_trimming(project):
+    ch1, msg1 = plan_chapter(project, 1, "调查旧井", "看到尸体")
+    old_body = "井底有一具尸体。沈砚把灯搁在井沿。"
+    r = generation.write_chapter(
+        project,
+        ch1.id,
+        WriteMode.FORMAL,
+        msg1,
+        clients_for(old_body, inspection_json(old_body, plot="调查旧井", ending="看到尸体")),
+        CONFIG,
+    )
+    current_body = "当前稿：沈砚只看到一盏灯。"
+    current = authoring.save_draft(
+        project, ch1.id, current_body, Expected(current_draft_id=r.version_id)
+    )
+    long_discussion = "这段普通讨论会被裁掉：" + "很长。" * 120
+    authoring.record_message(project, long_discussion, ch1.id)
+    target = Target(project.novel_id, ch1.id, r.version_id)
+    seen: dict[str, str] = {}
+    feedback = "这次反馈必须进入诊断：节奏太平。"
+
+    def complete(messages, options, cancel):
+        seen["diagnose"] = messages[-1].content
+        return fixed_complete(diagnosis_json(old_body, "井底有一具尸体。"))(
+            messages, options, cancel
+        )
+
+    small_config = generation.GenerationConfig(
+        options=OPTIONS,
+        limits=ContextLimits(total_tokens=950, template_reserve=500, output_reserve=100),
+    )
+    feedback_id, payload = generation.diagnose_draft(
+        project,
+        target,
+        feedback,
+        generation.Clients(stream=fixed_stream(["x"]), complete=complete),
+        small_config,
+    )
+    assert payload.problems
+    assert feedback in seen["diagnose"]
+    assert long_discussion not in seen["diagnose"]
+
+    revised = "旧稿试改：井底那团灰衣先显出轮廓。"
+    check_json = inspection_json(revised, plot="调查旧井", ending="看到尸体")
+
+    def stream(messages, options, cancel):
+        seen["generate"] = messages[-1].content
+        yield from fixed_stream([revised])(messages, options, cancel)
+
+    r2 = generation.revise_draft(
+        project,
+        target,
+        payload.options[0].description,
+        feedback_id,
+        generation.Clients(stream=stream, complete=fixed_complete(check_json)),
+        CONFIG,
+    )
+    run = database.get_run(project.conn, project.novel_id, r2.run_id)
+    new_version = authoring.get_version(project, Target(project.novel_id, ch1.id, r2.version_id))
+    assert run.input_version_id == r.version_id
+    assert new_version.parent_id == r.version_id
+    assert old_body in seen["generate"]
+    assert current_body not in seen["generate"]
+    assert authoring.get_chapter(project, ch1.id).current_draft_id == current.version_id
+
+    ch2, _ = plan_chapter(project, 2, "去旧屋", "门前")
+    with pytest.raises(WorkbenchError) as exc:
+        generation.revise_draft(
+            project,
+            Target(project.novel_id, ch2.id, r.version_id),
+            payload.options[0].description,
+            feedback_id,
+            generation.Clients(stream=stream, complete=fixed_complete(check_json)),
+            CONFIG,
+        )
+    assert exc.value.code is ErrorCode.WRONG_SCOPE
+
+
+def test_t12_required_revision_and_diagnosis_inputs_must_fit_context(project):
+    ch1, msg1 = plan_chapter(project, 1, "调查旧井", "看到尸体")
+    body = "井底有一具尸体。"
+    r = generation.write_chapter(
+        project,
+        ch1.id,
+        WriteMode.FORMAL,
+        msg1,
+        clients_for(body, inspection_json(body, plot="调查旧井", ending="看到尸体")),
+        CONFIG,
+    )
+    tiny_config = generation.GenerationConfig(
+        options=OPTIONS,
+        limits=ContextLimits(total_tokens=650, template_reserve=500, output_reserve=100),
+    )
+
+    calls = {"diagnose": 0, "revise": 0}
+
+    def complete(messages, options, cancel):
+        calls["diagnose"] += 1
+        return fixed_complete(diagnosis_json(body, "井底有一具尸体。"))(messages, options, cancel)
+
+    with pytest.raises(WorkbenchError) as feedback_too_large:
+        generation.diagnose_draft(
+            project,
+            Target(project.novel_id, ch1.id, r.version_id),
+            "反馈太大：" + "节奏。" * 80,
+            generation.Clients(stream=fixed_stream(["x"]), complete=complete),
+            tiny_config,
+        )
+    assert feedback_too_large.value.code is ErrorCode.CONTEXT_TOO_LARGE
+    assert calls["diagnose"] == 0
+
+    large = authoring.save_draft(
+        project,
+        ch1.id,
+        "正文太大：" + "井底有一具尸体。" * 80,
+        Expected(current_draft_id=r.version_id),
+    )
+
+    def stream(messages, options, cancel):
+        calls["revise"] += 1
+        yield from fixed_stream(["不会调用"])(messages, options, cancel)
+
+    with pytest.raises(WorkbenchError) as body_too_large:
+        generation.revise_draft(
+            project,
+            Target(project.novel_id, ch1.id, large.version_id),
+            "压缩节奏",
+            msg1,
+            generation.Clients(stream=stream, complete=complete),
+            tiny_config,
+        )
+    assert body_too_large.value.code is ErrorCode.CONTEXT_TOO_LARGE
+    assert calls == {"diagnose": 0, "revise": 0}
+
+    rows = project.conn.execute(
+        "SELECT task FROM run WHERE task IN ('diagnose', 'generate') ORDER BY rowid"
+    ).fetchall()
+    assert [row[0] for row in rows] == ["generate"]
+
+
+def test_t12_diagnosis_provider_error_marks_run_failed(project):
+    ch1, msg1 = plan_chapter(project, 1, "调查旧井", "看到尸体")
+    body = "井底有一具尸体。沈砚把灯搁在井沿。"
+    r = generation.write_chapter(
+        project,
+        ch1.id,
+        WriteMode.FORMAL,
+        msg1,
+        clients_for(body, inspection_json(body, plot="调查旧井", ending="看到尸体")),
+        CONFIG,
+    )
+
+    def complete(messages, options, cancel):
+        raise RuntimeError("provider stopped oddly")
+
+    with pytest.raises(WorkbenchError) as exc:
+        generation.diagnose_draft(
+            project,
+            Target(project.novel_id, ch1.id, r.version_id),
+            "帮我诊断节奏。",
+            generation.Clients(stream=fixed_stream(["x"]), complete=complete),
+            CONFIG,
+        )
+    assert exc.value.code is ErrorCode.MODEL_FAILED
+    row = project.conn.execute(
+        "SELECT status, error_code FROM run WHERE task = 'diagnose' ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(row) == ("failed", "MODEL_FAILED")
+
+
+def test_retry_failed_trial_revision_keeps_selected_source_and_candidate_status(project):
+    chapter, message = plan_chapter(project, 1, "调查旧井", "看到尸体")
+    original = authoring.save_draft(project, chapter.id, "待试改旧稿。", Expected())
+    current = authoring.save_draft(
+        project, chapter.id, "当前编辑稿。", Expected(current_draft_id=original.version_id)
+    )
+
+    def fail(*args):
+        yield StreamEvent(EventKind.ERROR, error="connection_lost")
+
+    with pytest.raises(WorkbenchError):
+        generation.revise_draft(
+            project,
+            Target(project.novel_id, chapter.id, original.version_id),
+            "改善节奏",
+            message,
+            generation.Clients(stream=fail, complete=fixed_complete("{}")),
+            CONFIG,
+        )
+    failed = database.list_runs_with_status(project.conn, project.novel_id, RunStatus.FAILED)[0]
+    seen = []
+
+    def stream(messages, options, cancel):
+        seen.append(messages[-1].content)
+        yield from fixed_stream(["试改结果。"])(messages, options, cancel)
+
+    result = generation.retry_run(
+        project,
+        failed,
+        message,
+        generation.Clients(stream=stream, complete=fixed_complete(inspection_json("试改结果。"))),
+        CONFIG,
+    )
+    version = authoring.get_version(
+        project, Target(project.novel_id, chapter.id, result.version_id)
+    )
+    assert version.parent_id == original.version_id
+    assert "待试改旧稿。" in seen[0] and "当前编辑稿。" not in seen[0]
+    assert authoring.get_chapter(project, chapter.id).current_draft_id == current.version_id

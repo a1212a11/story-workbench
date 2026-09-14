@@ -78,6 +78,7 @@ HELP = (
     "  t 讨论        p 剧情与结尾    d 记为候选      f 确定\n"
     "  w 写          x 试写          v 查看全文      e 编辑正文\n"
     "  k 检查        i 查看检查      a 采用          j 拒绝\n"
+    "  b 阅读诊断与试改\n"
     "  r 恢复历史版本  h 帮助        q 退出"
 )
 
@@ -172,6 +173,7 @@ class Workbench:
             (("e", "编辑正文", "编辑"), self.edit_body),
             (("k", "检查"), self.check),
             (("i", "查看检查"), self.show_latest_check),
+            (("b", "阅读诊断与试改", "阅读诊断", "诊断"), self.diagnose),
             (("a", "采用", "采用那版", "采用此稿"), self.adopt),
             (("j", "拒绝", "不要这版"), self.reject),
             (("r", "恢复历史版本", "恢复"), self.restore),
@@ -580,8 +582,10 @@ class Workbench:
         conn, novel_id = self.project.conn, self.project.novel_id
         self.say(f"  实际剧情：{check.actual_plot}")
         self.say(f"  实际结尾：{check.actual_ending}")
+        self.say(f"  已检查范围：{'、'.join(check.coverage_checked) or '未说明'}")
+        self.say(f"  未检查范围：{'、'.join(check.coverage_unchecked) or '未列出'}")
         if not check.issues:
-            self.say("  未发现需要处理的问题。")
+            self.say("  本次检查未发现需要处理的问题；未检查范围不代表没有问题。")
         for index, issue in enumerate(check.issues, start=1):
             self.say(f"  问题 {index} · {_ISSUE_LABEL[issue.kind]}：{issue.explanation}")
             for _, _, quote in database.list_issue_evidence(conn, novel_id, issue.id):
@@ -603,6 +607,91 @@ class Workbench:
     def list_issues(self, issues: list[IssueRecord]) -> None:
         for issue in issues:
             self.say(f"  · {_ISSUE_LABEL[issue.kind]}：{issue.explanation}")
+
+    # ------------------------------------------------------------ 阅读诊断与试改
+
+    def diagnose(self) -> bool:
+        chapter = self.require_chapter()
+        if chapter is None or not self.model_ready("阅读诊断"):
+            return True
+        version = self.target_draft(chapter)
+        if version is None:
+            self.say(f"{chapter_label(chapter)}还没有正文。")
+            return True
+        current_id = chapter.current_draft_id
+        self.display_draft(chapter, version, explicit=True)
+        feedback = self.ask("读起来哪里不满意，或想重点看什么（回车取消）：")
+        if not feedback:
+            return True
+        target = Target(self.project.novel_id, chapter.id, version.id)
+        _, payload = generation.diagnose_draft(
+            self.project, target, feedback, self.clients, self.config
+        )
+        self.say(f"阅读诊断：{payload.verdict}")
+        for problem in payload.problems:
+            self.say(f"  问题：{problem.explanation}")
+            for evidence in problem.evidence:
+                self.say(f"    原文：「{evidence.quote}」")
+        for index, option in enumerate(payload.options, start=1):
+            flag = "（需新增设定授权）" if option.requires_new_setting else ""
+            self.say(f"  {index}. {option.description}{flag}")
+        for setting in payload.new_settings_requiring_authorization:
+            self.say(f"  需授权的新设定：{setting}")
+        if not payload.options:
+            self.say("没有可选修改，原稿保留。")
+            return True
+        answer = self.ask("按哪个选项试改（输入序号，回车只看诊断）：")
+        if not answer.isdigit() or not 1 <= int(answer) <= len(payload.options):
+            self.say("没有开始试改，诊断已记录，原稿保留。")
+            return True
+        option = payload.options[int(answer) - 1]
+        message_id = authoring.record_message(
+            self.project, f"仅对这一稿试改：{option.description}", chapter.id
+        )
+        self.say("开始试改，生成候选稿；新增设定仍需在采用时明确授权。")
+        try:
+            result = generation.revise_draft(
+                self.project,
+                target,
+                option.description,
+                message_id,
+                self.clients,
+                self.config,
+                on_text=self.emit,
+            )
+        except WorkbenchError as exc:
+            self.emit("\n")
+            self.say(f"试改没有完成：{exc.message} 原稿保留。")
+            return True
+        self.emit("\n")
+        candidate = self.version(chapter, result.version_id)
+        self.display_draft(chapter, candidate, explicit=True)
+        if result.check_id:
+            self.show_check(
+                database.get_check(self.project.conn, self.project.novel_id, result.check_id)
+            )
+        else:
+            self.say("试改稿已保存，检查尚未完成；采用前请用 k 检查。")
+        choice = self.ask("怎样处理试改稿（保留为编辑稿 / 拒绝 / 回车仅保存候选）：")
+        if choice in ("保留", "保留为编辑稿"):
+            reason = self.ask("保留的理由（回车留空）：")
+            authoring.record_message(self.project, f"请求保留试改稿为编辑稿。{reason}", chapter.id)
+            try:
+                authoring.choose_current_draft(
+                    self.project,
+                    Target(self.project.novel_id, chapter.id, candidate.id),
+                    Expected(current_draft_id=current_id),
+                )
+            except WorkbenchError as exc:
+                self.say(f"没有切换编辑稿：{exc.message} 试改稿已保存，请重新查看后选择。")
+                return True
+            self.say("已保留试改稿为编辑稿，原稿仍在历史里；尚未采用。")
+        elif choice == "拒绝":
+            return self.reject()
+        else:
+            self.say("试改稿仅作为候选保存，当前编辑稿保持不变。")
+        self.refresh()
+        return True
 
     # ------------------------------------------------------------ 采用
 

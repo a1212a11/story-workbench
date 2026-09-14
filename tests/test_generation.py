@@ -451,10 +451,85 @@ def test_inspection_fake_quote_is_model_failed_without_leaking_body():
 
     payload = valid_inspection()
     payload["issues"][0]["evidence"][0]["end"] = len(BODY) + 5
-    with pytest.raises(WorkbenchError) as out_of_range:
-        inspect_with(payload)
-    assert out_of_range.value.code is ErrorCode.MODEL_FAILED
-    assert out_of_range.value.details["loc"] == "issues[0].evidence[0]"
+    span = inspect_with(payload).issues[0].evidence[0]
+    assert BODY[span.start : span.end] == span.quote
+
+
+@pytest.mark.parametrize("kind", ["issue", "fact", "diagnosis"])
+@pytest.mark.parametrize(
+    "body, quote, expected",
+    [
+        ("前🌧️。\n井沿。", "井沿。", (5, 8)),
+        ("甲乙甲乙", "甲乙", None),
+        ("哈哈哈", "哈哈", None),
+        ("井沿。", "井沿！", None),
+        ("井沿。", "", None),
+    ],
+)
+def test_evidence_is_located_only_by_unique_exact_quote(kind, body, quote, expected):
+    span = {"quote": quote}
+    if expected is None:
+        span.update(start=0, end=len(quote))
+    if kind == "diagnosis":
+        payload = {
+            "verdict": "反馈",
+            "problems": [{"explanation": "问题", "evidence": [span]}],
+            "options": [],
+            "new_settings_requiring_authorization": [],
+        }
+        invoke = tasks.diagnose
+        task = TaskKind.DIAGNOSE
+    else:
+        payload = valid_inspection()
+        payload["issues"] = []
+        payload["candidate_facts"] = []
+        if kind == "issue":
+            payload["issues"] = [
+                {
+                    "kind": "suspected_error",
+                    "explanation": "问题",
+                    "proposed_change": "",
+                    "evidence": [span],
+                }
+            ]
+        else:
+            payload["candidate_facts"] = [
+                {
+                    "kind": "world",
+                    "subject": None,
+                    "proposition": "事实",
+                    "story_time": None,
+                    **span,
+                }
+            ]
+        invoke = tasks.inspect
+        task = TaskKind.INSPECT
+
+    def run():
+        return invoke(
+            request(task),
+            build_chapter_two(),
+            body,
+            fixed_complete(json.dumps(payload)),
+            options=OPTIONS,
+        )
+
+    if expected is None:
+        with pytest.raises(WorkbenchError) as exc:
+            run()
+        assert exc.value.code is ErrorCode.MODEL_FAILED
+        assert exc.value.details["reason"] == "evidence_mismatch"
+    else:
+        result = run()
+        located = (
+            result.problems[0].evidence[0]
+            if kind == "diagnosis"
+            else result.issues[0].evidence[0]
+            if kind == "issue"
+            else result.candidate_facts[0]
+        )
+        assert (located.start, located.end) == expected
+        assert body[located.start : located.end] == quote
 
 
 def test_inspection_truncated_or_non_json_is_model_failed():

@@ -118,8 +118,9 @@ class _Strict(BaseModel):
 
 
 class _EvidenceModel(_Strict):
-    start: int
-    end: int
+    # 兼容旧模型响应的下标字段；定位仅以唯一原文引用为准。
+    start: int = 0
+    end: int = 0
     quote: str
 
 
@@ -135,8 +136,8 @@ class _CandidateFactModel(_Strict):
     subject: str | None
     proposition: str
     story_time: str | None
-    start: int
-    end: int
+    start: int = 0
+    end: int = 0
     quote: str
 
 
@@ -232,7 +233,9 @@ def render_context(context: ContextDraft) -> str:
 # ---------------------------------------------------------------- 消息构建（纯函数，便于测试）
 
 
-def build_generate_messages(request: TaskRequest, context: ContextDraft) -> list[ChatMessage]:
+def build_generate_messages(
+    request: TaskRequest, context: ContextDraft, input_body: str | None = None
+) -> list[ChatMessage]:
     _require_task(request, TaskKind.GENERATE)
     _require_scope(request, context)
     if context.mode is WriteMode.FORMAL:
@@ -263,6 +266,9 @@ def build_generate_messages(request: TaskRequest, context: ContextDraft) -> list
         delegation_line = "没有情节选择的委托；不确定的地方保持克制，不替作者决定。"
     user = prompts.GENERATE_USER.format(
         context=render_context(context),
+        input_body_block=""
+        if input_body is None
+        else f"\n## 待改正文（第{context.chapter_number}章）\n{input_body}\n",
         chapter_number=context.chapter_number,
         mode_line=mode_line,
         delegation_line=delegation_line,
@@ -296,14 +302,19 @@ def build_inspect_messages(
 
 
 def build_diagnose_messages(
-    request: TaskRequest, context: ContextDraft, body: str
+    request: TaskRequest, context: ContextDraft, body: str, author_feedback: str = ""
 ) -> list[ChatMessage]:
     _require_task(request, TaskKind.DIAGNOSE)
     _require_scope(request, context)
     if not body:
         raise WorkbenchError(ErrorCode.INVALID_INPUT, "待诊断正文为空。")
     user = prompts.DIAGNOSE_USER.format(
-        context=render_context(context), chapter_number=context.chapter_number, body=body
+        context=render_context(context),
+        author_feedback_block=""
+        if not author_feedback
+        else f"\n## 作者本次反馈\n{author_feedback}\n",
+        chapter_number=context.chapter_number,
+        body=body,
     )
     return [ChatMessage("system", prompts.DIAGNOSE_SYSTEM), ChatMessage("user", user)]
 
@@ -316,11 +327,12 @@ def generate(
     context: ContextDraft,
     stream_call: StreamCall,
     *,
+    input_body: str | None = None,
     options: CallOptions,
     cancel: CancelSignal | None = None,
 ) -> Iterator[StreamEvent]:
     """正式写作或试写：返回标准文本事件流。不保存、不采用；generation 持久化流块。"""
-    messages = build_generate_messages(request, context)
+    messages = build_generate_messages(request, context, input_body)
     return stream_call(messages, _options_for(request, options), cancel or CancelSignal())
 
 
@@ -386,19 +398,24 @@ def _parse_payload(result: CompleteResult, model: type[BaseModel], task: TaskKin
         ) from exc
 
 
-def _check_span(body: str, span: _EvidenceModel | _CandidateFactModel, loc: str) -> None:
-    try:
-        validate_evidence_span(body, span.start, span.end, span.quote)
-    except WorkbenchError as exc:
+def _resolve_span(body: str, span: _EvidenceModel | _CandidateFactModel, loc: str) -> EvidenceSpan:
+    """只定位非空、唯一、逐字匹配的引用；包括重叠重复，不使用模型猜测的下标。"""
+    start = body.find(span.quote)
+    cause = None
+    if not span.quote:
+        cause = "empty_quote"
+    elif start < 0:
+        cause = "quote_not_found"
+    elif body.find(span.quote, start + 1) >= 0:
+        cause = "ambiguous_quote"
+    if cause:
         raise _model_failed(
-            "模型给出的原文引用与正文不符。",
-            {
-                **exc.details,
-                "cause": exc.details.get("reason"),
-                "reason": "evidence_mismatch",
-                "loc": loc,
-            },
-        ) from exc
+            "模型引用无法唯一对应正文，请提供逐字相同且能唯一定位的原文。",
+            {"reason": "evidence_mismatch", "cause": cause, "loc": loc},
+        )
+    end = start + len(span.quote)
+    validate_evidence_span(body, start, end, span.quote)
+    return EvidenceSpan(start, end, span.quote)
 
 
 def inspect(
@@ -420,20 +437,19 @@ def inspect(
     for i, issue in enumerate(parsed.issues):
         evidence: list[EvidenceSpan] = []
         for j, span in enumerate(issue.evidence):
-            _check_span(body, span, f"issues[{i}].evidence[{j}]")
-            evidence.append(EvidenceSpan(span.start, span.end, span.quote))
+            evidence.append(_resolve_span(body, span, f"issues[{i}].evidence[{j}]"))
         issues.append(
             IssueFinding(issue.kind, issue.explanation, issue.proposed_change, tuple(evidence))
         )
     facts: list[CandidateFact] = []
     for i, fact in enumerate(parsed.candidate_facts):
-        _check_span(body, fact, f"candidate_facts[{i}]")
+        span = _resolve_span(body, fact, f"candidate_facts[{i}]")
         facts.append(
             CandidateFact(
                 kind=fact.kind,
                 proposition=fact.proposition,
-                start=fact.start,
-                end=fact.end,
+                start=span.start,
+                end=span.end,
                 quote=fact.quote,
                 subject=fact.subject,
                 story_time=fact.story_time,
@@ -456,11 +472,12 @@ def diagnose(
     body: str,
     complete_call: CompleteCall,
     *,
+    author_feedback: str = "",
     options: CallOptions,
     cancel: CancelSignal | None = None,
 ) -> DiagnosisPayload:
     """阅读体验诊断：问题证据、修改选项、需授权的新设定；不生成改稿。"""
-    messages = build_diagnose_messages(request, context, body)
+    messages = build_diagnose_messages(request, context, body, author_feedback)
     result = complete_call(messages, _options_for(request, options), cancel or CancelSignal())
     parsed = _parse_payload(result, _DiagnosisModel, TaskKind.DIAGNOSE)
     assert isinstance(parsed, _DiagnosisModel)
@@ -469,8 +486,7 @@ def diagnose(
     for i, problem in enumerate(parsed.problems):
         evidence: list[EvidenceSpan] = []
         for j, span in enumerate(problem.evidence):
-            _check_span(body, span, f"problems[{i}].evidence[{j}]")
-            evidence.append(EvidenceSpan(span.start, span.end, span.quote))
+            evidence.append(_resolve_span(body, span, f"problems[{i}].evidence[{j}]"))
         problems.append(ReadingProblem(problem.explanation, tuple(evidence)))
     return DiagnosisPayload(
         verdict=parsed.verdict,

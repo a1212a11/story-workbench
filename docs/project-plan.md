@@ -1,6 +1,6 @@
 # 项目计划与进度
 
-更新日期：2026-09-11。当前阶段：P、S、C（除 C04 人工项）、G（除 G05 真实调用）、R 全部完成并有测试证据，`uv run pytest` 99 通过、1 跳过。剩余项都需要作者本人：提供密钥后执行真实调用（G05）、终端人工验证（C04/T05）、真实三章试用与语义、阅读体验记录（V01–V04）。
+更新日期：2026-09-14。当前阶段：保存、采用、生成与恢复的核心用例已有自动化证据；本次补齐 CLI 阅读诊断/试改与检查范围展示，并加入 DeepSeek 供应商选择。真实调用（G05）、人工终端验证（C04/T05）、真实三章试用与语义/阅读体验记录（P05、V01–V04）尚未完成；界面已知限制见[验收记录](acceptance-log.md#6-已知限制)。
 
 `[x]` 表示已有对应交付证据；`[ ]` 表示尚未完成，包含未开始、进行中和待验证。写出设计、测试规格或纸面模拟，不等于代码实现和验收通过。任务只有满足完成条件后才能打勾；届时在该任务后补提交号、测试结果或验证记录链接。没有实际基线前不承诺工期或完成百分比。
 
@@ -61,7 +61,7 @@ C 与固定客户端 G 在存储接口稳定后可独立推进；采用用例、
 
 - [x] C01 实现作品/章节选择、消息保存、候选想法和作者决定、计划编辑与全文查看。完成条件：作者可通过入口整理故事，候选不会自动成为决定或正式事实。 证据：作品/章节、消息、计划、全文查看在 `cli.py`（提交 `90a0117`）；候选想法（d 记为候选 → `authoring.record_item` AUTHOR_IDEA/CANDIDATE）与作者决定（f 确定 → `decide_item`，改已确定内容须作者输入「授权」）见 `tests/test_cli.py::test_cli_candidate_and_decision_entries_require_authorization_to_change`；AI 讨论回复经 `generation.discuss` 流式打印，见 `test_cli_discussion_streams_reply_and_saves_messages`（回复只存 message，不自动抽取想法）。
 - [x] C02 接入普通多行编辑器。完成条件：保存/取消行为正确，保存失败保留缓冲，全程不要求 Markdown 语法或手工文件路径。 证据：提交 `d08d24d`/`90a0117`；`cli_editor.edit_text` 基于 prompt_toolkit 3.0.53，`tests/test_cli.py` 覆盖多行中文、粘贴、光标、保存、取消、保存失败保留缓冲与流式共存。
-- [x] C03 实现检查展示、准确稿件选择与明确采用入口。完成条件：展示全文、新增设定、冲突及偏差；歧义“采用那版”不写正式记录；一次明确动作提交已读与必要授权。 证据：`cli.py` 的 w 写 / x 试写（`generation.write_chapter`，on_text 逐块输出，结束展示全文与检查）、k 检查、i 查看检查（实际剧情与结尾、六类问题中文标签、证据原文、建议、候选事实）、a 采用（绑定最近展示的稿，一句「已读，采用」后逐条处理授权，构造 AuthorAction 交 `adoption.adopt`）、j 拒绝；`tests/test_cli.py`：test_cli_plan_write_review_adopt_and_state_ready（计划→写→查看检查→采用→状态完成，同一稿重复采用提示无需重复）、test_cli_rejects_overreaching_draft_then_rewrites_and_adopts（越界稿不授权→列出未处理问题、零采用→拒绝→重写→采用）、test_cli_authorizes_new_setting_in_one_action、test_cli_exploratory_draft_requires_accepting_plot_and_ending、test_cli_ambiguous_adopt_lists_candidates_and_writes_nothing（两份候选稿“采用那版”零写入）、test_cli_stale_basis_after_plan_change_needs_recheck、test_cli_without_model_explains_and_unknown_command_is_explained；保存失败另存恢复文件见 test_cli_keeps_buffer_when_save_fails_and_allows_retry。未检查范围（coverage）尚未由 CheckRecord 暴露，待 A 线补读接口后展示。
+- [x] C03 实现检查展示、准确稿件选择与明确采用入口。完成条件：展示全文、新增设定、冲突及偏差；歧义“采用那版”不写正式记录；一次明确动作提交已读与必要授权。 证据：`cli.py` 的 w 写 / x 试写（`generation.write_chapter`，on_text 逐块输出，结束展示全文与检查）、k 检查、i 查看检查（实际剧情与结尾、六类问题中文标签、证据原文、建议、候选事实）、a 采用（绑定最近展示的稿，一句「已读，采用」后逐条处理授权，构造 AuthorAction 交 `adoption.adopt`）、j 拒绝；`tests/test_cli.py`：test_cli_plan_write_review_adopt_and_state_ready（计划→写→查看检查→采用→状态完成，同一稿重复采用提示无需重复）、test_cli_rejects_overreaching_draft_then_rewrites_and_adopts（越界稿不授权→列出未处理问题、零采用→拒绝→重写→采用）、test_cli_authorizes_new_setting_in_one_action、test_cli_exploratory_draft_requires_accepting_plot_and_ending、test_cli_ambiguous_adopt_lists_candidates_and_writes_nothing（两份候选稿“采用那版”零写入）、test_cli_stale_basis_after_plan_change_needs_recheck、test_cli_without_model_explains_and_unknown_command_is_explained；保存失败另存恢复文件见 test_cli_keeps_buffer_when_save_fails_and_allows_retry。2026-09-14 已接入 CheckRecord 的已检查/未检查范围展示，见 tests/test_cli.py 阅读诊断流程断言。
 - [ ] C04 人工执行 T05 并保存交互记录。完成条件：中文编辑与取消可用，CLI 操作绑定正确版本。
 
 ## G AI 任务与上下文
@@ -72,7 +72,7 @@ C 与固定客户端 G 在存储接口稳定后可独立推进；采用用例、
 - [x] G02 实现讨论、正式写作和试写任务合同。完成条件：最小输入可写，试写先展示缺口与假设，委托限本次请求本章；正常请求一次生成、一次检查，不自动润色。 证据：提交 `f030f77`；`ai/tasks.generate/discuss`，试写提示含缺口与假设，委托范围限本次本章，模板版本受校验。
 - [x] G03 实现检查与候选事实提取。完成条件：必填字段、枚举和原文引用受校验；假引用/截断结果不能标检查成功；提取不自动成为 Canon。 证据：提交 `f030f77`/`4312fce`；`ai/tasks.inspect/diagnose` 用 Pydantic strict 校验，缺字段、多余字段、假引用、截断均为 MODEL_FAILED；`database.commit_check_result` 事务内再次逐条校验。
 - [x] G04 实现 run 阶段记录、流保存、取消与迟到结果保护。完成条件：只有已保存流块可恢复；取消先落库；迟到结果不能切换当前稿；同项目最多一个模型请求在途。 证据：`application/generation.py` 的 write_chapter/check_draft/discuss/cancel_run/retry_run；`database.commit_run_chunk/commit_run_result/commit_run_cancel` 只在 running 时生效；`tests/test_workflow.py` 覆盖取消先落库、迟到块丢弃、截断为失败、在途拒绝、生成期间编辑保存为历史稿。schema v2 增加 draft_rejection 与 story_item.chapter_id。
-- [ ] G05 实现单个供应商客户端并接入真实配置（依赖 P04）。完成条件：协议、流、超时、取消及用量得到验证；不自动重试付费请求，密钥不进入项目数据和日志。 进度：`provider.make_anthropic_clients`（anthropic 1.5.0，max_retries=0，取消关闭流，max_tokens 归一为 truncated，密钥只在闭包）与 `bootstrap.py`（配置文件不得含密钥，密钥只读环境变量）已实现，假 SDK 测试通过；真实调用、用量与费用记录待 `STORY_WORKBENCH_LIVE=1 uv run pytest tests/test_provider_live.py`，需作者提供密钥后勾选。
+- [ ] G05 实现单个供应商客户端并接入真实配置（依赖 P04）。完成条件：协议、流、超时、取消及用量得到验证；不自动重试付费请求，密钥不进入项目数据和日志。 进度：`provider.make_anthropic_clients`（anthropic 1.5.0，max_retries=0，取消关闭流，max_tokens 归一为 truncated，密钥只在闭包）与 `bootstrap.py`（配置文件不得含密钥，密钥只读环境变量）已实现，假 SDK 测试通过；真实调用、用量与费用记录待 `STORY_WORKBENCH_LIVE=1 uv run pytest tests/test_provider_live.py`，2026-09-14 加入 provider=deepseek，复用官方 Anthropic 兼容接口；DEEPSEEK_API_KEY 与 Anthropic 密钥隔离，默认 deepseek-flash、关闭思考。配置校验、假 SDK 与真实 SDK 的本地模拟响应测试已通过；2026-09-14 DeepSeek 小样本真实流式、普通响应及首段后取消已通过；应用层生成成功，首轮检查因模型引用区间错误记 MODEL_FAILED；随后按作者确认修复为唯一原文精确定位，原失败响应离线回放通过，一次真实检查复测通过（3 条候选事实，输入 521 / 输出 356 token）。未自动重试，真实超时及账单费用仍待验证；Anthropic 真实调用未测，故不勾选 G05。详见[验收记录](acceptance-log.md#2026-09-14-deepseek-小样本真实验证)。
 - [x] G06 用固定客户端执行 T06–T08 的确定性部分（依赖 R01）。完成条件：三章调用次数、拒绝稿隔离、无效检查与容量边界断言通过；语义准确性留待 V02。 证据：`tests/test_workflow.py::test_t06_three_chapters_with_rejection_and_exploratory`（一次生成一次检查、拒绝稿不入依据、试写记缺口与假设、三章事实链）及无效检查只重试检查；T07 语义部分留 V02。
 
 ## R 状态、回改与失败恢复
@@ -91,7 +91,7 @@ C 与固定客户端 G 在存储接口稳定后可独立推进；采用用例、
 
 - [ ] V01 用真实模型和 CLI 完成连续三章创作、拒绝稿重写、试写、编辑与采用。完成条件：保留操作记录及准确的正文/采用/状态引用。
 - [ ] V02 人工执行 T07 语义样本，核对传闻、持久设定和推理不足。完成条件：逐条记录命中与遗漏；不以格式测试或模型自评代替人工判断。
-- [ ] V03 实现按请求的阅读体验诊断与试改，并执行 T12。完成条件：有问题证据、修改选项和作者保留/拒绝理由；不覆盖原稿、不擅自变成整书规则；允许评价为不满意。 进度：`generation.diagnose_draft`（问题证据、修改选项、需授权设定，反馈只存消息）与 `generation.revise_draft`（候选稿不替换当前稿）已实现，`tests/test_workflow.py` 的 T12 确定性断言通过；CLI 入口与作者真实记录待做。
+- [ ] V03 实现按请求的阅读体验诊断与试改，并执行 T12。完成条件：有问题证据、修改选项和作者保留/拒绝理由；不覆盖原稿、不擅自变成整书规则；允许评价为不满意。 进度：`generation.diagnose_draft`（问题证据、修改选项、需授权设定，反馈只存消息）与 `generation.revise_draft`（候选稿不替换当前稿）已实现，`tests/test_workflow.py` 的 T12 确定性断言通过；2026-09-14 已接入 CLI b 入口：证据、选项、按选择试改、保留/拒绝与理由记录；原稿保留。tests/test_cli.py 覆盖保留、拒绝、仅保存候选及不试改路径。作者真实阅读体验记录仍待完成，故不勾选 V03。
 - [ ] V04 汇总首期验收报告。完成条件：T01–T11 确定性结果、T05 手动记录、T07/T12 人工记录、每章耗时/用量及已知限制齐全；未解决阻塞已处理，功能缺口明确。
 
 ## M3/M4 后续产品能力

@@ -92,7 +92,9 @@ def _usage(message) -> dict[str, int]:
     }
 
 
-def make_anthropic_clients(api_key: str) -> tuple[StreamCall, CompleteCall]:
+def make_anthropic_clients(
+    api_key: str, *, base_url: str | None = None, disable_thinking: bool = False
+) -> tuple[StreamCall, CompleteCall]:
     """返回一对绑定密钥的客户端函数。max_retries=0：付费请求不自动重试。
 
     密钥只保存在闭包里，不出现在返回的事件、异常或日志中。
@@ -100,11 +102,16 @@ def make_anthropic_clients(api_key: str) -> tuple[StreamCall, CompleteCall]:
     from anthropic import Anthropic, APIError
 
     def _client(options: CallOptions) -> Anthropic:
-        return Anthropic(api_key=api_key, max_retries=0, timeout=options.timeout_seconds)
+        return Anthropic(
+            api_key=api_key, base_url=base_url, max_retries=0, timeout=options.timeout_seconds
+        )
 
     def stream(
         messages: list[ChatMessage], options: CallOptions, cancel: CancelSignal
     ) -> Iterator[StreamEvent]:
+        if cancel.is_set():
+            yield StreamEvent(EventKind.ERROR, error="cancelled")
+            return
         system, chat = _split_messages(messages)
         kwargs: dict = {
             "model": options.model,
@@ -115,6 +122,8 @@ def make_anthropic_clients(api_key: str) -> tuple[StreamCall, CompleteCall]:
             kwargs["system"] = system
         if options.temperature is not None:
             kwargs["temperature"] = options.temperature
+        if disable_thinking:
+            kwargs["thinking"] = {"type": "disabled"}
         try:
             with _client(options).messages.stream(**kwargs) as response:
                 for text in response.text_stream:
@@ -131,11 +140,16 @@ def make_anthropic_clients(api_key: str) -> tuple[StreamCall, CompleteCall]:
         except Exception as exc:  # 超时、网络中断等
             yield StreamEvent(EventKind.ERROR, error=type(exc).__name__)
             return
+        if cancel.is_set():
+            yield StreamEvent(EventKind.ERROR, error="cancelled")
+            return
         yield StreamEvent(EventKind.USAGE, usage=_usage(final))
         if getattr(final, "stop_reason", None) == "max_tokens":
             yield StreamEvent(EventKind.TRUNCATED)
-        else:
+        elif getattr(final, "stop_reason", None) in ("end_turn", "stop_sequence"):
             yield StreamEvent(EventKind.COMPLETED)
+        else:
+            yield StreamEvent(EventKind.ERROR, error="unexpected_stop_reason")
 
     def complete(
         messages: list[ChatMessage], options: CallOptions, cancel: CancelSignal
@@ -152,12 +166,18 @@ def make_anthropic_clients(api_key: str) -> tuple[StreamCall, CompleteCall]:
             kwargs["system"] = system
         if options.temperature is not None:
             kwargs["temperature"] = options.temperature
+        if disable_thinking:
+            kwargs["thinking"] = {"type": "disabled"}
         try:
             message = _client(options).messages.create(**kwargs)
         except APIError as exc:
             raise ProviderError(type(exc).__name__) from None
         except Exception as exc:
             raise ProviderError(type(exc).__name__) from None
+        if cancel.is_set():
+            raise ProviderError("cancelled")
+        if getattr(message, "stop_reason", None) not in ("end_turn", "stop_sequence", "max_tokens"):
+            raise ProviderError("unexpected_stop_reason")
         text = "".join(
             getattr(block, "text", "")
             for block in message.content

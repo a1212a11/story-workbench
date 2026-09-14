@@ -6,7 +6,7 @@ tasks 在调用前比较 TaskRequest.template_version，避免记录与实际发
 
 from __future__ import annotations
 
-TEMPLATE_VERSION = "2026-09-11.1"
+TEMPLATE_VERSION = "2026-09-14.2"
 
 SECTION_TITLES: dict[str, str] = {
     "rules": "作者规则与决定（必须遵守，不得改写）",
@@ -46,6 +46,7 @@ GENERATE_SYSTEM_EXPLORATORY = (
 )
 
 GENERATE_USER = """{context}
+{input_body_block}
 
 ## 写作要求
 目标：第{chapter_number}章。{mode_line}
@@ -80,7 +81,7 @@ INSPECT_SYSTEM = (
                | rumor_or_belief | suspected_error",
       "explanation": "用中文说明问题",
       "proposed_change": "建议的处理，可为空字符串",
-      "evidence": [{{"start": 0, "end": 0, "quote": "正文原文片段"}}]
+      "evidence": [{{"quote": "正文原文片段"}}]
     }}
   ],
   "candidate_facts": [
@@ -89,7 +90,7 @@ INSPECT_SYSTEM = (
       "subject": "主体名或 null",
       "proposition": "一句陈述",
       "story_time": "故事时间或 null",
-      "start": 0, "end": 0, "quote": "正文原文片段"
+      "quote": "正文原文片段"
     }}
   ],
   "actual_plot": "正文实际写出的剧情概述",
@@ -98,7 +99,8 @@ INSPECT_SYSTEM = (
 }}
 
 规则：
-- start/end 是正文的字符下标区间 [start, end)，quote 必须与正文该区间逐字相同。
+- quote 必须逐字复制正文，保留标点与换行；不要输出 start/end，字符位置由程序计算。
+- 每条 quote 必须在正文中只出现一次；重复时扩展前后原文直到能够唯一定位，不得改写引用。
 - 每个 issue 至少一条 evidence；没有问题时 issues 为空数组，没有事实时 candidate_facts 为空数组，
   两个数组都必须出现。
 - 人物的话、怀疑与传闻记为 character_belief 或 rumor_or_belief，不记为 world。
@@ -123,7 +125,7 @@ DIAGNOSE_SYSTEM = (
   "problems": [
     {{
       "explanation": "问题说明",
-      "evidence": [{{"start": 0, "end": 0, "quote": "正文原文片段"}}]
+      "evidence": [{{"quote": "正文原文片段"}}]
     }}
   ],
   "options": [
@@ -133,12 +135,14 @@ DIAGNOSE_SYSTEM = (
 }}
 
 规则：
-- start/end 是正文的字符下标区间 [start, end)，quote 必须与正文该区间逐字相同。
+- quote 必须逐字复制正文，保留标点与换行；不要输出 start/end，字符位置由程序计算。
+- 每条 quote 必须在正文中只出现一次；重复时扩展前后原文直到能够唯一定位，不得改写引用。
 - 每个 problem 至少一条 evidence；三个数组都必须出现，没有内容时为空数组。
 - 不输出改写后的正文；需要新增设定的方向必须标 requires_new_setting 并列入授权清单。"""
 )
 
 DIAGNOSE_USER = """{context}
+{author_feedback_block}
 
 ## 待诊断正文（第{chapter_number}章）
 {body}

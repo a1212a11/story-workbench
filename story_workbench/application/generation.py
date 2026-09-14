@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from story_workbench.ai import context as ctx
 from story_workbench.ai import prompts, tasks
@@ -178,6 +178,21 @@ def build_context(
     return ctx.build_context(sources, chapter.number, mode, config.limits, config.estimate_tokens)
 
 
+def _reserve_required_input(config: GenerationConfig, *texts: str | None) -> GenerationConfig:
+    required = sum(config.estimate_tokens(text) for text in texts if text)
+    if required == 0:
+        return config
+    remaining = config.limits.available - required
+    if remaining <= 0:
+        raise WorkbenchError(
+            ErrorCode.CONTEXT_TOO_LARGE,
+            "本次必需输入已超出上下文容量，不能发起模型请求。",
+            {"required_input_tokens": required, "available_tokens": config.limits.available},
+        )
+    limits = replace(config.limits, total_tokens=config.limits.total_tokens - required)
+    return replace(config, limits=limits)
+
+
 def save_basis(project: Project, draft: ctx.ContextDraft, purpose: str) -> str:
     """把 ContextDraft 的引用保存为 basis/basis_source；事务内比较设计修订号。"""
     sources: list[tuple[str, dict[str, object]]] = []
@@ -309,6 +324,7 @@ def write_chapter(
     on_text: OnText | None = None,
     retry_of: str | None = None,
     as_candidate: bool = False,
+    input_target: Target | None = None,
 ) -> DraftResult:
     """正式写作或试写：对账、构建上下文、保存依据与 run、流式生成、保存结果、独立检查。
 
@@ -318,15 +334,28 @@ def write_chapter(
     """
     projects.reconcile_workcopy(project, chapter_id)
     _ensure_idle(project)
+    chapter = database.get_chapter(project.conn, project.novel_id, chapter_id)
+    input_version_id = chapter.current_draft_id
+    input_body: str | None = None
+    if input_target is not None:
+        if input_target.novel_id != project.novel_id or input_target.chapter_id != chapter_id:
+            raise WorkbenchError(ErrorCode.WRONG_SCOPE, "稿件不属于该章。")
+        input_version = database.get_version(
+            project.conn, project.novel_id, input_target.version_id
+        )
+        if input_version.chapter_id != chapter_id:
+            raise WorkbenchError(ErrorCode.WRONG_SCOPE, "稿件不属于该章。")
+        input_version_id = input_version.id
+        input_body = input_version.body
+    config = _reserve_required_input(config, input_body, *assumptions)
     draft = build_context(project, chapter_id, mode, config)
     purpose = "exploratory" if mode is WriteMode.EXPLORATORY else "formal"
     basis_id = save_basis(project, draft, purpose)
-    chapter = database.get_chapter(project.conn, project.novel_id, chapter_id)
     request = _request(
         TaskKind.GENERATE,
         basis_id,
         source_message_id,
-        input_version_id=chapter.current_draft_id,
+        input_version_id=input_version_id,
         delegation=delegation,
         missing=draft.missing_inputs,
         assumptions=assumptions,
@@ -341,14 +370,26 @@ def write_chapter(
         template_version=prompts.TEMPLATE_VERSION,
         status=RunStatus.RUNNING,
         basis_id=basis_id,
-        input_version_id=chapter.current_draft_id,
+        input_version_id=input_version_id,
         retry_of_id=retry_of,
-        request_json=_request_json(request, {"mode": mode.value}),
+        request_json=_request_json(
+            request,
+            {
+                "mode": mode.value,
+                "as_candidate": as_candidate,
+                "revision": input_target is not None,
+            },
+        ),
     )
     cancel = cancel or CancelSignal()
     try:
         events = tasks.generate(
-            request, draft, clients.stream, options=config.options, cancel=cancel
+            request,
+            draft,
+            clients.stream,
+            input_body=input_body,
+            options=config.options,
+            cancel=cancel,
         )
         body, usage_json, final = _run_stream(project, run_id, events, on_text)
     except WorkbenchError as exc:
@@ -435,6 +476,7 @@ def diagnose_draft(
         project.conn, project.novel_id, MessageRole.AUTHOR.value, author_feedback, target.chapter_id
     )
     _ensure_idle(project)
+    config = _reserve_required_input(config, version.body, author_feedback)
     context = build_context(project, target.chapter_id, WriteMode.EXPLORATORY, config)
     basis_id = save_basis(project, context, "diagnose")
     request = _request(
@@ -462,6 +504,7 @@ def diagnose_draft(
             context,
             version.body,
             clients.complete,
+            author_feedback=author_feedback,
             options=config.options,
             cancel=cancel or CancelSignal(),
         )
@@ -470,6 +513,15 @@ def diagnose_draft(
             project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code=exc.code.value
         )
         raise
+    except Exception as exc:
+        database.commit_run_status(
+            project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code="MODEL_FAILED"
+        )
+        raise WorkbenchError(
+            ErrorCode.MODEL_FAILED,
+            "模型请求失败。",
+            {"run_id": run_id, "error_type": type(exc).__name__},
+        ) from exc
     run = database.get_run(project.conn, project.novel_id, run_id)
     if run.status is not RunStatus.RUNNING:
         raise WorkbenchError(ErrorCode.MODEL_FAILED, "诊断已取消。", {"run_id": run_id})
@@ -514,6 +566,9 @@ def revise_draft(
     """作者选定修改方向后生成候选稿：试写模式、结果不替换当前编辑稿、不采用。"""
     if target.novel_id != project.novel_id:
         raise WorkbenchError(ErrorCode.WRONG_SCOPE, "稿件不属于当前作品。")
+    version = database.get_version(project.conn, project.novel_id, target.version_id)
+    if version.chapter_id != target.chapter_id:
+        raise WorkbenchError(ErrorCode.WRONG_SCOPE, "稿件不属于该章。")
     return write_chapter(
         project,
         target.chapter_id,
@@ -525,6 +580,7 @@ def revise_draft(
         cancel=cancel,
         on_text=on_text,
         as_candidate=True,
+        input_target=target,
     )
 
 
@@ -750,6 +806,10 @@ def retry_run(
             cancel=cancel,
             on_text=on_text,
             retry_of=run_id,
+            as_candidate=payload.get("as_candidate", False),
+            input_target=Target(project.novel_id, run.chapter_id, run.input_version_id)
+            if payload.get("revision") and run.input_version_id
+            else None,
         )
     raise WorkbenchError(
         ErrorCode.INVALID_INPUT, "该任务类型不支持在此重试。", {"task": run.task.value}

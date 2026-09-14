@@ -2,9 +2,39 @@
 
 AI 小说创作与故事工程系统。作者决定故事，AI 帮助讨论、组织设定，并将确定的章节剧情与结尾状态写成正文。
 
-当前阶段：首个可用闭环的确定性部分已实现（2026-09-11）。保存、检查、审阅、采用、状态重算、回改复核、失败恢复、备份恢复、CLI 作者入口和 Anthropic 客户端均有代码与测试，`uv run pytest` 99 通过。真实模型调用、T05 终端人工验证、T07/T12 语义与阅读体验记录待作者完成，见[验收记录](docs/acceptance-log.md)。
+当前阶段：首期核心流程已有实现与自动化测试（2026-09-14）。本次补齐 CLI 阅读诊断、试改与检查范围展示，并加入 DeepSeek 配置选择。真实模型调用、T05 终端人工验证、T07/T12 语义与阅读体验记录仍待验证，其他界面限制见[验收记录](docs/acceptance-log.md)。
 
-交付方向：先用本地 CLI 验证创作流程，产品稳定后再做 UI。技术栈：Python 3.12、SQLite、Markdown 工作副本、prompt_toolkit 终端、Anthropic Claude Sonnet 5；uv 管理环境，pytest 测试。启动：`uv run python -m story_workbench <项目目录>`；密钥只读环境变量 `ANTHROPIC_API_KEY`。
+交付方向：先用本地 CLI 验证创作流程，产品稳定后再做 UI。技术栈：Python 3.12、SQLite、Markdown 工作副本、prompt_toolkit 终端；uv 管理环境，pytest 测试。启动：`uv run python -m story_workbench <项目目录>`。
+
+## 模型配置
+
+配置文件默认位于 `~/.config/story-workbench/config.json`，也可通过 `STORY_WORKBENCH_CONFIG` 指定。文件只放非敏感配置。选择 DeepSeek：
+
+```json
+{
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "max_output_tokens": 8000,
+  "timeout_seconds": 300,
+  "context_tokens": 100000,
+  "template_reserve": 2000
+}
+```
+
+| provider | 省略 model 时的默认值 | 密钥环境变量 |
+| --- | --- | --- |
+| `anthropic` | `claude-sonnet-5` | `ANTHROPIC_API_KEY` |
+| `deepseek` | `deepseek-flash` | `DEEPSEEK_API_KEY` |
+
+例如仅写 `{"provider": "deepseek"}` 即使用 DeepSeek 默认配置；`model` 可改成供应商支持的其他模型。没有配置文件时沿用 Anthropic。密钥在启动前通过对应环境变量提供，缺少密钥时仍可编辑和保存。配置错误会在启动时提示，不会自动换用另一供应商。
+
+DeepSeek 复用现有 SDK，通过[官方 Anthropic 兼容接口](https://api-docs.deepseek.com/guides/anthropic_api/)访问，显式关闭思考模式；[模型名称](https://api-docs.deepseek.com/quick_start/pricing/)与[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)按 2026-09-14 官方文档核对。付费请求不自动重试。
+
+真实调用验证：配置供应商和密钥后执行 `STORY_WORKBENCH_LIVE=1 uv run pytest tests/test_provider_live.py -s`，会产生费用。普通测试默认跳过真实调用。
+
+## 阅读诊断与试改
+
+选章并查看正文后输入 `b`（或 `阅读诊断`），填写反馈，查看带原文证据的问题与修改选项。选择序号才会生成试改候选稿，随后可保留为编辑稿、拒绝并记录理由，或回车仅保存候选。原稿留在历史中；正式采用仍通过 `a` 完成。检查展示同时列出已检查和未检查范围。
 
 ## 文档
 

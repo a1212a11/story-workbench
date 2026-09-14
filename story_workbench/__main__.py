@@ -54,9 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     clients = bootstrap.build_clients(settings)
     if clients is None:
         print(
-            f"未检测到 {bootstrap.API_KEY_ENV}，本次不接模型；写作与检查将提示尚未接入。",
+            f"未检测到 {settings.api_key_env}，本次不接模型；写作与检查将提示尚未接入。",
             file=sys.stderr,
         )
+    else:
+        print(f"本次模型：{settings.provider} / {settings.model}")
     return cli.run(args.project, clients=clients, config=config)
 
 

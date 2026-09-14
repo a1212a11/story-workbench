@@ -493,7 +493,8 @@ def _fake_anthropic(monkeypatch, chunks, stop_reason="end_turn", raise_error=Non
     return captured
 
 
-def test_anthropic_client_normalizes_events_and_never_leaks_key(monkeypatch):
+@pytest.mark.parametrize("base_url", [None, "https://api.deepseek.com/anthropic"])
+def test_anthropic_client_normalizes_events_and_never_leaks_key(monkeypatch, base_url):
     from story_workbench.infrastructure.provider import (
         CallOptions,
         CancelSignal,
@@ -503,7 +504,9 @@ def test_anthropic_client_normalizes_events_and_never_leaks_key(monkeypatch):
     )
 
     captured = _fake_anthropic(monkeypatch, ["井口", "很凉"], stop_reason="max_tokens")
-    stream, complete = make_anthropic_clients("sk-ant-secret")
+    stream, complete = make_anthropic_clients(
+        "sk-ant-secret", base_url=base_url, disable_thinking=base_url is not None
+    )
     options = CallOptions(model="claude-sonnet-5", max_output_tokens=50, timeout_seconds=9)
     msgs = [ChatMessage("system", "系统"), ChatMessage("user", "写")]
     events = list(stream(msgs, options, CancelSignal()))
@@ -514,6 +517,8 @@ def test_anthropic_client_normalizes_events_and_never_leaks_key(monkeypatch):
         EventKind.TRUNCATED,
     ]
     assert captured["init"]["max_retries"] == 0 and captured["init"]["timeout"] == 9
+    assert captured["init"]["base_url"] == base_url
+    assert captured.get("thinking") == ({"type": "disabled"} if base_url else None)
     assert captured["system"] == "系统" and captured["messages"] == [
         {"role": "user", "content": "写"}
     ]
@@ -524,6 +529,7 @@ def test_anthropic_client_normalizes_events_and_never_leaks_key(monkeypatch):
         and result.truncated
         and result.usage == {"input_tokens": 5, "output_tokens": 6}
     )
+    assert captured.get("thinking") == ({"type": "disabled"} if base_url else None)
 
 
 def test_anthropic_client_cancel_and_errors(monkeypatch):
@@ -551,3 +557,100 @@ def test_anthropic_client_cancel_and_errors(monkeypatch):
     assert events[-1].kind is EventKind.ERROR and events[-1].error == "TimeoutError"
     with pytest.raises(ProviderError):
         complete2([ChatMessage("user", "x")], options, CancelSignal())
+
+
+def test_compatible_provider_rejects_incomplete_end_and_pre_cancelled_requests(monkeypatch):
+    from story_workbench.infrastructure.provider import (
+        CallOptions,
+        CancelSignal,
+        ChatMessage,
+        EventKind,
+        ProviderError,
+        make_anthropic_clients,
+    )
+
+    captured = _fake_anthropic(monkeypatch, ["一"], stop_reason=None)
+    stream, complete = make_anthropic_clients(
+        "secret", base_url="https://api.deepseek.com/anthropic", disable_thinking=True
+    )
+    options = CallOptions(model="deepseek-flash", max_output_tokens=10, timeout_seconds=1)
+    messages = [ChatMessage("user", "写")]
+    cancel = CancelSignal()
+    cancel.set()
+    assert list(stream(messages, options, cancel))[-1].error == "cancelled"
+    with pytest.raises(ProviderError, match="cancelled"):
+        complete(messages, options, cancel)
+    assert captured == {}
+    events = list(stream(messages, options, CancelSignal()))
+    assert events[-1].kind is EventKind.ERROR
+    with pytest.raises(ProviderError, match="unexpected_stop_reason"):
+        complete(messages, options, CancelSignal())
+
+
+def test_deepseek_uses_real_sdk_for_stream_and_complete_without_network(monkeypatch):
+    import json
+
+    import anthropic
+    import httpx2 as httpx
+
+    from story_workbench import bootstrap
+    from story_workbench.infrastructure.provider import CancelSignal, ChatMessage, EventKind
+
+    requests = []
+    final = {
+        "id": "test-message",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-flash",
+        "content": [{"type": "text", "text": "井底。"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 12, "output_tokens": 3},
+    }
+
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        assert str(request.url) == "https://api.deepseek.com/anthropic/v1/messages"
+        assert payload["model"] == "deepseek-flash"
+        assert payload["thinking"] == {"type": "disabled"}
+        if not payload.get("stream"):
+            return httpx.Response(200, json=final)
+        events = [
+            {"type": "message_start", "message": {**final, "content": [], "stop_reason": None}},
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "井底。"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": 3},
+            },
+            {"type": "message_stop"},
+        ]
+        body = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    original = anthropic.Anthropic
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: original(http_client=http, **kw))
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only")
+        settings = bootstrap.Settings(provider="deepseek")
+        clients = bootstrap.build_clients(settings)
+        options = bootstrap.build_generation_config(settings).options
+        messages = [ChatMessage("user", "写一句")]
+        events = list(clients.stream(messages, options, CancelSignal()))
+        assert events[-1].kind is EventKind.COMPLETED
+        assert "".join(e.text for e in events) == "井底。"
+        assert next(e.usage for e in events if e.kind is EventKind.USAGE) == final["usage"]
+        result = clients.complete(messages, options, CancelSignal())
+        assert result.text == "井底。" and result.usage == final["usage"] and not result.truncated
+    assert len(requests) == 2

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from story_workbench.domain.records import ErrorCode, Expected, Lifecycle, Workb
 from story_workbench.infrastructure import database
 from story_workbench.infrastructure.provider import CallOptions
 from tests.conftest import fixed_complete, fixed_stream
-from tests.test_workflow import belief_fact, inspection_json, setting_issue
+from tests.test_workflow import belief_fact, diagnosis_json, inspection_json, setting_issue
 
 ENTER = "\r"
 CTRL_S = "\x13"
@@ -633,3 +634,100 @@ def test_cli_candidate_and_decision_entries_require_authorization_to_change(pipe
             ("师父右腕有旧伤", Lifecycle.DECIDED),
         ]
         assert project.novel.design_revision >= 3
+
+
+@pytest.mark.parametrize("decision", ["保留", "拒绝", ""])
+def test_cli_reading_diagnosis_and_revision_preserve_author_choice(pipe, tmp_path, decision):
+    path = tmp_path / "novel"
+    body = "井底有一具尸体。沈砚把灯搁在井沿。"
+    revised = "灯影落稳之后，井壁下那团灰衣才慢慢显出人形。"
+    payload = json.loads(inspection_json(revised))
+    payload["coverage"] = {"checked": ["正文"], "unchecked": ["时间线"]}
+    replies = [diagnosis_json(body, "井底有一具尸体。"), json.dumps(payload)]
+    clients = generation.Clients(
+        stream=fixed_stream([revised]),
+        complete=lambda messages, options, cancel: fixed_complete(replies.pop(0))(
+            messages, options, cancel
+        ),
+    )
+    script = NEW_NOVEL + "e" + ENTER + body + CTRL_S
+    script += "b" + ENTER + "没意思，看看节奏。" + ENTER + "1" + ENTER
+    script += decision + ENTER
+    if decision:
+        script += "这样更有悬念。" + ENTER
+    script += "q" + ENTER
+    out = run_cli(pipe, path, script, clients=clients)
+    assert "第一句直接交代结果" in out and "原文：「井底有一具尸体。」" in out
+    assert "需新增设定授权" in out and "师门信物" in out
+    assert "未检查范围：时间线" in out
+    assert "已检查范围：正文" in out
+    assert not replies
+    for project in reopen(path):
+        chapter = authoring.list_chapters(project)[0]
+        versions = authoring.list_versions(project, chapter.id)
+        assert [v.body for v in versions] == [body, revised]
+        assert chapter.current_draft_id == versions[1 if decision == "保留" else 0].id
+        assert chapter.adopted_id is None
+        assert authoring.list_story_items(project) == []
+        rejected = database.list_rejected_version_ids(project.conn, project.novel_id)
+        assert (versions[1].id in rejected) == (decision == "拒绝")
+        if decision:
+            messages = database.list_messages(project.conn, project.novel_id)
+            assert any("这样更有悬念。" in m.body for m in messages)
+
+
+def test_cli_diagnosis_can_stop_before_revision(pipe, tmp_path):
+    body = "井底有一具尸体。"
+    calls = []
+
+    def no_generation(*args):
+        calls.append(args)
+        raise AssertionError("未选择修改选项，不应生成")
+
+    clients = generation.Clients(
+        stream=no_generation, complete=fixed_complete(diagnosis_json(body, body))
+    )
+    path = tmp_path / "novel"
+    script = NEW_NOVEL + "e" + ENTER + body + CTRL_S
+    script += "b" + ENTER + "看看节奏" + ENTER + ENTER + "q" + ENTER
+    out = run_cli(pipe, path, script, clients=clients)
+    assert "没有开始试改" in out
+    assert bodies(path) == [body] and not calls
+
+
+def test_cli_trial_revision_does_not_replace_draft_changed_during_diagnosis(
+    pipe, tmp_path, monkeypatch
+):
+    body = "井底有一具尸体。"
+    revised = "灯影下显出人形。"
+    original = generation.diagnose_draft
+
+    def diagnose_and_edit(project, target, *args, **kwargs):
+        result = original(project, target, *args, **kwargs)
+        authoring.save_draft(
+            project,
+            target.chapter_id,
+            "诊断期间的新编辑稿。",
+            Expected(current_draft_id=target.version_id),
+        )
+        return result
+
+    monkeypatch.setattr(generation, "diagnose_draft", diagnose_and_edit)
+    replies = [diagnosis_json(body, body), inspection_json(revised)]
+    clients = generation.Clients(
+        stream=fixed_stream([revised]),
+        complete=lambda *args: fixed_complete(replies.pop(0))(*args),
+    )
+    path = tmp_path / "novel"
+    script = NEW_NOVEL + "e" + ENTER + body + CTRL_S
+    script += "b" + ENTER + "看看节奏" + ENTER + "1" + ENTER
+    script += "保留" + ENTER + "节奏更好" + ENTER + "q" + ENTER
+    out = run_cli(pipe, path, script, clients=clients)
+    assert "没有切换编辑稿：当前编辑稿已变化" in out
+    assert "试改稿已保存，请重新查看后选择" in out
+    assert "已保留试改稿为编辑稿" not in out
+    for project in reopen(path):
+        chapter = authoring.list_chapters(project)[0]
+        versions = authoring.list_versions(project, chapter.id)
+        assert [v.body for v in versions] == [body, "诊断期间的新编辑稿。", revised]
+        assert chapter.current_draft_id == versions[1].id

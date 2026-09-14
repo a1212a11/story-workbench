@@ -50,7 +50,7 @@ pytest 已确定；Ruff 同时提供 lint 与 formatter，mypy 提供静态类�
 
 ## 3. 模型与审稿 Agent 的扩展
 
-模型供应商暂不指定。接入前用同一组作者认可的素材比较中文正文质量、审稿遗漏、延迟、用量和费用，并核对流式输出、取消、结构化输出以及数据处理条款。正文与审稿可以先用同一个模型，但任务配置应明确，不把某个模型名称写死在业务规则中。首期仍限制一个供应商，不为将来的可能需求建立注册表。
+模型供应商暂不指定。接入前用同一组作者认可的素材比较中文正文质量、审稿遗漏、延迟、用量和费用，并核对流式输出、取消、结构化输出以及数据处理条款。正文与审稿可以先用同一个模型，但任务配置应明确，不把某个模型名称写死在业务规则中。每次运行选择一个供应商；2026-09-14 按作者要求加入 DeepSeek，复用官方 Anthropic 兼容接口，不建立供应商注册表。
 
 官方 SDK 是通信实现，不拥有故事状态；其默认重试行为需按项目“显式付费重试”规则配置。任务模板、输入输出合同与供应商协议分离，未来更换客户端不改变作者采用的权限。SDK 能力以最终选定供应商的官方文档和实际验证为准。
 
@@ -90,3 +90,7 @@ pytest 已确定；Ruff 同时提供 lint 与 formatter，mypy 提供静态类�
 - [ ] 资料与自主审稿进入实施前，补充功能范围、数据/工具合同、任务计划和验收，随后再选择所需扩展依赖。
 
 本文完成代表技术选型文档已交付；推荐包、原型测试和扩展能力仍未完成。资料链接提供产品能力依据，具体推荐是结合本项目边界作出的工程判断。
+
+## 2026-09-14 DeepSeek 配置扩展
+
+按作者要求支持 `provider=deepseek`，默认 `deepseek-flash`，另读 `DEEPSEEK_API_KEY`；保留 `provider=anthropic` 默认行为。复用已安装的 anthropic SDK，base URL 为 `https://api.deepseek.com/anthropic`，显式传入 `thinking={"type":"disabled"}`，不新增依赖。依据：[官方兼容接口](https://api-docs.deepseek.com/guides/anthropic_api/)、[模型名称](https://api-docs.deepseek.com/quick_start/pricing/)、[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。配置方法见 [README](../README.md#模型配置)。本地协议模拟通过不代表真实调用通过，费用与语义验收仍在 G05/V 阶段。
