@@ -20,10 +20,19 @@ from prompt_toolkit.output import DummyOutput
 from story_workbench import cli
 from story_workbench.__main__ import main
 from story_workbench.ai.context import ContextLimits
+from story_workbench.ai.tasks import ImpactChapter, ImpactReport
 from story_workbench.application import authoring, generation
 from story_workbench.application.projects import Project, open_project
 from story_workbench.cli_editor import StreamPane, build_editor, edit_text
-from story_workbench.domain.records import ErrorCode, Expected, Lifecycle, WorkbenchError
+from story_workbench.domain.records import (
+    ErrorCode,
+    EvidenceInput,
+    Expected,
+    Lifecycle,
+    RunStatus,
+    TaskKind,
+    WorkbenchError,
+)
 from story_workbench.infrastructure import database
 from story_workbench.infrastructure.provider import CallOptions
 from tests.conftest import fixed_complete, fixed_stream
@@ -426,6 +435,246 @@ def test_cli_plan_write_review_adopt_and_state_ready(pipe, tmp_path):
         chapter = authoring.list_chapters(project)[0]
         assert chapter.adopted_id is not None and chapter.current_snapshot_id is not None
         assert authoring.adopted_version_id(project, chapter.id) == chapter.current_draft_id
+
+
+def test_cli_publishes_current_adopted_version(pipe, tmp_path):
+    path = tmp_path / "novel"
+    script = "".join(
+        [
+            NEW_NOVEL + PLAN,
+            "w" + ENTER + ENTER,
+            ADOPT,
+            "m" + ENTER + "已读，发布" + ENTER + "同步到连载平台" + ENTER,
+            "q" + ENTER,
+        ]
+    )
+    out = run_cli(pipe, path, script, clients=sequenced_clients((BODY_1, CHECK_1)))
+    assert "已标记发布：第一章" in out
+    for project in reopen(path):
+        row = project.conn.execute(
+            "SELECT version_id, ready_snapshot_id, note FROM publication"
+        ).fetchone()
+        chapter = authoring.list_chapters(project)[0]
+        assert row["version_id"] == authoring.adopted_version_id(project, chapter.id)
+        assert row["ready_snapshot_id"] == chapter.current_snapshot_id
+        assert row["note"] == "同步到连载平台"
+
+
+def test_cli_creates_and_switches_branch(pipe, tmp_path):
+    path = tmp_path / "novel"
+    script = "".join(
+        [
+            NEW_NOVEL + PLAN,
+            "w" + ENTER + ENTER,
+            ADOPT,
+            "s" + ENTER + "n" + ENTER + "蓝火支线" + ENTER,
+            "s" + ENTER + "2" + ENTER,
+            "q" + ENTER,
+        ]
+    )
+    out = run_cli(pipe, path, script, clients=sequenced_clients((BODY_1, CHECK_1)))
+    assert "已创建分支「蓝火支线」" in out
+    assert "已切换到分支「蓝火支线」" in out
+    for project in reopen(path):
+        branches = database.list_branches(project.conn)
+        assert [b.name for b in branches] == ["主分支", "蓝火支线"]
+        assert database.current_branch(project.conn).name == "蓝火支线"
+
+
+def test_cli_runs_impact_command_and_prints_categories(pipe, tmp_path, monkeypatch):
+    path = tmp_path / "novel"
+
+    def fake_analyze_impact(*args, **kwargs):
+        return (
+            "impact-run",
+            ImpactReport(
+                "后文需要复核。",
+                (
+                    ImpactChapter(
+                        2,
+                        "affected",
+                        "第二章提到旧结论。",
+                        (EvidenceInput("旧结论"),),
+                    ),
+                ),
+                ("剧情连续性",),
+                (),
+            ),
+        )
+
+    monkeypatch.setattr(generation, "analyze_impact", fake_analyze_impact)
+    script = "".join([NEW_NOVEL + PLAN, "w" + ENTER + ENTER, ADOPT, "z" + ENTER, "q" + ENTER])
+    out = run_cli(pipe, path, script, clients=sequenced_clients((BODY_1, CHECK_1)))
+    assert "影响摘要：后文需要复核。" in out
+    assert "第2章 · 受影响：第二章提到旧结论。" in out
+    assert "原文：「旧结论」" in out
+
+
+def _two_adopted_chapters_then_revise_first_script() -> str:
+    return "".join(
+        [
+            NEW_NOVEL + PLAN,
+            "w" + ENTER + ENTER,
+            ADOPT,
+            "n" + ENTER,
+            PLAN,
+            "w" + ENTER + ENTER,
+            ADOPT,
+            "c" + ENTER + "1" + ENTER,
+            "w" + ENTER + ENTER,
+            ADOPT,
+        ]
+    )
+
+
+def _fake_unrelated_impact(project, source_adoption_id, source_message_id, *_args, **_kwargs):
+    target = next(ch for ch in authoring.list_chapters(project) if ch.number == 2)
+    run_id = database.commit_run(
+        project.conn,
+        project.novel_id,
+        chapter_id=target.id,
+        task=TaskKind.IMPACT,
+        source_message_id=source_message_id,
+        template_version="test-impact",
+        status=RunStatus.SUCCEEDED,
+    )
+    database.commit_impact_analysis(
+        project.conn,
+        project.novel_id,
+        target_chapter_id=target.id,
+        classification="unrelated",
+        summary="第二章沿用的是独立线索。",
+        source_adoption_id=source_adoption_id,
+        run_id=run_id,
+    )
+    return (
+        run_id,
+        ImpactReport(
+            "第二章不受这次修改影响。",
+            (
+                ImpactChapter(
+                    2,
+                    "unrelated",
+                    "第二章沿用的是独立线索。",
+                    (),
+                ),
+            ),
+            ("剧情连续性",),
+            (),
+        ),
+    )
+
+
+def test_cli_impact_unrelated_cancel_keeps_pending_resolution(pipe, tmp_path, monkeypatch):
+    path = tmp_path / "novel"
+    monkeypatch.setattr(generation, "analyze_impact", _fake_unrelated_impact)
+    script = _two_adopted_chapters_then_revise_first_script() + "z" + ENTER + ENTER + "q" + ENTER
+    clients = sequenced_clients(
+        (BODY_1, CHECK_1),
+        ("第二章保留独立线索。", inspection_json("第二章保留独立线索。", plot="p", ending="e")),
+        (
+            "沈砚改口说尸体不是师父。",
+            inspection_json("沈砚改口说尸体不是师父。", plot="p", ending="e"),
+        ),
+    )
+    out = run_cli(pipe, path, script, clients=clients)
+    assert "第2章 · 无关：第二章沿用的是独立线索。" in out
+    assert "没有确认无关，影响记录保持待处理。" in out
+    for project in reopen(path):
+        assert project.conn.execute("SELECT COUNT(*) FROM impact_resolution").fetchone()[0] == 0
+        row = project.conn.execute("SELECT status FROM impact").fetchone()
+        assert row["status"] == "pending"
+
+
+def test_cli_impact_unrelated_confirmation_resolves_and_rebuilds_ready(pipe, tmp_path, monkeypatch):
+    path = tmp_path / "novel"
+    monkeypatch.setattr(generation, "analyze_impact", _fake_unrelated_impact)
+    script = (
+        _two_adopted_chapters_then_revise_first_script()
+        + "z"
+        + ENTER
+        + "确认无关"
+        + ENTER
+        + "q"
+        + ENTER
+    )
+    clients = sequenced_clients(
+        (BODY_1, CHECK_1),
+        ("第二章保留独立线索。", inspection_json("第二章保留独立线索。", plot="p", ending="e")),
+        (
+            "沈砚改口说尸体不是师父。",
+            inspection_json("沈砚改口说尸体不是师父。", plot="p", ending="e"),
+        ),
+    )
+    out = run_cli(pipe, path, script, clients=clients)
+    assert "已确认第2章无关，并重建 ready 状态。" in out
+    for project in reopen(path):
+        resolution = project.conn.execute(
+            "SELECT classification, analysis_id FROM impact_resolution"
+        ).fetchone()
+        assert resolution["classification"] == "unrelated"
+        assert resolution["analysis_id"] is not None
+        impact = project.conn.execute("SELECT status FROM impact").fetchone()
+        assert impact["status"] == "resolved"
+        chapter_two = next(ch for ch in authoring.list_chapters(project) if ch.number == 2)
+        snapshot = database.get_snapshot(
+            project.conn, project.novel_id, chapter_two.current_snapshot_id
+        )
+        assert snapshot.status.value == "ready"
+
+
+def test_cli_records_foreshadow_from_adopted_text(pipe, tmp_path):
+    path = tmp_path / "novel"
+    script = "".join(
+        [
+            NEW_NOVEL + PLAN,
+            "w" + ENTER + ENTER,
+            ADOPT,
+            "o" + ENTER + "埋设" + ENTER + "尸体身份以后回收" + ENTER + ENTER + "尸体" + ENTER,
+            "q" + ENTER,
+        ]
+    )
+    out = run_cli(pipe, path, script, clients=sequenced_clients((BODY_1, CHECK_1)))
+    assert "已记录伏笔：埋设 · 尸体身份以后回收" in out
+    for project in reopen(path):
+        row = project.conn.execute("SELECT stage, body, quote FROM foreshadow_event").fetchone()
+        assert (row["stage"], row["body"], row["quote"]) == (
+            "setup",
+            "尸体身份以后回收",
+            "尸体",
+        )
+
+
+def test_cli_remediation_requires_publication_choice_and_confirmation(pipe, tmp_path):
+    path = tmp_path / "novel"
+    first_plan = "第二章用新线索解释读者已经看到的尸体身份。"
+    second_plan = "第二章让沈砚公开承认旧判断有误。"
+    script = "".join(
+        [
+            NEW_NOVEL + PLAN,
+            "w" + ENTER + ENTER,
+            ADOPT,
+            "m" + ENTER + "已读，发布" + ENTER + "连载平台" + ENTER,
+            "g" + ENTER + "1" + ENTER + "发布后发现尸体身份冲突" + ENTER + ENTER,
+            "g" + ENTER + "1" + ENTER + "发布后发现尸体身份冲突" + ENTER + "确认补救" + ENTER,
+            "q" + ENTER,
+        ]
+    )
+    out = run_cli(
+        pipe,
+        path,
+        script,
+        clients=sequenced_clients((BODY_1, CHECK_1), (first_plan, "{}"), (second_plan, "{}")),
+    )
+    assert "选择要补救的发布记录：" in out
+    assert "没有记录补救方案。" in out
+    assert "已记录发布补救方案。" in out
+    for project in reopen(path):
+        publication = project.conn.execute("SELECT id FROM publication").fetchone()
+        rows = project.conn.execute("SELECT publication_id, body FROM remediation_plan").fetchall()
+        assert [(r["publication_id"], r["body"]) for r in rows] == [
+            (publication["id"], second_plan)
+        ]
 
 
 def test_cli_rejects_overreaching_draft_then_rewrites_and_adopts(pipe, tmp_path):

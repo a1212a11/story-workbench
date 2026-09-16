@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from story_workbench.application import adoption, authoring
+from story_workbench.application import adoption, authoring, projects
 from story_workbench.application.projects import create_project, create_workcopy, open_project
 from story_workbench.domain import rules
 from story_workbench.domain.records import (
@@ -18,6 +18,7 @@ from story_workbench.domain.records import (
     EvidenceInput,
     Expected,
     FactKind,
+    ForeshadowStage,
     IssueInput,
     IssueKind,
     IssueResolution,
@@ -526,3 +527,88 @@ def test_readoption_of_chapter_one_marks_later_chapters_for_review(project, plan
         database.get_snapshot(project.conn, project.novel_id, snap).status is SnapshotStatus.STALE
     )
     assert project.conn.execute("SELECT COUNT(*) FROM adoption").fetchone()[0] == 3
+
+
+def test_m3_publication_freezes_exact_version_and_requires_explicit_revision(
+    project, planned_chapter
+):
+    ch = planned_chapter
+    v1 = authoring.save_draft(project, ch.id, "已发布原文", Expected())
+    check1, _ = _check_for(project, ch, v1.version_id)
+    first = adoption.adopt(project, _action(project, ch, v1.version_id, check1))
+    publish_action = _action(project, ch, v1.version_id, check1, request_id="publish-req")
+    publication = adoption.mark_published(project, publish_action, "发布到外部平台")
+    assert publication.version_id == v1.version_id
+    assert publication.adoption_id == first.adoption_id
+    assert (
+        publication.ready_snapshot_id == authoring.get_chapter(project, ch.id).current_snapshot_id
+    )
+
+    v2 = authoring.save_draft(
+        project,
+        ch.id,
+        "已发布原文，但本地修订",
+        Expected(current_draft_id=v1.version_id),
+    )
+    check2, _ = _check_for(project, ch, v2.version_id)
+    with pytest.raises(WorkbenchError) as exc:
+        adoption.adopt(project, _action(project, ch, v2.version_id, check2))
+    assert exc.value.code is ErrorCode.AUTHORIZATION_REQUIRED
+
+    revised = adoption.adopt(
+        project,
+        _action(project, ch, v2.version_id, check2, allow_published_revision=True),
+    )
+    assert revised.adoption_id != first.adoption_id
+    assert adoption.list_publications(project, ch.id)[0].version_id == v1.version_id
+    divergence_count = project.conn.execute(
+        "SELECT COUNT(*) FROM publication_divergence"
+    ).fetchone()[0]
+    assert divergence_count == 1
+
+
+def test_m3_branch_fork_keeps_main_branch_isolated(project, planned_chapter):
+    ch = planned_chapter
+    v1 = authoring.save_draft(project, ch.id, "主分支正文", Expected())
+    check1, _ = _check_for(project, ch, v1.version_id)
+    first = adoption.adopt(project, _action(project, ch, v1.version_id, check1))
+    main_branch = projects.list_branches(project)[0]
+
+    branch = projects.create_branch(project, "旁支", first.adoption_id)
+    assert branch.materialization_status.value == "ready"
+    projects.switch_branch(project, branch.id)
+    branch_chapter = authoring.list_chapters(project)[0]
+    authoring.save_draft(
+        project,
+        branch_chapter.id,
+        "旁支正文",
+        Expected(current_draft_id=branch_chapter.current_draft_id),
+    )
+    assert authoring.list_versions(project, branch_chapter.id)[-1].body == "旁支正文"
+
+    projects.switch_branch(project, main_branch.id)
+    main_chapter = authoring.list_chapters(project)[0]
+    assert authoring.list_versions(project, main_chapter.id)[-1].body == "主分支正文"
+
+
+def test_m3_foreshadow_event_is_append_only_author_record(project, planned_chapter):
+    ch = planned_chapter
+    v1 = authoring.save_draft(project, ch.id, "墙上的灯忽然灭了一瞬。", Expected())
+    check1, _ = _check_for(project, ch, v1.version_id)
+    adopted = adoption.adopt(project, _action(project, ch, v1.version_id, check1))
+    msg = authoring.record_message(project, "把灯灭记录为伏笔。", ch.id)
+
+    event = adoption.record_foreshadow(
+        project,
+        stage=ForeshadowStage.SETUP,
+        chapter_id=ch.id,
+        version_id=v1.version_id,
+        adoption_id=adopted.adoption_id,
+        source_message_id=msg,
+        body="灯灭是一处后续回收的异常。",
+        quote="墙上的灯忽然灭了一瞬。",
+    )
+    events = adoption.list_foreshadow(project)
+    assert [e.id for e in events] == [event.id]
+    assert events[0].stage is ForeshadowStage.SETUP
+    assert events[0].version_id == v1.version_id

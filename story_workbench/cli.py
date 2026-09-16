@@ -28,6 +28,7 @@ from story_workbench.domain.records import (
     ErrorCode,
     Expected,
     FactKind,
+    ForeshadowStage,
     IssueKind,
     IssueRecord,
     IssueResolution,
@@ -82,7 +83,8 @@ HELP = (
     "  w 写          x 试写          v 查看全文      e 编辑正文\n"
     "  k 检查        i 查看检查      a 采用          j 拒绝\n"
     "  b 阅读诊断与试改  u 复核已采用正文  y 重试失败阶段\n"
-    "  r 恢复历史版本  h 帮助        q 退出"
+    "  m 标记发布    s 分支          z 影响分析      o 伏笔\n"
+    "  g 补救讨论    r 恢复历史版本  H 历史状态      h 帮助        q 退出"
 )
 
 
@@ -179,6 +181,12 @@ class Workbench:
             (("b", "阅读诊断与试改", "阅读诊断", "诊断"), self.diagnose),
             (("a", "采用", "采用那版", "采用此稿"), self.adopt),
             (("j", "拒绝", "不要这版"), self.reject),
+            (("m", "标记发布", "发布"), self.publish),
+            (("s", "分支"), self.branches),
+            (("z", "影响分析"), self.analyze_impact),
+            (("o", "伏笔"), self.foreshadow),
+            (("g", "补救讨论"), self.remediate),
+            (("H", "历史状态"), self.history_status),
             (("r", "恢复历史版本", "恢复"), self.restore),
             (("u", "复核"), self.revalidate),
             (("y", "重试"), self.retry),
@@ -303,6 +311,10 @@ class Workbench:
                 marks.append("已有剧情与结尾")
             if chapter.adopted_id:
                 marks.append("已采用")
+                if database.latest_publication_for_chapter(
+                    self.project.conn, self.project.novel_id, chapter.id
+                ):
+                    marks.append("已发布")
                 if chapter.needs_review:
                     marks.append("待复核")
                 elif chapter.current_snapshot_id is None:
@@ -954,6 +966,289 @@ class Workbench:
             self.say("故事状态更新完成。")
         else:
             self.say("状态更新仍未完成，可稍后再试；正文仍是已采用版本。")
+
+    # ------------------------------------------------------------ 发布、分支、影响与伏笔
+
+    def publish(self) -> bool:
+        chapter = self.require_chapter()
+        if chapter is None:
+            return True
+        version_id = self.adopted_version_id(chapter)
+        if version_id is None:
+            self.say("本章尚未采用，不能标记发布。")
+            return True
+        version = self.version(chapter, version_id)
+        self.display_draft(chapter, version, explicit=True)
+        answer = self.ask("确认这是读者实际看到的版本，输入「已读，发布」（回车取消）：")
+        if answer != "已读，发布":
+            self.say("没有标记发布。")
+            return True
+        note = self.ask("发布备注（回车留空）：")
+        message_id = authoring.record_message(self.project, "已读，发布这一版。" + note, chapter.id)
+        action = AuthorAction(
+            request_id=uuid.uuid4().hex,
+            source_message_id=message_id,
+            target=Target(self.project.novel_id, chapter.id, version.id),
+            expected=Expected(adopted_id=chapter.adopted_id),
+            read_declared=True,
+        )
+        publication = adoption.mark_published(self.project, action, note)
+        self.say(f"已标记发布：{chapter_label(chapter)} · {local_time(publication.published_at)}。")
+        return True
+
+    def branches(self) -> bool:
+        branches = projects.list_branches(self.project)
+        self.say("分支：")
+        for index, branch in enumerate(branches, start=1):
+            mark = "当前" if branch.is_current else "可切换"
+            self.say(f"  {index}. {branch.name} · {mark}")
+        answer = self.ask("输入序号切换；输入 n 从当前已采用章创建分支；回车取消：")
+        if not answer:
+            return True
+        if answer == "n":
+            chapter = self.require_chapter()
+            if chapter is None or chapter.adopted_id is None:
+                self.say("先选中一章已采用正文，再从它创建分支。")
+                return True
+            name = self.ask("新分支名称：")
+            if not name:
+                return True
+            branch = projects.fork_branch(self.project, name, chapter.adopted_id)
+            self.say(f"已创建分支「{branch.name}」。可用 s 切换过去。")
+            return True
+        if not answer.isdigit() or not 1 <= int(answer) <= len(branches):
+            self.say("没有这个分支。")
+            return True
+        branch = projects.switch_branch(self.project, branches[int(answer) - 1].id)
+        self.chapter = None
+        self.shown = None
+        self.say(f"已切换到分支「{branch.name}」。")
+        self.show_chapters()
+        return True
+
+    def history_status(self) -> bool:
+        self.say(f"当前分支：{self.project.branch.name}")
+        publications = adoption.list_publications(self.project)
+        if publications:
+            self.say("发布历史：")
+            for publication in publications:
+                chapter = database.get_chapter(
+                    self.project.conn, self.project.novel_id, publication.chapter_id
+                )
+                version = self.version(chapter, publication.version_id)
+                marks = [f"{chapter_label(chapter)} · {local_time(publication.published_at)}"]
+                if chapter.adopted_id is not None:
+                    adopted = database.get_adoption(
+                        self.project.conn, self.project.novel_id, chapter.adopted_id
+                    )
+                    if adopted.version_id != publication.version_id:
+                        marks.append("外部平台未同步")
+                self.say(f"  {' · '.join(marks)}")
+                self.say(f"    {first_line(version.body)}")
+        else:
+            self.say("发布历史：还没有发布记录。")
+
+        impacts = adoption.list_impacts(self.project)
+        if impacts:
+            self.say("影响状态：")
+            for impact in impacts:
+                chapter = database.get_chapter(
+                    self.project.conn, self.project.novel_id, impact.chapter_id
+                )
+                self.say(f"  {chapter_label(chapter)} · {impact.status.value} · {impact.reason}")
+        else:
+            self.say("影响状态：没有待处理影响。")
+
+        foreshadow = adoption.list_foreshadow(self.project)
+        if foreshadow:
+            self.say("伏笔：")
+            for event in foreshadow:
+                chapter = database.get_chapter(
+                    self.project.conn, self.project.novel_id, event.chapter_id
+                )
+                self.say(f"  {chapter_label(chapter)} · {event.stage.value} · {event.body}")
+        else:
+            self.say("伏笔：还没有伏笔记录。")
+        return True
+
+    def analyze_impact(self) -> bool:
+        chapter = self.require_chapter()
+        if chapter is None or not self.model_ready("影响分析"):
+            return True
+        if chapter.adopted_id is None:
+            self.say("本章尚未采用，没有正式变化可分析。")
+            return True
+        message_id = authoring.record_message(
+            self.project, "分析这次采用对后文的影响。", chapter.id
+        )
+        try:
+            run_id, report = self.run_model(
+                generation.analyze_impact, chapter.adopted_id, message_id
+            )
+        except WorkbenchError as exc:
+            self.say(f"影响分析没有完成：{exc.message}")
+            return True
+        self.say(f"影响摘要：{report.summary}")
+        chapters = report.chapters
+        if not chapters:
+            self.say("没有发现后续已采用章节受影响。")
+            return True
+        for result in chapters:
+            target = self.chapter_by_number(result.chapter_number)
+            status_label = {
+                "affected": "受影响",
+                "unrelated": "无关",
+                "unchecked": "未检查",
+            }.get(result.status, result.status)
+            self.say(f"  第{result.chapter_number}章 · {status_label}：{result.reason}")
+            for evidence in result.evidence:
+                self.say(f"    原文：「{evidence.quote}」")
+            if result.status != "unrelated" or target is None:
+                continue
+            pending = self.pending_impact_for(target.id, chapter.adopted_id)
+            if pending is None:
+                continue
+            answer = self.ask("模型判断本章无关。输入「确认无关」重建本章 ready 状态（回车跳过）：")
+            if answer != "确认无关":
+                self.say("没有确认无关，影响记录保持待处理。")
+                continue
+            analysis = database.get_impact_analysis_for_target(
+                self.project.conn, self.project.novel_id, run_id, target.id
+            )
+            if analysis is None:
+                self.say("没有找到匹配的影响分析，未确认无关。")
+                continue
+            analysis_id, impact_class = analysis
+            if impact_class != "unrelated":
+                self.say("影响分析不是无关分类，未确认无关。")
+                continue
+            confirm_message = authoring.record_message(
+                self.project,
+                f"确认第{result.chapter_number}章与这次前文变化无关。",
+                target.id,
+            )
+            try:
+                adoption.resolve_impact(
+                    self.project,
+                    pending.id,
+                    "unrelated",
+                    confirm_message,
+                    analysis_id=analysis_id,
+                )
+            except WorkbenchError as exc:
+                self.say(f"没有确认无关：{exc.message}")
+                continue
+            self.say(f"已确认第{result.chapter_number}章无关，并重建 ready 状态。")
+        return True
+
+    def chapter_by_number(self, number: int) -> ChapterRecord | None:
+        for chapter in authoring.list_chapters(self.project):
+            if chapter.number == number:
+                return chapter
+        return None
+
+    def pending_impact_for(self, chapter_id: str, source_adoption_id: str):
+        for impact in adoption.list_impacts(self.project, chapter_id):
+            if impact.status.value == "pending" and impact.source_adoption_id == source_adoption_id:
+                return impact
+        return None
+
+    def remediate(self) -> bool:
+        if not self.model_ready("补救讨论"):
+            return True
+        publications = adoption.list_publications(self.project)
+        if not publications:
+            self.say("还没有发布记录，不能登记发布补救。")
+            return True
+        self.say("选择要补救的发布记录：")
+        for index, publication in enumerate(publications, start=1):
+            chapter = database.get_chapter(
+                self.project.conn, self.project.novel_id, publication.chapter_id
+            )
+            version = self.version(chapter, publication.version_id)
+            self.say(
+                f"  {index}. {chapter_label(chapter)} · {local_time(publication.published_at)}"
+                f" · {first_line(version.body)}"
+            )
+        choice = self.ask("输入序号选择准确发布记录（回车取消）：")
+        if not choice:
+            return True
+        if not choice.isdigit() or not 1 <= int(choice) <= len(publications):
+            self.say("没有这个发布记录。")
+            return True
+        publication = publications[int(choice) - 1]
+        prompt = self.ask("要补救什么冲突或已发布问题（回车取消）：")
+        if not prompt:
+            return True
+        self.say("AI：")
+        try:
+            _author_message_id, model_message_id = self.run_model(
+                generation.propose_remediation, publication.chapter_id, prompt, on_text=self.emit
+            )
+        except WorkbenchError as exc:
+            self.emit("\n")
+            self.say(f"补救讨论没有完成：{exc.message}")
+            return True
+        self.emit("\n")
+        confirm = self.ask("确认把上面的方案记入发布补救记录，输入「确认补救」（回车取消）：")
+        if confirm != "确认补救":
+            self.say("没有记录补救方案。")
+            return True
+        proposal = next(
+            message.body
+            for message in database.list_messages(self.project.conn, self.project.novel_id)
+            if message.id == model_message_id
+        )
+        message_id = authoring.record_message(
+            self.project, "确认补救：" + prompt, publication.chapter_id
+        )
+        adoption.propose_remediation(self.project, publication.id, message_id, proposal)
+        self.say("已记录发布补救方案。")
+        return True
+
+    def foreshadow(self) -> bool:
+        chapter = self.require_chapter()
+        if chapter is None:
+            return True
+        if chapter.adopted_id is None:
+            self.say("本章尚未采用，伏笔事件需要绑定已采用正文。")
+            return True
+        stages = {
+            "埋设": ForeshadowStage.SETUP,
+            "发展": ForeshadowStage.DEVELOP,
+            "重新解释": ForeshadowStage.REINTERPRET,
+            "回收": ForeshadowStage.PAYOFF,
+        }
+        stage_text = self.ask("伏笔阶段（埋设 / 发展 / 重新解释 / 回收）：")
+        stage = stages.get(stage_text)
+        if stage is None:
+            self.say("没有这个伏笔阶段。")
+            return True
+        body = self.ask("伏笔记录：")
+        if not body:
+            return True
+        logical_id = self.ask("关联同一伏笔的标识（回车新建）：") or None
+        version_id = self.adopted_version_id(chapter)
+        assert version_id is not None
+        version = self.version(chapter, version_id)
+        quote = self.ask("对应已采用正文原文（回车用整条记录）：") or body
+        if quote not in version.body:
+            self.say("出处原文不在已采用正文中，没有记录伏笔。")
+            return True
+        msg = authoring.record_message(self.project, f"伏笔：{stage_text}：{body}", chapter.id)
+        event = adoption.record_foreshadow(
+            self.project,
+            stage=stage,
+            chapter_id=chapter.id,
+            body=body,
+            quote=quote,
+            adoption_id=chapter.adopted_id,
+            source_message_id=msg,
+            logical_id=logical_id,
+            version_id=version.id,
+        )
+        self.say(f"已记录伏笔：{stage_text} · {event.body}")
+        return True
 
     def retry(self) -> bool:
         chapter = self.require_chapter()

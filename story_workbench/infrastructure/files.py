@@ -18,6 +18,7 @@ LOCK_FILENAME = "project.lock"
 WORK_DIR = "work"
 EXPORTS_DIR = "exports"
 RECOVERY_DIR = "recovery"
+BRANCHES_DIR = "work/branches"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,8 +72,14 @@ class ProjectLock:
 def ensure_layout(root: Path) -> None:
     """创建项目目录布局；已有目录不动。"""
     root.mkdir(parents=True, exist_ok=True)
-    for name in (WORK_DIR, EXPORTS_DIR, RECOVERY_DIR):
+    for name in (WORK_DIR, EXPORTS_DIR, RECOVERY_DIR, BRANCHES_DIR):
         (root / name).mkdir(exist_ok=True)
+
+
+def ensure_branch_dir(root: Path, branch_id: str) -> str:
+    relative = f"{BRANCHES_DIR}/{branch_id}"
+    safe_relative(root, relative).mkdir(parents=True, exist_ok=True)
+    return relative
 
 
 def safe_relative(root: Path, relative_path: str) -> Path:
@@ -142,7 +149,7 @@ def write_new(root: Path, relative_path: str, content: str) -> str:
 # ---------------------------------------------------------------- 备份文件处理（R04）
 
 MANIFEST_FILENAME = "manifest.json"
-BACKUP_DIRS = (WORK_DIR, EXPORTS_DIR, RECOVERY_DIR)
+BACKUP_DIRS = (WORK_DIR, EXPORTS_DIR, RECOVERY_DIR, BRANCHES_DIR)
 
 
 def _hash_bytes(data: bytes) -> str:

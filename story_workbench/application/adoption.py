@@ -8,7 +8,12 @@ from story_workbench.domain.records import (
     AuthorAction,
     ErrorCode,
     FactCorrection,
+    ForeshadowEventRecord,
+    ForeshadowStage,
+    ImpactRecord,
+    PublicationRecord,
     ReconcileOutcome,
+    RemediationPlanRecord,
     SnapshotChain,
     SnapshotStatus,
     WorkbenchError,
@@ -152,3 +157,94 @@ def revalidate_chapter(project: Project, action: AuthorAction) -> SnapshotStatus
 
 def pending_impacts(project: Project, chapter_id: str) -> tuple[tuple[str, str], ...]:
     return database.list_pending_impacts(project.conn, project.novel_id, chapter_id)
+
+
+def list_impacts(project: Project, chapter_id: str | None = None) -> tuple[ImpactRecord, ...]:
+    return database.list_impact_records(project.conn, project.novel_id, chapter_id)
+
+
+def mark_published(
+    project: Project,
+    action: AuthorAction,
+    note: str = "",
+) -> PublicationRecord:
+    """作者把准确的当前已采用版本标为已发布；本地后续采用不移动发布记录。"""
+    rules.require_same_scope(project.novel_id, action.target.novel_id, "发布目标")
+    if not action.read_declared:
+        raise WorkbenchError(ErrorCode.REVIEW_REQUIRED, "发布前需要确认这是读者实际看到的版本。")
+    chapter = database.get_chapter(project.conn, project.novel_id, action.target.chapter_id)
+    if chapter.adopted_id is None:
+        raise WorkbenchError(ErrorCode.INVALID_INPUT, "本章尚未采用，不能标记发布。")
+    return database.commit_publication(
+        project.conn,
+        project.novel_id,
+        action.target.chapter_id,
+        action.target.version_id,
+        action.source_message_id,
+        note,
+        request_id=action.request_id,
+    )
+
+
+def list_publications(
+    project: Project, chapter_id: str | None = None
+) -> tuple[PublicationRecord, ...]:
+    return database.list_publications(project.conn, project.novel_id, chapter_id)
+
+
+def propose_remediation(
+    project: Project, publication_id: str, source_message_id: str, body: str
+) -> RemediationPlanRecord:
+    return database.commit_remediation_plan(
+        project.conn, project.novel_id, publication_id, source_message_id, body
+    )
+
+
+def resolve_impact(
+    project: Project,
+    impact_id: str,
+    classification: str,
+    author_message_id: str,
+    *,
+    analysis_id: str | None = None,
+    note: str = "",
+) -> str:
+    return database.commit_impact_resolution(
+        project.conn,
+        project.novel_id,
+        impact_id,
+        classification,
+        author_message_id,
+        analysis_id=analysis_id,
+        note=note,
+    )
+
+
+def record_foreshadow(
+    project: Project,
+    *,
+    stage: ForeshadowStage,
+    chapter_id: str,
+    body: str,
+    quote: str,
+    adoption_id: str,
+    source_message_id: str,
+    logical_id: str | None = None,
+    version_id: str | None = None,
+) -> ForeshadowEventRecord:
+    return database.commit_foreshadow_event(
+        project.conn,
+        project.novel_id,
+        logical_id=logical_id or database.new_id(),
+        stage=stage,
+        chapter_id=chapter_id,
+        adoption_id=adoption_id,
+        version_id=version_id,
+        source_message_id=source_message_id,
+        body=body,
+        quote=quote,
+    )
+
+
+def list_foreshadow(project: Project) -> tuple[ForeshadowEventRecord, ...]:
+    return database.list_foreshadow_events(project.conn, project.novel_id)

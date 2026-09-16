@@ -8,7 +8,7 @@
 
 技术选择及其状态见[技术选型](technology-decisions.md)。其中资料查阅和自主审稿为待细化扩展方向，不改变本文首期数据与执行合同。
 
-首期交付本地、单作者、主分支的 CLI 创作闭环，包含版本恢复、失败重试和前章回改后的状态保护。完整分支、发布补救、伏笔管理与长篇质量评估按原里程碑推进。
+首期交付本地、单作者、主分支的 CLI 创作闭环，包含版本恢复、失败重试和前章回改后的状态保护。M3 已补充分支、发布补救、影响分析和伏笔追踪的本地闭环；长篇质量评估按原里程碑推进。
 
 设计原则：作者操作决定正式变更；不可变记录保存依据；模型不控制事务；先用普通函数和标准库。决策驱动依次为不丢稿、不误采用、能按章节追溯上下文。
 
@@ -142,7 +142,7 @@ tests/                       仓库根目录，与包同级
 | snapshot_fact | snapshot_id, candidate_id?, fact_revision_id? | 二选一；继承前章事实并加入本章事实及纠正；可追溯来源采用记录 |
 | impact | chapter_id, old_snapshot_id?, source_adoption_id?, source_story_item_id?, reason, evidence_issue_id?, status, resolved_review_id? | 来源采用或决定修订二选一；证据复用 issue_evidence；未知影响可无证据但必须说明范围；pending/resolved |
 
-发布属于后续 M3：届时新增 `publication(chapter_id, version_id, adoption_id, author_message_id, published_at)`（仍带共有字段），以及 `adoption.mark_published(project, target, author_action)`，限制目标为准确的已采用版本。发布记录只追加，本地后续采用不移动其指针，也不表示外部平台同步；首期 CLI 不展示可用的发布命令。
+M3 增加 `publication`、`publication_divergence`、`branch`、`remediation_plan`、`impact_analysis` 与 `foreshadow_event`。发布限制目标为准确的已采用版本和 ready 快照；发布记录只追加，本地后续采用不移动其指针，也不表示外部平台同步。发布正文、发布时快照和补救计划进入独立的读者历史分区，补救计划明确保持为未成为正文事实。分支从 adopted ready 快照 fork，先 staging，应用层完成隔离目录物化后由 database 命名函数标为 ready。
 
 没有“已采用事实”布尔字段：正式事实由当前有效 snapshot 的成员关系决定。被拒绝或未采用稿的候选不能直接加入 snapshot；snapshot_fact 的正文来源必须属于该快照对应的有效采用链。正文含糊时保存 uncertain 或角色认知，不推导世界真相。
 
@@ -386,4 +386,4 @@ V0.2 修订：以逻辑职责和数据所有权替换“一个文件一个模块
 
 V0.2 独立 code-reviewer 审阅未发现所述依赖循环，确认事务责任和任务/客户端边界一致，提出两项补充：T03 的首阶段触点必须包含文件对账，以及 recompute_state 需列出接口合同。两项均已写入对应表格。最终文档链接、围栏、空白和旧接口残留检查通过；此次仍是设计审阅，尚无应用执行证据。
 
-2026-09-11 实现记录：首期代码按 V0.2 落地，与文档的差异如下。`Expected` 增加 `current_draft_id` 作为编辑与恢复基准；编辑基准冲突时新稿照样保存但不移动当前稿指针，由入口让作者选择。schema 升到 v2，新增 `draft_rejection` 表与 `story_item.chapter_id`。采用后由 `adoption.adopt` 自动调用 `recompute_state`，失败保留采用并返回状态待更新；后章过时时 `chapter.current_snapshot_id` 清空，指针只指向 ready 快照。`ContextSources` 等上下文输入记录定义在 `ai/context.py`，由 `application/generation.load_sources` 装配，database 只提供读函数，不 import ai。检查证据首期只接受本次正文区间引用，尚未接受对 context 来源的引用。讨论输出只存 message，不抽取结构化想法。发布、分支、伏笔仍未实现。
+2026-09-11 实现记录：首期代码按 V0.2 落地，与文档的差异如下。`Expected` 增加 `current_draft_id` 作为编辑与恢复基准；编辑基准冲突时新稿照样保存但不移动当前稿指针，由入口让作者选择。schema 升到 v2，新增 `draft_rejection` 表与 `story_item.chapter_id`。采用后由 `adoption.adopt` 自动调用 `recompute_state`，失败保留采用并返回状态待更新；后章过时时 `chapter.current_snapshot_id` 清空，指针只指向 ready 快照。`ContextSources` 等上下文输入记录定义在 `ai/context.py`，由 `application/generation.load_sources` 装配，database 只提供读函数，不 import ai。检查证据首期只接受本次正文区间引用，尚未接受对 context 来源的引用。讨论输出只存 message，不抽取结构化想法。2026-09-16 M3 追加 schema v3：项目显式 current_branch，分支作品与工作副本路径隔离；发布记录、已发布修订授权与 divergence、补救计划、影响分析和伏笔事件已接入 application/CLI，并以 `tests/test_m3.py` 覆盖。

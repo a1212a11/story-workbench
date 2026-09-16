@@ -87,6 +87,7 @@ class TaskKind(StrEnum):
     DISCUSS = "discuss"
     GENERATE = "generate"
     INSPECT = "inspect"
+    IMPACT = "impact"
     DIAGNOSE = "diagnose"
     RECOMPUTE = "recompute"
 
@@ -134,6 +135,42 @@ class SyncStatus(StrEnum):
     IMPORTED = "imported"
     CONFLICT = "conflict"
     PENDING = "pending"
+
+
+class BranchMaterializationStatus(StrEnum):
+    STAGING = "staging"
+    MATERIALIZED = "ready"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class ImpactStatus(StrEnum):
+    PENDING = "pending"
+    AFFECTED = "affected"
+    UNRELATED = "unrelated"
+    UNCHECKED = "unchecked"
+    RESOLVED = "resolved"
+
+
+class ImpactCategory(StrEnum):
+    CONTENT = "content"
+    CHARACTER = "character"
+    FORESHADOW = "foreshadow"
+    PLOT = "plot"
+    READER_HISTORY = "reader_history"
+
+
+class ForeshadowStage(StrEnum):
+    SETUP = "setup"
+    DEVELOP = "develop"
+    REINTERPRET = "reinterpret"
+    PAYOFF = "payoff"
+
+
+BranchStatus = BranchMaterializationStatus
+ImpactClass = ImpactStatus
+MaterializationStatus = BranchMaterializationStatus
+ForeshadowPhase = ForeshadowStage
 
 
 # ---------------------------------------------------------------- 共享记录
@@ -196,6 +233,9 @@ class AuthorAction:
     issue_resolutions: tuple[IssueResolution, ...] = ()
     accepted_plot: str | None = None
     accepted_ending: str | None = None
+    allow_published_revision: bool = False
+    published_version_id: str | None = None
+    divergence_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +328,9 @@ class NovelRecord:
     id: str
     title: str
     design_revision: int
+    branch_name: str = "主分支"
+    parent_novel_id: str | None = None
+    forked_from_adoption_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,6 +486,7 @@ class AdoptionContext:
     previous_chapter_exists: bool
     existing_adoption_for_request: AdoptionRecord | None
     current_adoption: AdoptionRecord | None
+    latest_publication: PublicationRecord | None = None
 
 
 # ------------------------------------------------ 快照计算（R01）
@@ -540,3 +584,117 @@ class MessageRecord:
     body: str
     chapter_id: str | None
     created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class BranchRecord:
+    id: str
+    name: str
+    root_novel_id: str
+    novel_id: str
+    forked_from_novel_id: str | None = None
+    forked_from_adoption_id: str | None = None
+    created_at: str = ""
+    is_current: bool = False
+    parent_branch_id: str | None = None
+    fork_adoption_id: str | None = None
+    fork_version_id: str | None = None
+    fork_snapshot_id: str | None = None
+    materialization_status: BranchMaterializationStatus = BranchMaterializationStatus.READY
+    work_subdir: str = "work"
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationRecord:
+    id: str
+    novel_id: str
+    chapter_id: str
+    version_id: str
+    adoption_id: str
+    author_message_id: str
+    published_at: str
+    ready_snapshot_id: str = ""
+    request_id: str = ""
+    note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationDivergenceRecord:
+    id: str
+    publication_id: str
+    novel_id: str
+    chapter_id: str
+    adoption_id: str
+    author_message_id: str
+    reason: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class RemediationPlanRecord:
+    id: str
+    novel_id: str
+    publication_id: str
+    chapter_id: str
+    body: str
+    status: str
+    author_message_id: str
+    created_at: str
+    request_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactRecord:
+    id: str
+    novel_id: str
+    chapter_id: str
+    reason: str
+    status: ImpactStatus
+    old_snapshot_id: str | None = None
+    source_adoption_id: str | None = None
+    source_story_item_id: str | None = None
+    evidence_issue_id: str | None = None
+    resolved_review_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactAnalysisRecord:
+    id: str
+    novel_id: str
+    source_chapter_id: str
+    target_chapter_id: str
+    baseline_snapshot_id: str | None
+    candidate_snapshot_id: str | None
+    status: ImpactStatus
+    category: ImpactCategory
+    summary: str
+    created_at: str
+    author_resolution: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactFinding:
+    chapter_number: int
+    reason: str
+    evidence: tuple[EvidenceInput, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactReport:
+    summary: str
+    findings: tuple[ImpactFinding, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ForeshadowEventRecord:
+    id: str
+    novel_id: str
+    logical_id: str
+    stage: ForeshadowStage
+    chapter_id: str
+    source_message_id: str
+    body: str
+    quote: str = ""
+    adoption_id: str = ""
+    version_id: str | None = None
+    created_at: str = ""

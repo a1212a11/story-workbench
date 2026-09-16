@@ -154,6 +154,94 @@ def load_sources(project: Project, chapter_id: str) -> ctx.ContextSources:
         )
         for m in database.list_messages(conn, novel_id)
     )
+    foreshadow = tuple(
+        ctx.ForeshadowSource(
+            event.id,
+            event.logical_id,
+            event.stage,
+            event.body,
+            number_of[event.chapter_id],
+        )
+        for event in database.list_foreshadow_events(conn, novel_id)
+        if event.chapter_id in number_of
+    )
+    reader_history: list[ctx.ReaderHistorySource] = []
+    publications = database.list_publications(conn, novel_id)
+    publications_by_id = {publication.id: publication for publication in publications}
+    for publication in publications:
+        if publication.chapter_id not in number_of:
+            continue
+        number = number_of[publication.chapter_id]
+        version = database.get_version(conn, novel_id, publication.version_id)
+        reader_history.append(
+            ctx.ReaderHistorySource(
+                history_id=publication.id,
+                kind="publication_text",
+                body=f"[publication] 第{number}章已发布正文：\n{version.body}",
+                chapter_number=number,
+                version_id=version.id,
+            )
+        )
+        snapshot = database.get_snapshot(conn, novel_id, publication.ready_snapshot_id)
+        snapshot_facts = database.list_snapshot_fact_details(conn, novel_id, snapshot.id)
+        fact_lines = []
+        for fact in snapshot_facts:
+            line = f"[{fact.kind.value}] {fact.proposition}"
+            if fact.subject:
+                line = f"{line}（主体：{fact.subject}）"
+            if fact.story_time:
+                line = f"{line}（故事时间：{fact.story_time}）"
+            fact_lines.append(line)
+        if fact_lines:
+            reader_history.append(
+                ctx.ReaderHistorySource(
+                    history_id=f"{publication.id}:snapshot",
+                    kind="publication_snapshot",
+                    body=f"[publication_snapshot] 第{number}章发布时故事状态：\n"
+                    + "\n".join(fact_lines),
+                    chapter_number=number,
+                    snapshot_id=snapshot.id,
+                )
+            )
+    for event in database.list_foreshadow_events(conn, novel_id):
+        if event.chapter_id not in number_of:
+            continue
+        number = number_of[event.chapter_id]
+        quote = f"；原文：{event.quote}" if event.quote else ""
+        reader_history.append(
+            ctx.ReaderHistorySource(
+                history_id=event.id,
+                kind="foreshadow",
+                body=f"[foreshadow:{event.stage.value}] 第{number}章：{event.body}{quote}",
+                chapter_number=number,
+            )
+        )
+    for publication in publications:
+        if publication.chapter_id not in number_of:
+            continue
+        publication_number = number_of[publication.chapter_id]
+        if publication_number >= target.number:
+            continue
+        for plan in database.list_remediation_plans(conn, novel_id, publication.id):
+            plan_publication = publications_by_id.get(plan.publication_id)
+            if (
+                plan_publication is None
+                or plan.chapter_id != plan_publication.chapter_id
+                or plan.chapter_id not in number_of
+            ):
+                continue
+            number = number_of[plan.chapter_id]
+            if number >= target.number:
+                continue
+            reader_history.append(
+                ctx.ReaderHistorySource(
+                    history_id=plan.id,
+                    kind="remediation",
+                    body=f"[remediation:{plan.status}] 第{number}章补救计划，尚未成为正文事实："
+                    f"{plan.body}",
+                    chapter_number=number,
+                )
+            )
     return ctx.ContextSources(
         novel_id=novel_id,
         chapter_id=chapter_id,
@@ -164,6 +252,8 @@ def load_sources(project: Project, chapter_id: str) -> ctx.ContextSources:
         texts=tuple(texts),
         issues=tuple(issues),
         messages=messages,
+        foreshadow=foreshadow,
+        reader_history=tuple(reader_history),
         previous_snapshot_id=previous_snapshot_id,
         previous_snapshot_status=previous_status,
     )
@@ -562,6 +652,125 @@ def diagnose_draft(
         usage_json=json.dumps(payload.usage),
     )
     return author_message_id, payload
+
+
+def analyze_impact(
+    project: Project,
+    source_adoption_id: str,
+    source_message_id: str,
+    clients: Clients,
+    config: GenerationConfig,
+    *,
+    cancel: CancelSignal | None = None,
+) -> tuple[str, tasks.ImpactReport]:
+    """分析一次前章重新采用对后续已采用正文的影响；结果保存为 pending impact。"""
+    _ensure_idle(project)
+    adoption = database.get_adoption(project.conn, project.novel_id, source_adoption_id)
+    source_chapter = database.get_chapter(project.conn, project.novel_id, adoption.chapter_id)
+    later_versions: dict[int, tuple[str, str]] = {}
+    chapter_ids: dict[int, str] = {}
+    for chapter in database.list_chapters(project.conn, project.novel_id):
+        if chapter.number <= source_chapter.number:
+            continue
+        version_id = database.get_adopted_version_id(project.conn, project.novel_id, chapter)
+        if version_id is None:
+            continue
+        version = database.get_version(project.conn, project.novel_id, version_id)
+        later_versions[chapter.number] = (version.id, version.body)
+        chapter_ids[chapter.number] = chapter.id
+    if not later_versions:
+        raise WorkbenchError(ErrorCode.INVALID_INPUT, "没有后续已采用正文可分析。")
+    config = _reserve_required_input(config, *(body for _vid, body in later_versions.values()))
+    context = build_context(project, source_chapter.id, WriteMode.EXPLORATORY, config)
+    basis_id = save_basis(project, context, "impact")
+    request = _request(
+        TaskKind.IMPACT,
+        basis_id,
+        source_message_id,
+        output_limit=config.options.max_output_tokens,
+    )
+    run_id = database.commit_run(
+        project.conn,
+        project.novel_id,
+        chapter_id=source_chapter.id,
+        task=TaskKind.IMPACT,
+        source_message_id=source_message_id,
+        template_version=prompts.TEMPLATE_VERSION,
+        status=RunStatus.RUNNING,
+        basis_id=basis_id,
+        request_json=_request_json(request, {"source_adoption_id": source_adoption_id}),
+    )
+    try:
+        report, usage = tasks.impact(
+            request,
+            context,
+            source_chapter.number,
+            later_versions,
+            clients.complete,
+            options=config.options,
+            cancel=cancel or CancelSignal(),
+        )
+        run = database.get_run(project.conn, project.novel_id, run_id)
+        if run.status is not RunStatus.RUNNING:
+            raise WorkbenchError(ErrorCode.MODEL_FAILED, "影响分析已取消。", {"run_id": run_id})
+        for chapter in report.chapters:
+            evidence = tuple(
+                (item.version_id, item.start, item.end, item.quote) for item in chapter.evidence
+            )
+            database.commit_impact_analysis(
+                project.conn,
+                project.novel_id,
+                target_chapter_id=chapter_ids[chapter.chapter_number],
+                classification=chapter.status,
+                summary=chapter.reason,
+                source_adoption_id=source_adoption_id,
+                run_id=run_id,
+                evidence=evidence,
+                coverage_checked=report.coverage_checked,
+                coverage_unchecked=report.coverage_unchecked,
+            )
+        findings = tuple(
+            (chapter_ids[f.chapter_number], f.reason, f.evidence) for f in report.findings
+        )
+        if findings:
+            database.commit_impact_findings(
+                project.conn, project.novel_id, source_adoption_id, findings
+            )
+    except WorkbenchError as exc:
+        _fail_run(project, run_id, exc.code.value)
+        raise
+    except Exception as exc:
+        _fail_run(project, run_id, "MODEL_FAILED")
+        raise WorkbenchError(
+            ErrorCode.MODEL_FAILED,
+            "影响分析请求失败。",
+            {"run_id": run_id, "error_type": type(exc).__name__},
+        ) from exc
+    database.commit_run_status(
+        project.conn,
+        project.novel_id,
+        run_id,
+        RunStatus.SUCCEEDED,
+        usage_json=json.dumps(usage),
+    )
+    return run_id, report
+
+
+def propose_remediation(
+    project: Project,
+    chapter_id: str,
+    prompt: str,
+    clients: Clients,
+    config: GenerationConfig,
+    *,
+    cancel: CancelSignal | None = None,
+    on_text: OnText | None = None,
+) -> tuple[str, str]:
+    """为已发布或待复核冲突讨论补救方案；只是讨论消息，不写正式事实。"""
+    text = (
+        "请提出后续补救方案。不要删除读者已看到的已发布正文；方案被作者采用前只是建议。\n" + prompt
+    )
+    return discuss(project, chapter_id, text, clients, config, cancel=cancel, on_text=on_text)
 
 
 def _diagnosis_text(payload: tasks.DiagnosisPayload) -> str:

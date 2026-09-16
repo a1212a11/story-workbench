@@ -23,13 +23,20 @@ from story_workbench.domain.records import (
     AuthorAction,
     Authority,
     BasisRecord,
+    BranchMaterializationStatus,
+    BranchRecord,
     CandidateFactRecord,
     ChapterRecord,
     CheckInput,
     CheckRecord,
     ErrorCode,
+    EvidenceInput,
     FactCorrection,
     FactKind,
+    ForeshadowEventRecord,
+    ForeshadowStage,
+    ImpactRecord,
+    ImpactStatus,
     IssueKind,
     IssueRecord,
     Lifecycle,
@@ -37,6 +44,8 @@ from story_workbench.domain.records import (
     MessageRole,
     NovelRecord,
     PlanRecord,
+    PublicationRecord,
+    RemediationPlanRecord,
     ResolutionAction,
     RunRecord,
     RunStatus,
@@ -56,7 +65,7 @@ from story_workbench.domain.records import (
     WorkcopyRecord,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # 共有字段说明：id TEXT 主键；created_at UTC ISO 文本；除 novel 外均有 novel_id。
 _SCHEMA_V1 = """
@@ -220,7 +229,8 @@ CREATE TABLE run (
     novel_id TEXT NOT NULL REFERENCES novel(id),
     created_at TEXT NOT NULL,
     chapter_id TEXT,
-    task TEXT NOT NULL CHECK (task IN ('discuss', 'generate', 'inspect', 'diagnose', 'recompute')),
+    task TEXT NOT NULL CHECK (task IN (
+        'discuss', 'generate', 'inspect', 'impact', 'diagnose', 'recompute')),
     basis_id TEXT,
     input_version_id TEXT,
     source_message_id TEXT NOT NULL,
@@ -414,7 +424,7 @@ CREATE TABLE snapshot (
     novel_id TEXT NOT NULL REFERENCES novel(id),
     created_at TEXT NOT NULL,
     chapter_id TEXT NOT NULL,
-    adoption_id TEXT NOT NULL,
+    adoption_id TEXT,
     check_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
     basis_id TEXT NOT NULL,
@@ -494,7 +504,210 @@ CREATE TABLE draft_rejection (
 );
 """
 
-_MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
+_SCHEMA_V3 = """
+CREATE TABLE run_v3 (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    chapter_id TEXT,
+    task TEXT NOT NULL CHECK (task IN (
+        'discuss', 'generate', 'inspect', 'impact', 'diagnose', 'recompute')),
+    basis_id TEXT,
+    input_version_id TEXT,
+    source_message_id TEXT NOT NULL,
+    retry_of_id TEXT,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+    partial_text TEXT NOT NULL DEFAULT '',
+    result_version_id TEXT,
+    provider TEXT,
+    model TEXT,
+    template_version TEXT NOT NULL,
+    request_json TEXT NOT NULL DEFAULT '{}',
+    usage_json TEXT,
+    error_code TEXT,
+    UNIQUE (novel_id, id),
+    FOREIGN KEY (novel_id, chapter_id) REFERENCES chapter(novel_id, id),
+    FOREIGN KEY (novel_id, basis_id) REFERENCES basis(novel_id, id),
+    FOREIGN KEY (novel_id, input_version_id) REFERENCES version(novel_id, id),
+    FOREIGN KEY (novel_id, source_message_id) REFERENCES message(novel_id, id),
+    FOREIGN KEY (novel_id, retry_of_id) REFERENCES run_v3(novel_id, id),
+    FOREIGN KEY (novel_id, result_version_id) REFERENCES version(novel_id, id)
+);
+INSERT INTO run_v3 (
+    id, novel_id, created_at, chapter_id, task, basis_id, input_version_id,
+    source_message_id, retry_of_id, status, partial_text, result_version_id,
+    provider, model, template_version, request_json, usage_json, error_code
+) SELECT
+    id, novel_id, created_at, chapter_id, task, basis_id, input_version_id,
+    source_message_id, retry_of_id, status, partial_text, result_version_id,
+    provider, model, template_version, request_json, usage_json, error_code
+FROM run;
+DROP TABLE run;
+ALTER TABLE run_v3 RENAME TO run;
+CREATE INDEX idx_run_status ON run(novel_id, status);
+
+CREATE TABLE branch (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    name TEXT NOT NULL,
+    parent_branch_id TEXT REFERENCES branch(id),
+    fork_adoption_id TEXT,
+    fork_version_id TEXT,
+    fork_snapshot_id TEXT,
+    materialization_status TEXT NOT NULL
+        CHECK (materialization_status IN ('staging', 'ready', 'failed')),
+    work_subdir TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    root_novel_id TEXT NOT NULL,
+    forked_from_novel_id TEXT,
+    forked_from_adoption_id TEXT,
+    UNIQUE (root_novel_id, id),
+    UNIQUE (root_novel_id, name),
+    UNIQUE (novel_id)
+);
+
+CREATE TABLE project_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    main_novel_id TEXT NOT NULL REFERENCES novel(id),
+    active_novel_id TEXT NOT NULL REFERENCES novel(id),
+    current_branch_id TEXT NOT NULL REFERENCES branch(id)
+);
+
+CREATE TABLE publication (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    chapter_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    adoption_id TEXT NOT NULL,
+    ready_snapshot_id TEXT NOT NULL,
+    author_message_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    published_at TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    UNIQUE (novel_id, id),
+    UNIQUE (novel_id, request_id),
+    UNIQUE (novel_id, chapter_id, version_id),
+    FOREIGN KEY (novel_id, chapter_id, version_id) REFERENCES version(novel_id, chapter_id, id),
+    FOREIGN KEY (novel_id, chapter_id, adoption_id) REFERENCES adoption(novel_id, chapter_id, id),
+    FOREIGN KEY (novel_id, ready_snapshot_id) REFERENCES snapshot(novel_id, id),
+    FOREIGN KEY (novel_id, author_message_id) REFERENCES message(novel_id, id)
+);
+
+CREATE TABLE publication_divergence (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    old_adoption_id TEXT NOT NULL,
+    new_adoption_id TEXT NOT NULL,
+    author_message_id TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    UNIQUE (novel_id, id),
+    UNIQUE (novel_id, new_adoption_id),
+    FOREIGN KEY (novel_id, publication_id) REFERENCES publication(novel_id, id),
+    FOREIGN KEY (novel_id, old_adoption_id) REFERENCES adoption(novel_id, id),
+    FOREIGN KEY (novel_id, new_adoption_id) REFERENCES adoption(novel_id, id),
+    FOREIGN KEY (novel_id, author_message_id) REFERENCES message(novel_id, id)
+);
+
+CREATE TABLE remediation_plan (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    chapter_id TEXT NOT NULL,
+    source_message_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('proposed', 'adopted')),
+    UNIQUE (novel_id, id),
+    UNIQUE (novel_id, request_id),
+    FOREIGN KEY (novel_id, publication_id) REFERENCES publication(novel_id, id),
+    FOREIGN KEY (novel_id, chapter_id) REFERENCES chapter(novel_id, id),
+    FOREIGN KEY (novel_id, source_message_id) REFERENCES message(novel_id, id)
+);
+
+CREATE TABLE impact_analysis (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    source_chapter_id TEXT NOT NULL,
+    baseline_adoption_id TEXT NOT NULL,
+    candidate_adoption_id TEXT NOT NULL,
+    target_chapter_id TEXT NOT NULL,
+    impact_class TEXT NOT NULL CHECK (impact_class IN ('affected', 'unrelated', 'unchecked')),
+    summary TEXT NOT NULL,
+    author_resolution TEXT,
+    run_id TEXT,
+    coverage_json TEXT NOT NULL DEFAULT '{"checked":[],"unchecked":[]}',
+    UNIQUE (novel_id, id),
+    FOREIGN KEY (novel_id, source_chapter_id) REFERENCES chapter(novel_id, id),
+    FOREIGN KEY (novel_id, target_chapter_id) REFERENCES chapter(novel_id, id),
+    FOREIGN KEY (novel_id, baseline_adoption_id) REFERENCES adoption(novel_id, id),
+    FOREIGN KEY (novel_id, candidate_adoption_id) REFERENCES adoption(novel_id, id),
+    FOREIGN KEY (novel_id, run_id) REFERENCES run(novel_id, id)
+);
+
+CREATE TABLE impact_evidence (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    impact_id TEXT,
+    analysis_id TEXT,
+    version_id TEXT,
+    start INTEGER,
+    end INTEGER,
+    quote TEXT NOT NULL DEFAULT '',
+    UNIQUE (novel_id, id),
+    CHECK ((impact_id IS NOT NULL) + (analysis_id IS NOT NULL) = 1),
+    CHECK ((start IS NULL) = (end IS NULL)),
+    FOREIGN KEY (novel_id, impact_id) REFERENCES impact(novel_id, id),
+    FOREIGN KEY (novel_id, analysis_id) REFERENCES impact_analysis(novel_id, id),
+    FOREIGN KEY (novel_id, version_id) REFERENCES version(novel_id, id)
+);
+
+CREATE TABLE impact_resolution (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    impact_id TEXT NOT NULL,
+    analysis_id TEXT,
+    classification TEXT NOT NULL CHECK (classification IN ('affected', 'unrelated', 'unchecked')),
+    author_message_id TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    UNIQUE (novel_id, id),
+    FOREIGN KEY (novel_id, impact_id) REFERENCES impact(novel_id, id),
+    FOREIGN KEY (novel_id, analysis_id) REFERENCES impact_analysis(novel_id, id),
+    FOREIGN KEY (novel_id, author_message_id) REFERENCES message(novel_id, id)
+);
+
+CREATE TABLE foreshadow_event (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    logical_id TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK (stage IN ('setup', 'develop', 'reinterpret', 'payoff')),
+    chapter_id TEXT NOT NULL,
+    adoption_id TEXT NOT NULL,
+    version_id TEXT,
+    source_message_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    quote TEXT NOT NULL,
+    UNIQUE (novel_id, id),
+    UNIQUE (novel_id, logical_id, id),
+    FOREIGN KEY (novel_id, chapter_id) REFERENCES chapter(novel_id, id),
+    FOREIGN KEY (novel_id, chapter_id, adoption_id) REFERENCES adoption(novel_id, chapter_id, id),
+    FOREIGN KEY (novel_id, chapter_id, version_id) REFERENCES version(novel_id, chapter_id, id),
+    FOREIGN KEY (novel_id, source_message_id) REFERENCES message(novel_id, id)
+);
+
+CREATE INDEX idx_publication_chapter ON publication(novel_id, chapter_id, created_at);
+CREATE INDEX idx_foreshadow_chapter ON foreshadow_event(novel_id, chapter_id, created_at);
+"""
+
+_MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3}
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -566,6 +779,29 @@ def migrate(conn: sqlite3.Connection) -> int:
             for statement in _MIGRATIONS[target].split(";"):
                 if statement.strip():
                     conn.execute(statement)
+        if current < 3:
+            novel = conn.execute(
+                "SELECT id FROM novel ORDER BY created_at, rowid LIMIT 1"
+            ).fetchone()
+            if novel is not None:
+                exists = conn.execute("SELECT id FROM branch LIMIT 1").fetchone()
+                if exists is None:
+                    branch_id = new_id()
+                    conn.execute(
+                        "INSERT INTO branch (id, novel_id, name, parent_branch_id,"
+                        " fork_adoption_id, fork_version_id, fork_snapshot_id,"
+                        " materialization_status, work_subdir, created_at, root_novel_id,"
+                        " forked_from_novel_id, forked_from_adoption_id)"
+                        " VALUES (?, ?, '主分支', NULL, NULL, NULL, NULL, 'ready', '', ?, ?,"
+                        " NULL, NULL)",
+                        (branch_id, novel["id"], now_utc(), novel["id"]),
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO project_state"
+                        " (id, main_novel_id, active_novel_id, current_branch_id)"
+                        " VALUES (1, ?, ?, ?)",
+                        (novel["id"], novel["id"], branch_id),
+                    )
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     return SCHEMA_VERSION
 
@@ -633,14 +869,89 @@ def _plan(row: sqlite3.Row) -> PlanRecord:
     )
 
 
+def _branch(row: sqlite3.Row, current_id: str | None = None) -> BranchRecord:
+    materialization_status = row["materialization_status"]
+    if materialization_status == "materialized":
+        materialization_status = BranchMaterializationStatus.READY.value
+    return BranchRecord(
+        id=row["id"],
+        name=row["name"],
+        root_novel_id=row["root_novel_id"],
+        novel_id=row["novel_id"],
+        forked_from_novel_id=row["forked_from_novel_id"],
+        forked_from_adoption_id=row["forked_from_adoption_id"],
+        created_at=row["created_at"],
+        is_current=row["id"] == current_id,
+        parent_branch_id=row["parent_branch_id"],
+        fork_adoption_id=row["fork_adoption_id"],
+        fork_version_id=row["fork_version_id"],
+        fork_snapshot_id=row["fork_snapshot_id"],
+        materialization_status=BranchMaterializationStatus(materialization_status),
+        work_subdir=row["work_subdir"],
+    )
+
+
 # ---------------------------------------------------------------- 读
 
 
 def get_novel(conn: sqlite3.Connection) -> NovelRecord | None:
-    row = conn.execute("SELECT id, title, design_revision FROM novel LIMIT 1").fetchone()
+    branch = conn.execute(
+        "SELECT b.* FROM project_state ps JOIN branch b ON b.id = ps.current_branch_id"
+        " WHERE ps.id = 1"
+    ).fetchone()
+    if branch is None:
+        row = conn.execute("SELECT id, title, design_revision FROM novel LIMIT 1").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id, title, design_revision FROM novel WHERE id = ?", (branch["novel_id"],)
+        ).fetchone()
     if row is None:
         return None
     return NovelRecord(id=row["id"], title=row["title"], design_revision=row["design_revision"])
+
+
+def get_novel_by_id(conn: sqlite3.Connection, novel_id: str) -> NovelRecord:
+    row = conn.execute(
+        "SELECT id, title, design_revision FROM novel WHERE id = ?", (novel_id,)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "作品分支不存在。", {"novel_id": novel_id})
+    return NovelRecord(id=row["id"], title=row["title"], design_revision=row["design_revision"])
+
+
+def current_branch(conn: sqlite3.Connection) -> BranchRecord:
+    current = conn.execute("SELECT current_branch_id FROM project_state WHERE id = 1").fetchone()
+    if current is None:
+        raise WorkbenchError(ErrorCode.STORAGE_FAILED, "项目缺少当前分支记录。")
+    row = conn.execute(
+        "SELECT * FROM branch WHERE id = ?", (current["current_branch_id"],)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.STORAGE_FAILED, "当前分支记录不存在。")
+    return _branch(row, current["current_branch_id"])
+
+
+def list_branches(conn: sqlite3.Connection) -> tuple[BranchRecord, ...]:
+    current = conn.execute("SELECT current_branch_id FROM project_state WHERE id = 1").fetchone()
+    current_id = None if current is None else current["current_branch_id"]
+    root = conn.execute(
+        "SELECT root_novel_id FROM branch WHERE id = COALESCE(?, id) LIMIT 1", (current_id,)
+    ).fetchone()
+    if root is None:
+        return ()
+    rows = conn.execute(
+        "SELECT * FROM branch WHERE root_novel_id = ? ORDER BY created_at, rowid",
+        (root["root_novel_id"],),
+    ).fetchall()
+    return tuple(_branch(r, current_id) for r in rows)
+
+
+def get_branch(conn: sqlite3.Connection, branch_id: str) -> BranchRecord:
+    current = conn.execute("SELECT current_branch_id FROM project_state WHERE id = 1").fetchone()
+    row = conn.execute("SELECT * FROM branch WHERE id = ?", (branch_id,)).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "分支不存在。", {"branch_id": branch_id})
+    return _branch(row, None if current is None else current["current_branch_id"])
 
 
 def get_chapter(conn: sqlite3.Connection, novel_id: str, chapter_id: str) -> ChapterRecord:
@@ -700,6 +1011,13 @@ def get_workcopy(conn: sqlite3.Connection, novel_id: str, chapter_id: str) -> Wo
     return None if row is None else _workcopy(row)
 
 
+def list_workcopies(conn: sqlite3.Connection, novel_id: str) -> tuple[WorkcopyRecord, ...]:
+    rows = conn.execute(
+        "SELECT * FROM workcopy WHERE novel_id = ? ORDER BY created_at, rowid", (novel_id,)
+    ).fetchall()
+    return tuple(_workcopy(row) for row in rows)
+
+
 def list_runs_with_status(conn: sqlite3.Connection, novel_id: str, status: RunStatus) -> list[str]:
     rows = conn.execute(
         "SELECT id FROM run WHERE novel_id = ? AND status = ? ORDER BY created_at",
@@ -717,6 +1035,20 @@ def commit_new_novel(conn: sqlite3.Connection, title: str) -> NovelRecord:
         conn.execute(
             "INSERT INTO novel (id, created_at, title, design_revision) VALUES (?, ?, ?, 0)",
             (novel_id, now_utc(), title),
+        )
+        branch_id = new_id()
+        conn.execute(
+            "INSERT INTO branch (id, novel_id, name, parent_branch_id, fork_adoption_id,"
+            " fork_version_id, fork_snapshot_id, materialization_status, work_subdir,"
+            " created_at, root_novel_id, forked_from_novel_id, forked_from_adoption_id)"
+            " VALUES (?, ?, '主分支', NULL, NULL, NULL, NULL,"
+            " 'ready', '', ?, ?, NULL, NULL)",
+            (branch_id, novel_id, now_utc(), novel_id),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO project_state"
+            " (id, main_novel_id, active_novel_id, current_branch_id) VALUES (1, ?, ?, ?)",
+            (novel_id, novel_id, branch_id),
         )
     return NovelRecord(id=novel_id, title=title, design_revision=0)
 
@@ -998,6 +1330,24 @@ def commit_mark_runs_interrupted(conn: sqlite3.Connection, novel_id: str) -> tup
             conn.executemany(
                 "UPDATE run SET status = 'interrupted' WHERE novel_id = ? AND id = ?",
                 [(novel_id, i) for i in ids],
+            )
+    return ids
+
+
+def commit_mark_project_runs_interrupted(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """打开项目时把所有分支上次未结束的 run 标为中断；不自动重新调用模型。"""
+    with transaction(conn):
+        rows = conn.execute(
+            "SELECT run.id, run.novel_id FROM run"
+            " JOIN branch ON branch.novel_id = run.novel_id"
+            " WHERE run.status IN ('pending', 'running')"
+            " ORDER BY run.created_at, run.rowid"
+        ).fetchall()
+        ids = tuple(row["id"] for row in rows)
+        if rows:
+            conn.executemany(
+                "UPDATE run SET status = 'interrupted' WHERE novel_id = ? AND id = ?",
+                [(row["novel_id"], row["id"]) for row in rows],
             )
     return ids
 
@@ -1475,6 +1825,19 @@ def commit_adoption(conn: sqlite3.Connection, action: AuthorAction) -> AdoptionR
                 state_status=_state_status_for(conn, novel_id, context.chapter),
                 already_adopted=True,
             )
+        published = None
+        if current is not None:
+            published = conn.execute(
+                "SELECT id FROM publication WHERE novel_id = ? AND adoption_id = ?"
+                " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (novel_id, current.id),
+            ).fetchone()
+            if published is not None and not action.allow_published_revision:
+                raise WorkbenchError(
+                    ErrorCode.AUTHORIZATION_REQUIRED,
+                    "这一章已有发布记录。若要改已发布原文，请先明确选择发布补救或授权修订已发布原文。",
+                    {"publication_id": published["id"], "adoption_id": current.id},
+                )
         rules.validate_adoption(action, context)
 
         created = now_utc()
@@ -1557,6 +1920,22 @@ def commit_adoption(conn: sqlite3.Connection, action: AuthorAction) -> AdoptionR
                 "UPDATE snapshot SET status = 'stale' WHERE novel_id = ? AND id = ?"
                 " AND status = 'ready'",
                 (novel_id, old_snapshot_id),
+            )
+        if published is not None and current is not None:
+            conn.execute(
+                "INSERT INTO publication_divergence (id, novel_id, created_at, publication_id,"
+                " old_adoption_id, new_adoption_id, author_message_id, reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    novel_id,
+                    created,
+                    published["id"],
+                    current.id,
+                    adoption_id,
+                    action.source_message_id,
+                    action.divergence_reason or "作者授权修订已发布原文。",
+                ),
             )
         # 后续章节：累计快照依赖链保守失效，登记影响并标记待复核。
         later = conn.execute(
@@ -2025,6 +2404,124 @@ def get_adopted_version_id(
     return get_adoption(conn, novel_id, chapter.adopted_id).version_id
 
 
+def commit_publication(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    chapter_id: str,
+    version_id: str,
+    author_message_id: str,
+    note: str = "",
+    request_id: str | None = None,
+) -> PublicationRecord:
+    """标记准确的当前已采用版本为已发布；发布记录只追加，不随本地采用移动。"""
+    request = request_id or new_id()
+    publication_id = new_id()
+    with transaction(conn):
+        existing_request = conn.execute(
+            "SELECT * FROM publication WHERE novel_id = ? AND request_id = ?",
+            (novel_id, request),
+        ).fetchone()
+        if existing_request is not None:
+            return _publication(existing_request)
+        chapter = get_chapter(conn, novel_id, chapter_id)
+        if chapter.adopted_id is None:
+            raise WorkbenchError(ErrorCode.INVALID_INPUT, "本章尚未采用，不能标记发布。")
+        adoption = get_adoption(conn, novel_id, chapter.adopted_id)
+        if adoption.version_id != version_id:
+            raise WorkbenchError(
+                ErrorCode.AUTHORIZATION_REQUIRED,
+                "发布只能绑定当前已采用的准确版本；修改已发布原文需要明确授权。",
+                {"published_version_id": version_id, "adopted_version_id": adoption.version_id},
+            )
+        if chapter.current_snapshot_id is None:
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "故事状态尚未更新完成，不能标记发布。")
+        snapshot = get_snapshot(conn, novel_id, chapter.current_snapshot_id)
+        if snapshot.status is not SnapshotStatus.READY or snapshot.adoption_id != adoption.id:
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "发布需要当前采用版本的 ready 状态快照。")
+        existing = conn.execute(
+            "SELECT * FROM publication WHERE novel_id = ? AND chapter_id = ? AND version_id = ?",
+            (novel_id, chapter_id, version_id),
+        ).fetchone()
+        if existing is not None:
+            return _publication(existing)
+        created = now_utc()
+        conn.execute(
+            "INSERT INTO publication (id, novel_id, created_at, chapter_id, version_id,"
+            " adoption_id, ready_snapshot_id, author_message_id, request_id, published_at, note)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                publication_id,
+                novel_id,
+                created,
+                chapter_id,
+                version_id,
+                adoption.id,
+                snapshot.id,
+                author_message_id,
+                request,
+                created,
+                note,
+            ),
+        )
+    return get_publication(conn, novel_id, publication_id)
+
+
+def _publication(row: sqlite3.Row) -> PublicationRecord:
+    return PublicationRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        chapter_id=row["chapter_id"],
+        version_id=row["version_id"],
+        adoption_id=row["adoption_id"],
+        ready_snapshot_id=row["ready_snapshot_id"],
+        author_message_id=row["author_message_id"],
+        request_id=row["request_id"],
+        published_at=row["published_at"],
+        note=row["note"],
+    )
+
+
+def get_publication(
+    conn: sqlite3.Connection, novel_id: str, publication_id: str
+) -> PublicationRecord:
+    row = conn.execute(
+        "SELECT * FROM publication WHERE novel_id = ? AND id = ?", (novel_id, publication_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(
+            ErrorCode.NOT_FOUND, "发布记录不存在。", {"publication_id": publication_id}
+        )
+    return _publication(row)
+
+
+def list_publications(
+    conn: sqlite3.Connection, novel_id: str, chapter_id: str | None = None
+) -> tuple[PublicationRecord, ...]:
+    if chapter_id is None:
+        rows = conn.execute(
+            "SELECT * FROM publication WHERE novel_id = ? ORDER BY published_at, rowid",
+            (novel_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM publication WHERE novel_id = ? AND chapter_id = ?"
+            " ORDER BY published_at, rowid",
+            (novel_id, chapter_id),
+        ).fetchall()
+    return tuple(_publication(r) for r in rows)
+
+
+def latest_publication_for_chapter(
+    conn: sqlite3.Connection, novel_id: str, chapter_id: str
+) -> PublicationRecord | None:
+    row = conn.execute(
+        "SELECT * FROM publication WHERE novel_id = ? AND chapter_id = ?"
+        " ORDER BY published_at DESC, rowid DESC LIMIT 1",
+        (novel_id, chapter_id),
+    ).fetchone()
+    return None if row is None else _publication(row)
+
+
 # ---------------------------------------------------------------- 上下文来源读取与当前稿选择（G04）
 
 
@@ -2282,6 +2779,625 @@ def list_pending_impacts(
     return tuple((r["id"], r["reason"]) for r in rows)
 
 
+def _impact(row: sqlite3.Row) -> ImpactRecord:
+    return ImpactRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        chapter_id=row["chapter_id"],
+        reason=row["reason"],
+        status=ImpactStatus(row["status"]),
+        old_snapshot_id=row["old_snapshot_id"],
+        source_adoption_id=row["source_adoption_id"],
+        source_story_item_id=row["source_story_item_id"],
+        evidence_issue_id=row["evidence_issue_id"],
+        resolved_review_id=row["resolved_review_id"],
+    )
+
+
+def list_impacts(conn: sqlite3.Connection, novel_id: str) -> tuple[ImpactRecord, ...]:
+    rows = conn.execute(
+        "SELECT * FROM impact WHERE novel_id = ? ORDER BY created_at, rowid", (novel_id,)
+    ).fetchall()
+    return tuple(_impact(r) for r in rows)
+
+
+def commit_impact_analysis(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    *,
+    target_chapter_id: str,
+    classification: str,
+    summary: str,
+    source_adoption_id: str | None = None,
+    source_story_item_id: str | None = None,
+    run_id: str | None = None,
+    evidence: tuple[tuple[str, int | None, int | None, str], ...] = (),
+    coverage_checked: tuple[str, ...] = (),
+    coverage_unchecked: tuple[str, ...] = (),
+) -> str:
+    analysis_id = new_id()
+    with transaction(conn):
+        target = get_chapter(conn, novel_id, target_chapter_id)
+        if source_adoption_id is not None:
+            source_adoption = get_adoption(conn, novel_id, source_adoption_id)
+            source_chapter_id = source_adoption.chapter_id
+            baseline_adoption_id = source_adoption.id
+        elif target.adopted_id is not None:
+            source_chapter_id = target.id
+            baseline_adoption_id = target.adopted_id
+        else:
+            raise WorkbenchError(
+                ErrorCode.INVALID_INPUT,
+                "影响分析需要已采用正文作为比较基线。",
+                {"chapter_id": target_chapter_id},
+            )
+        candidate_adoption_id = target.adopted_id or baseline_adoption_id
+        impact_class = classification
+        if impact_class not in {"affected", "unrelated", "unchecked"}:
+            raise WorkbenchError(ErrorCode.INVALID_INPUT, "影响分类无效。")
+        created = now_utc()
+        conn.execute(
+            "INSERT INTO impact_analysis (id, novel_id, created_at, source_chapter_id,"
+            " baseline_adoption_id, candidate_adoption_id, target_chapter_id, impact_class,"
+            " summary, run_id, coverage_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                analysis_id,
+                novel_id,
+                created,
+                source_chapter_id,
+                baseline_adoption_id,
+                candidate_adoption_id,
+                target_chapter_id,
+                impact_class,
+                summary,
+                run_id,
+                json.dumps(
+                    {"checked": list(coverage_checked), "unchecked": list(coverage_unchecked)},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        _ = source_story_item_id
+        for version_id, start, end, quote in evidence:
+            if version_id is not None:
+                version = get_version(conn, novel_id, version_id)
+                if version.chapter_id != target_chapter_id:
+                    raise WorkbenchError(
+                        ErrorCode.WRONG_SCOPE,
+                        "影响分析证据引用了目标章节之外的正文。",
+                        {"target_chapter_id": target_chapter_id, "version_id": version_id},
+                    )
+                if start is None or end is None:
+                    raise WorkbenchError(ErrorCode.INVALID_INPUT, "影响分析证据缺少区间。")
+                rules.validate_evidence_span(version.body, start, end, quote)
+            conn.execute(
+                "INSERT INTO impact_evidence (id, novel_id, created_at, analysis_id, version_id,"
+                " start, end, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (new_id(), novel_id, created, analysis_id, version_id, start, end, quote),
+            )
+    return analysis_id
+
+
+def get_impact_analysis_for_target(
+    conn: sqlite3.Connection, novel_id: str, run_id: str, target_chapter_id: str
+) -> tuple[str, str] | None:
+    row = conn.execute(
+        "SELECT id, impact_class FROM impact_analysis"
+        " WHERE novel_id = ? AND run_id = ? AND target_chapter_id = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (novel_id, run_id, target_chapter_id),
+    ).fetchone()
+    return None if row is None else (row["id"], row["impact_class"])
+
+
+def commit_impact_resolution(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    impact_id: str,
+    classification: str,
+    author_message_id: str,
+    *,
+    analysis_id: str | None = None,
+    note: str = "",
+) -> str:
+    if classification not in {"affected", "unrelated", "unchecked"}:
+        raise WorkbenchError(ErrorCode.INVALID_INPUT, "影响分类无效。")
+    resolution_id = new_id()
+    with transaction(conn):
+        impact = conn.execute(
+            "SELECT * FROM impact WHERE novel_id = ? AND id = ?", (novel_id, impact_id)
+        ).fetchone()
+        if impact is None:
+            raise WorkbenchError(ErrorCode.NOT_FOUND, "影响记录不存在。", {"impact_id": impact_id})
+        if impact["status"] != "pending":
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "影响记录已处理，请重新查看。")
+        target = get_chapter(conn, novel_id, impact["chapter_id"])
+        source_adoption_id = impact["source_adoption_id"]
+        if source_adoption_id is None:
+            raise WorkbenchError(ErrorCode.INVALID_INPUT, "只能确认采用变更产生的影响。")
+
+        created = now_utc()
+        if classification != "unrelated":
+            conn.execute(
+                "INSERT INTO impact_resolution (id, novel_id, created_at, impact_id,"
+                " analysis_id, classification, author_message_id, note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    resolution_id,
+                    novel_id,
+                    created,
+                    impact_id,
+                    analysis_id,
+                    classification,
+                    author_message_id,
+                    note,
+                ),
+            )
+            return resolution_id
+
+        existing_unrelated = conn.execute(
+            "SELECT id FROM impact_resolution WHERE novel_id = ? AND impact_id = ?"
+            " AND classification = 'unrelated' LIMIT 1",
+            (novel_id, impact_id),
+        ).fetchone()
+        if existing_unrelated is not None:
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "该影响已确认无关。")
+        if analysis_id is None:
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "确认无关需要匹配的影响分析。")
+        analysis = conn.execute(
+            "SELECT * FROM impact_analysis WHERE novel_id = ? AND id = ?",
+            (novel_id, analysis_id),
+        ).fetchone()
+        if analysis is None:
+            raise WorkbenchError(
+                ErrorCode.NOT_FOUND, "影响分析不存在。", {"analysis_id": analysis_id}
+            )
+        if (
+            analysis["impact_class"] != "unrelated"
+            or analysis["target_chapter_id"] != target.id
+            or analysis["baseline_adoption_id"] != source_adoption_id
+            or analysis["candidate_adoption_id"] != target.adopted_id
+        ):
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "影响分析与当前影响记录不匹配。")
+        if target.adopted_id is None:
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "目标章节尚未采用。")
+
+        source_adoption = get_adoption(conn, novel_id, source_adoption_id)
+        source_chapter = get_chapter(conn, novel_id, source_adoption.chapter_id)
+        if source_chapter.current_snapshot_id is None:
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "来源章节状态尚未更新完成。")
+        source_snapshot = get_snapshot(conn, novel_id, source_chapter.current_snapshot_id)
+        if (
+            source_snapshot.status is not SnapshotStatus.READY
+            or source_snapshot.adoption_id != source_adoption_id
+        ):
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "来源章节状态已经变化。")
+
+        previous = _previous_chapter(conn, novel_id, target)
+        previous_snapshot_id = None
+        if previous is not None:
+            if previous.current_snapshot_id is None:
+                raise WorkbenchError(ErrorCode.STALE_BASIS, "前章状态尚未更新完成。")
+            previous_snapshot = get_snapshot(conn, novel_id, previous.current_snapshot_id)
+            if previous_snapshot.status is not SnapshotStatus.READY:
+                raise WorkbenchError(ErrorCode.STALE_BASIS, "前章状态尚未更新完成。")
+            previous_snapshot_id = previous_snapshot.id
+
+        target_adoption = get_adoption(conn, novel_id, target.adopted_id)
+        old_review = conn.execute(
+            "SELECT * FROM review WHERE novel_id = ? AND id = ?",
+            (novel_id, target_adoption.review_id),
+        ).fetchone()
+        old_check = conn.execute(
+            "SELECT * FROM check_result WHERE novel_id = ? AND id = ?",
+            (novel_id, old_review["check_id"]),
+        ).fetchone()
+        novel = get_novel_by_id(conn, novel_id)
+        basis_id = new_id()
+        conn.execute(
+            "INSERT INTO basis (id, novel_id, created_at, chapter_id, plan_id,"
+            " previous_snapshot_id, design_revision, purpose, omitted_sources_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 'impact_rebase', '[]')",
+            (
+                basis_id,
+                novel_id,
+                created,
+                target.id,
+                target.current_plan_id,
+                previous_snapshot_id,
+                novel.design_revision,
+            ),
+        )
+        run_id = new_id()
+        conn.execute(
+            "INSERT INTO run (id, novel_id, created_at, chapter_id, task, basis_id,"
+            " input_version_id, source_message_id, status, template_version, request_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                novel_id,
+                created,
+                target.id,
+                TaskKind.RECOMPUTE.value,
+                basis_id,
+                target_adoption.version_id,
+                author_message_id,
+                RunStatus.SUCCEEDED.value,
+                "impact-rebase",
+                json.dumps({"impact_id": impact_id, "analysis_id": analysis_id}),
+            ),
+        )
+        check_id = new_id()
+        conn.execute(
+            "INSERT INTO check_result (id, novel_id, created_at, chapter_id, version_id,"
+            " basis_id, run_id, coverage_json, actual_plot, actual_ending)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                check_id,
+                novel_id,
+                created,
+                target.id,
+                target_adoption.version_id,
+                basis_id,
+                run_id,
+                old_check["coverage_json"],
+                old_check["actual_plot"],
+                old_check["actual_ending"],
+            ),
+        )
+
+        candidate_map: dict[str, str] = {}
+        revision_map: dict[str, str] = {}
+        old_candidates = conn.execute(
+            "SELECT * FROM candidate_fact WHERE novel_id = ? AND check_id = ? ORDER BY rowid",
+            (novel_id, old_check["id"]),
+        ).fetchall()
+        for candidate in old_candidates:
+            candidate_id = new_id()
+            candidate_map[candidate["id"]] = candidate_id
+            conn.execute(
+                "INSERT INTO candidate_fact (id, novel_id, created_at, check_id, kind,"
+                " subject, proposition, story_time, evidence_start, evidence_end, quote)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    candidate_id,
+                    novel_id,
+                    created,
+                    check_id,
+                    candidate["kind"],
+                    candidate["subject"],
+                    candidate["proposition"],
+                    candidate["story_time"],
+                    candidate["evidence_start"],
+                    candidate["evidence_end"],
+                    candidate["quote"],
+                ),
+            )
+        for candidate in old_candidates:
+            revisions = conn.execute(
+                "SELECT * FROM fact_revision WHERE novel_id = ? AND candidate_id = ?"
+                " ORDER BY created_at, rowid",
+                (novel_id, candidate["id"]),
+            ).fetchall()
+            for revision in revisions:
+                revision_id = new_id()
+                revision_map[revision["id"]] = revision_id
+                conn.execute(
+                    "INSERT INTO fact_revision (id, novel_id, created_at, candidate_id,"
+                    " previous_revision_id, kind, subject, proposition, story_time,"
+                    " evidence_start, evidence_end, quote, author_message_id)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        revision_id,
+                        novel_id,
+                        created,
+                        candidate_map[revision["candidate_id"]],
+                        None
+                        if revision["previous_revision_id"] is None
+                        else revision_map[revision["previous_revision_id"]],
+                        revision["kind"],
+                        revision["subject"],
+                        revision["proposition"],
+                        revision["story_time"],
+                        revision["evidence_start"],
+                        revision["evidence_end"],
+                        revision["quote"],
+                        revision["author_message_id"],
+                    ),
+                )
+            head = conn.execute(
+                "SELECT * FROM fact_head WHERE novel_id = ? AND candidate_id = ?",
+                (novel_id, candidate["id"]),
+            ).fetchone()
+            if head is not None:
+                conn.execute(
+                    "INSERT INTO fact_head (id, novel_id, created_at, candidate_id,"
+                    " current_revision_id) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        new_id(),
+                        novel_id,
+                        created,
+                        candidate_map[head["candidate_id"]],
+                        revision_map[head["current_revision_id"]],
+                    ),
+                )
+
+        review_id = new_id()
+        conn.execute(
+            "INSERT INTO review (id, novel_id, created_at, chapter_id, version_id,"
+            " check_id, basis_id, author_message_id, read_declared, accepted_plot,"
+            " accepted_ending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (
+                review_id,
+                novel_id,
+                created,
+                target.id,
+                target_adoption.version_id,
+                check_id,
+                basis_id,
+                author_message_id,
+                old_review["accepted_plot"],
+                old_review["accepted_ending"],
+            ),
+        )
+        snapshot_id = new_id()
+        conn.execute(
+            "INSERT INTO snapshot (id, novel_id, created_at, chapter_id, adoption_id,"
+            " check_id, review_id, basis_id, previous_snapshot_id, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready')",
+            (
+                snapshot_id,
+                novel_id,
+                created,
+                target.id,
+                target_adoption.id,
+                check_id,
+                review_id,
+                basis_id,
+                previous_snapshot_id,
+            ),
+        )
+        if previous_snapshot_id is not None:
+            for fact in list_snapshot_facts(conn, novel_id, previous_snapshot_id):
+                conn.execute(
+                    "INSERT INTO snapshot_fact (id, novel_id, created_at, snapshot_id,"
+                    " candidate_id, fact_revision_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        new_id(),
+                        novel_id,
+                        created,
+                        snapshot_id,
+                        fact.candidate_id,
+                        fact.fact_revision_id,
+                    ),
+                )
+        for candidate in old_candidates:
+            head = conn.execute(
+                "SELECT current_revision_id FROM fact_head WHERE novel_id = ? AND candidate_id = ?",
+                (novel_id, candidate_map[candidate["id"]]),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO snapshot_fact (id, novel_id, created_at, snapshot_id,"
+                " candidate_id, fact_revision_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    novel_id,
+                    created,
+                    snapshot_id,
+                    None if head is not None else candidate_map[candidate["id"]],
+                    None if head is None else head["current_revision_id"],
+                ),
+            )
+        conn.execute(
+            "INSERT INTO impact_resolution (id, novel_id, created_at, impact_id, analysis_id,"
+            " classification, author_message_id, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                resolution_id,
+                novel_id,
+                created,
+                impact_id,
+                analysis_id,
+                classification,
+                author_message_id,
+                note,
+            ),
+        )
+        conn.execute(
+            "UPDATE impact SET status = 'resolved', resolved_review_id = ?"
+            " WHERE novel_id = ? AND id = ? AND status = 'pending'",
+            (review_id, novel_id, impact_id),
+        )
+        conn.execute(
+            "UPDATE chapter SET current_snapshot_id = ?, needs_review = 0"
+            " WHERE novel_id = ? AND id = ? AND adopted_id = ?",
+            (snapshot_id, novel_id, target.id, target_adoption.id),
+        )
+    return resolution_id
+
+
+def list_impact_records(
+    conn: sqlite3.Connection, novel_id: str, chapter_id: str | None = None
+) -> tuple[ImpactRecord, ...]:
+    if chapter_id is None:
+        rows = conn.execute(
+            "SELECT * FROM impact WHERE novel_id = ? ORDER BY created_at, rowid", (novel_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM impact WHERE novel_id = ? AND chapter_id = ? ORDER BY created_at, rowid",
+            (novel_id, chapter_id),
+        ).fetchall()
+    return tuple(
+        ImpactRecord(
+            id=r["id"],
+            novel_id=r["novel_id"],
+            chapter_id=r["chapter_id"],
+            reason=r["reason"],
+            status=ImpactStatus(r["status"]),
+            old_snapshot_id=r["old_snapshot_id"],
+            source_adoption_id=r["source_adoption_id"],
+            source_story_item_id=r["source_story_item_id"],
+            evidence_issue_id=r["evidence_issue_id"],
+            resolved_review_id=r["resolved_review_id"],
+        )
+        for r in rows
+    )
+
+
+def commit_impact_findings(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    source_adoption_id: str,
+    findings: tuple[tuple[str, str, tuple[EvidenceInput, ...]], ...],
+) -> tuple[str, ...]:
+    """保存影响分析发现；每项为 (chapter_id, reason, evidence)。重复 pending reason 跳过。"""
+    ids: list[str] = []
+    with transaction(conn):
+        source_adoption = get_adoption(conn, novel_id, source_adoption_id)
+        source_chapter = get_chapter(conn, novel_id, source_adoption.chapter_id)
+        created = now_utc()
+        for chapter_id, reason, evidence in findings:
+            chapter = get_chapter(conn, novel_id, chapter_id)
+            if chapter.number <= source_chapter.number:
+                raise WorkbenchError(
+                    ErrorCode.WRONG_SCOPE,
+                    "影响分析只能登记来源章之后的章节。",
+                    {"chapter_id": chapter_id},
+                )
+            existing = conn.execute(
+                "SELECT id FROM impact WHERE novel_id = ? AND chapter_id = ?"
+                " AND source_adoption_id = ? AND status = 'pending'"
+                " ORDER BY created_at, rowid LIMIT 1",
+                (novel_id, chapter_id, source_adoption_id),
+            ).fetchone()
+            if existing is None:
+                impact_id = new_id()
+                conn.execute(
+                    "INSERT INTO impact (id, novel_id, created_at, chapter_id,"
+                    " source_adoption_id, reason, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                    (impact_id, novel_id, created, chapter_id, source_adoption_id, reason),
+                )
+            else:
+                impact_id = existing["id"]
+            ids.append(impact_id)
+            for ev in evidence:
+                if ev.version_id is not None:
+                    version = get_version(conn, novel_id, ev.version_id)
+                    if version.chapter_id != chapter_id:
+                        raise WorkbenchError(
+                            ErrorCode.MODEL_FAILED,
+                            "影响证据引用了不属于该章节的正文。",
+                            {"chapter_id": chapter_id, "version_id": ev.version_id},
+                        )
+                    if ev.start is None or ev.end is None:
+                        raise WorkbenchError(ErrorCode.MODEL_FAILED, "影响证据缺少区间。")
+                    if not rules.validate_span(version.body, ev.start, ev.end, ev.quote):
+                        raise WorkbenchError(ErrorCode.MODEL_FAILED, "影响证据与正文不符。")
+                conn.execute(
+                    "INSERT INTO impact_evidence (id, novel_id, created_at, impact_id,"
+                    " version_id, start, end, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        new_id(),
+                        novel_id,
+                        created,
+                        impact_id,
+                        ev.version_id,
+                        ev.start,
+                        ev.end,
+                        ev.quote,
+                    ),
+                )
+            conn.execute(
+                "UPDATE chapter SET needs_review = 1, current_snapshot_id = NULL"
+                " WHERE novel_id = ? AND id = ?",
+                (novel_id, chapter_id),
+            )
+    return tuple(ids)
+
+
+def commit_foreshadow_event(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    *,
+    logical_id: str | None,
+    stage: ForeshadowStage,
+    chapter_id: str,
+    adoption_id: str,
+    source_message_id: str,
+    body: str,
+    quote: str,
+    version_id: str | None = None,
+) -> ForeshadowEventRecord:
+    if not body.strip():
+        raise WorkbenchError(ErrorCode.INVALID_INPUT, "伏笔记录不能为空。")
+    event_id = new_id()
+    logical = logical_id or new_id()
+    with transaction(conn):
+        get_chapter(conn, novel_id, chapter_id)
+        adoption = get_adoption(conn, novel_id, adoption_id)
+        if adoption.chapter_id != chapter_id:
+            raise WorkbenchError(ErrorCode.WRONG_SCOPE, "伏笔事件引用的采用记录不属于本章。")
+        if version_id is not None:
+            version = get_version(conn, novel_id, version_id)
+            if version.chapter_id != chapter_id:
+                raise WorkbenchError(ErrorCode.WRONG_SCOPE, "伏笔出处版本不属于该章。")
+            if quote and quote not in version.body:
+                raise WorkbenchError(ErrorCode.INVALID_INPUT, "伏笔引用必须出自所选正式正文。")
+        created = now_utc()
+        conn.execute(
+            "INSERT INTO foreshadow_event (id, novel_id, created_at, logical_id, stage,"
+            " chapter_id, adoption_id, version_id, source_message_id, body, quote)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                novel_id,
+                created,
+                logical,
+                stage.value,
+                chapter_id,
+                adoption_id,
+                version_id,
+                source_message_id,
+                body.strip(),
+                quote,
+            ),
+        )
+    return get_foreshadow_event(conn, novel_id, event_id)
+
+
+def get_foreshadow_event(
+    conn: sqlite3.Connection, novel_id: str, event_id: str
+) -> ForeshadowEventRecord:
+    row = conn.execute(
+        "SELECT * FROM foreshadow_event WHERE novel_id = ? AND id = ?", (novel_id, event_id)
+    ).fetchone()
+    if row is None:
+        raise WorkbenchError(ErrorCode.NOT_FOUND, "伏笔记录不存在。", {"event_id": event_id})
+    return ForeshadowEventRecord(
+        id=row["id"],
+        novel_id=row["novel_id"],
+        logical_id=row["logical_id"],
+        stage=ForeshadowStage(row["stage"]),
+        chapter_id=row["chapter_id"],
+        source_message_id=row["source_message_id"],
+        body=row["body"],
+        quote=row["quote"],
+        adoption_id=row["adoption_id"],
+        version_id=row["version_id"],
+        created_at=row["created_at"],
+    )
+
+
+def list_foreshadow_events(
+    conn: sqlite3.Connection, novel_id: str
+) -> tuple[ForeshadowEventRecord, ...]:
+    rows = conn.execute(
+        "SELECT * FROM foreshadow_event WHERE novel_id = ? ORDER BY created_at, rowid",
+        (novel_id,),
+    ).fetchall()
+    return tuple(get_foreshadow_event(conn, novel_id, r["id"]) for r in rows)
+
+
 def commit_revalidation(conn: sqlite3.Connection, action: AuthorAction) -> str:
     """前文变化、本章正文未变：保存新审阅与新的候选快照，解除待复核；不新增正文或采用。
 
@@ -2363,6 +3479,947 @@ def commit_revalidation(conn: sqlite3.Connection, action: AuthorAction) -> str:
         )
         _resolve_pending_impacts(conn, novel_id, chapter.id, review_id)
     return snapshot_id
+
+
+# ---------------------------------------------------------------- M3：分支、发布、补救与伏笔
+
+
+def switch_branch(conn: sqlite3.Connection, branch_id: str) -> NovelRecord:
+    with transaction(conn):
+        current = current_branch(conn)
+        if any_run_in_flight(conn, current.novel_id) is not None:
+            raise WorkbenchError(ErrorCode.PROJECT_BUSY, "当前分支有未结束的模型任务。")
+        branch = get_branch(conn, branch_id)
+        if branch.materialization_status is not BranchMaterializationStatus.READY:
+            raise WorkbenchError(ErrorCode.STORAGE_FAILED, "目标分支尚未完成文件物化。")
+        if any_run_in_flight(conn, branch.novel_id) is not None:
+            raise WorkbenchError(ErrorCode.PROJECT_BUSY, "目标分支有未结束的模型任务。")
+        conn.execute(
+            "UPDATE project_state SET current_branch_id = ?, active_novel_id = ? WHERE id = 1",
+            (branch.id, branch.novel_id),
+        )
+    return get_novel_by_id(conn, branch.novel_id)
+
+
+def commit_branch_from_adoption(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    name: str,
+    source_adoption_id: str,
+) -> BranchRecord:
+    branch_name = name.strip()
+    if not branch_name:
+        raise WorkbenchError(ErrorCode.INVALID_INPUT, "分支名称不能为空。")
+    if any_run_in_flight(conn, novel_id) is not None:
+        raise WorkbenchError(ErrorCode.PROJECT_BUSY, "有模型任务正在进行，暂不能创建分支。")
+    branch_id = new_id()
+    new_novel_id = new_id()
+    with transaction(conn):
+        source_branch = current_branch(conn)
+        if source_branch.novel_id != novel_id:
+            raise WorkbenchError(ErrorCode.WRONG_SCOPE, "只能从当前分支创建新分支。")
+        if conn.execute(
+            "SELECT id FROM impact WHERE novel_id = ? AND status = 'pending'", (novel_id,)
+        ).fetchone():
+            raise WorkbenchError(ErrorCode.REVIEW_REQUIRED, "仍有待复核影响，暂不能创建分支。")
+        adoption = get_adoption(conn, novel_id, source_adoption_id)
+        fork_chapter = get_chapter(conn, novel_id, adoption.chapter_id)
+        snapshot = latest_snapshot_for_adoption(conn, novel_id, source_adoption_id)
+        if snapshot is None or snapshot.status is not SnapshotStatus.READY:
+            raise WorkbenchError(ErrorCode.STALE_BASIS, "分支起点需要采用后的 ready 状态。")
+        novel = get_novel_by_id(conn, novel_id)
+        created = now_utc()
+        conn.execute(
+            "INSERT INTO novel (id, created_at, title, design_revision) VALUES (?, ?, ?, ?)",
+            (new_novel_id, created, novel.title, novel.design_revision),
+        )
+        conn.execute(
+            "INSERT INTO branch (id, novel_id, name, parent_branch_id, fork_adoption_id,"
+            " fork_version_id, fork_snapshot_id, materialization_status, work_subdir,"
+            " created_at, root_novel_id, forked_from_novel_id, forked_from_adoption_id)"
+            " VALUES (?, ?, ?, ?, ?, NULL, ?, 'staging', ?, ?, ?, ?, ?)",
+            (
+                branch_id,
+                new_novel_id,
+                branch_name,
+                source_branch.id,
+                source_adoption_id,
+                snapshot.id,
+                f"branches/{branch_id}",
+                created,
+                source_branch.root_novel_id,
+                novel_id,
+                source_adoption_id,
+            ),
+        )
+
+        chapters = [c for c in list_chapters(conn, novel_id) if c.number <= fork_chapter.number]
+        chapter_map: dict[str, str] = {}
+        plan_map: dict[str, str] = {}
+        version_map: dict[str, str] = {}
+        basis_map: dict[str, str] = {}
+        run_map: dict[str, str] = {}
+        check_map: dict[str, str] = {}
+        review_map: dict[str, str] = {}
+        adoption_map: dict[str, str] = {}
+        snapshot_map: dict[str, str] = {}
+        candidate_map: dict[str, str] = {}
+        revision_map: dict[str, str] = {}
+        story_item_map: dict[str, str] = {}
+        basis_source_map: dict[str, str] = {}
+        issue_map: dict[str, str] = {}
+        message_map: dict[str, str] = {}
+
+        def require_mapped(mapping: dict[str, str], key: str, label: str) -> str:
+            try:
+                return mapping[key]
+            except KeyError as exc:
+                raise WorkbenchError(
+                    ErrorCode.STALE_BASIS,
+                    "分支复制缺少正式闭包映射。",
+                    {"kind": label, "id": key},
+                ) from exc
+
+        for chapter in chapters:
+            new_chapter_id = new_id()
+            chapter_map[chapter.id] = new_chapter_id
+            conn.execute(
+                "INSERT INTO chapter (id, novel_id, created_at, number) VALUES (?, ?, ?, ?)",
+                (new_chapter_id, new_novel_id, created, chapter.number),
+            )
+
+        def copy_message(
+            old_message_id: str | None,
+            preferred_chapter_id: str | None = None,
+            *,
+            fallback: str | None = None,
+        ) -> str:
+            if old_message_id is not None and old_message_id in message_map:
+                return message_map[old_message_id]
+            row = None
+            if old_message_id is not None:
+                row = conn.execute(
+                    "SELECT role, body, chapter_id FROM message WHERE novel_id = ? AND id = ?",
+                    (novel_id, old_message_id),
+                ).fetchone()
+            old_chapter_id = None if row is None else row["chapter_id"]
+            new_chapter_id = chapter_map.get(old_chapter_id, preferred_chapter_id)
+            message_id = new_id()
+            conn.execute(
+                "INSERT INTO message (id, novel_id, created_at, role, body, chapter_id)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    message_id,
+                    new_novel_id,
+                    created,
+                    MessageRole.AUTHOR.value if row is None else row["role"],
+                    fallback if row is None else row["body"],
+                    new_chapter_id,
+                ),
+            )
+            if old_message_id is not None:
+                message_map[old_message_id] = message_id
+            return message_id
+
+        for chapter in chapters:
+            for plan in conn.execute(
+                "SELECT * FROM plan WHERE novel_id = ? AND chapter_id = ? ORDER BY revision",
+                (novel_id, chapter.id),
+            ).fetchall():
+                new_plan_id = new_id()
+                plan_map[plan["id"]] = new_plan_id
+                conn.execute(
+                    "INSERT INTO plan (id, novel_id, created_at, chapter_id, revision, plot,"
+                    " ending, source_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        new_plan_id,
+                        new_novel_id,
+                        plan["created_at"],
+                        chapter_map[chapter.id],
+                        plan["revision"],
+                        plan["plot"],
+                        plan["ending"],
+                        copy_message(plan["source_message_id"], chapter_map[chapter.id]),
+                    ),
+                )
+            if chapter.current_plan_id is not None:
+                conn.execute(
+                    "UPDATE chapter SET current_plan_id = ? WHERE novel_id = ? AND id = ?",
+                    (
+                        require_mapped(plan_map, chapter.current_plan_id, "plan"),
+                        new_novel_id,
+                        chapter_map[chapter.id],
+                    ),
+                )
+
+        def copy_story_item(old_item_id: str) -> str:
+            if old_item_id in story_item_map:
+                return story_item_map[old_item_id]
+            row = conn.execute(
+                "SELECT * FROM story_item WHERE novel_id = ? AND id = ?", (novel_id, old_item_id)
+            ).fetchone()
+            if row is None:
+                raise WorkbenchError(
+                    ErrorCode.NOT_FOUND,
+                    "故事条目不存在。",
+                    {"item_id": old_item_id},
+                )
+            if row["chapter_id"] is not None and row["chapter_id"] not in chapter_map:
+                raise WorkbenchError(ErrorCode.WRONG_SCOPE, "分支不能复制未来章节故事条目。")
+            supersedes_id = None
+            if row["supersedes_id"] is not None:
+                supersedes_id = copy_story_item(row["supersedes_id"])
+            item_id = new_id()
+            story_item_map[old_item_id] = item_id
+            conn.execute(
+                "INSERT INTO story_item (id, novel_id, created_at, logical_id, revision, kind,"
+                " body, authority, lifecycle, source_message_id, supersedes_id, chapter_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    item_id,
+                    new_novel_id,
+                    row["created_at"],
+                    row["logical_id"],
+                    row["revision"],
+                    row["kind"],
+                    row["body"],
+                    row["authority"],
+                    row["lifecycle"],
+                    copy_message(row["source_message_id"], chapter_map.get(row["chapter_id"])),
+                    supersedes_id,
+                    None if row["chapter_id"] is None else chapter_map[row["chapter_id"]],
+                ),
+            )
+            return item_id
+
+        for item in list_story_items_current(conn, novel_id):
+            if item.chapter_id is None or item.chapter_id in chapter_map:
+                copy_story_item(item.id)
+
+        needed_adoptions = {
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM adoption WHERE novel_id = ? AND chapter_id IN ("
+                + ",".join("?" for _ in chapter_map)
+                + ")",
+                (novel_id, *chapter_map.keys()),
+            ).fetchall()
+        }
+
+        def copy_version(old_version_id: str) -> str:
+            if old_version_id in version_map:
+                return version_map[old_version_id]
+            row = conn.execute(
+                "SELECT * FROM version WHERE novel_id = ? AND id = ?",
+                (novel_id, old_version_id),
+            ).fetchone()
+            if row is None:
+                raise WorkbenchError(
+                    ErrorCode.NOT_FOUND, "正文版本不存在。", {"version_id": old_version_id}
+                )
+            if row["chapter_id"] not in chapter_map:
+                raise WorkbenchError(ErrorCode.WRONG_SCOPE, "分支不能复制未来章节正文。")
+            version_id = new_id()
+            version_map[old_version_id] = version_id
+            conn.execute(
+                "INSERT INTO version (id, novel_id, created_at, chapter_id, parent_id,"
+                " restored_from_id, body, content_hash, origin, run_id)"
+                " VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL)",
+                (
+                    version_id,
+                    new_novel_id,
+                    row["created_at"],
+                    chapter_map[row["chapter_id"]],
+                    row["body"],
+                    row["content_hash"],
+                    row["origin"],
+                ),
+            )
+            return version_id
+
+        def copy_basis_source_value(
+            source: sqlite3.Row, new_basis_id: str, preferred_chapter_id: str | None
+        ) -> None:
+            version_id = None
+            story_item_id = None
+            snapshot_id = None
+            fact_revision_id = None
+            message_id = None
+            if source["version_id"] is not None:
+                version_id = copy_version(source["version_id"])
+            if source["story_item_id"] is not None:
+                story_item_id = copy_story_item(source["story_item_id"])
+            if source["snapshot_id"] is not None:
+                snapshot_id = require_mapped(snapshot_map, source["snapshot_id"], "snapshot")
+            if source["fact_revision_id"] is not None:
+                fact_revision_id = require_mapped(
+                    revision_map, source["fact_revision_id"], "fact_revision"
+                )
+            if source["message_id"] is not None:
+                message_id = copy_message(source["message_id"], preferred_chapter_id)
+            basis_source_id = new_id()
+            basis_source_map[source["id"]] = basis_source_id
+            conn.execute(
+                "INSERT INTO basis_source (id, novel_id, created_at, basis_id, version_id,"
+                " story_item_id, snapshot_id, fact_revision_id, message_id, role,"
+                " excerpt_start, excerpt_end, quote)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    basis_source_id,
+                    new_novel_id,
+                    source["created_at"],
+                    new_basis_id,
+                    version_id,
+                    story_item_id,
+                    snapshot_id,
+                    fact_revision_id,
+                    message_id,
+                    source["role"],
+                    source["excerpt_start"],
+                    source["excerpt_end"],
+                    source["quote"],
+                ),
+            )
+
+        def copy_basis(old_basis_id: str, new_chapter_id: str) -> str:
+            if old_basis_id in basis_map:
+                return basis_map[old_basis_id]
+            row = conn.execute(
+                "SELECT * FROM basis WHERE novel_id = ? AND id = ?", (novel_id, old_basis_id)
+            ).fetchone()
+            plan_id = None
+            if row["plan_id"] is not None:
+                plan_id = require_mapped(plan_map, row["plan_id"], "plan")
+            previous_snapshot_id = None
+            if row["previous_snapshot_id"] is not None:
+                previous_snapshot_id = require_mapped(
+                    snapshot_map, row["previous_snapshot_id"], "snapshot"
+                )
+            basis_id = new_id()
+            basis_map[old_basis_id] = basis_id
+            conn.execute(
+                "INSERT INTO basis (id, novel_id, created_at, chapter_id, plan_id,"
+                " previous_snapshot_id, design_revision, purpose, omitted_sources_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    basis_id,
+                    new_novel_id,
+                    row["created_at"],
+                    new_chapter_id,
+                    plan_id,
+                    previous_snapshot_id,
+                    row["design_revision"],
+                    row["purpose"],
+                    row["omitted_sources_json"],
+                ),
+            )
+            for source in conn.execute(
+                "SELECT * FROM basis_source WHERE novel_id = ? AND basis_id = ? ORDER BY rowid",
+                (novel_id, old_basis_id),
+            ).fetchall():
+                copy_basis_source_value(source, basis_id, new_chapter_id)
+            return basis_id
+
+        def copy_check_facts(old_check_id: str, new_check_id: str, new_chapter_id: str) -> None:
+            old_candidates = conn.execute(
+                "SELECT * FROM candidate_fact WHERE novel_id = ? AND check_id = ? ORDER BY rowid",
+                (novel_id, old_check_id),
+            ).fetchall()
+            for candidate in old_candidates:
+                candidate_id = new_id()
+                candidate_map[candidate["id"]] = candidate_id
+                conn.execute(
+                    "INSERT INTO candidate_fact (id, novel_id, created_at, check_id, kind,"
+                    " subject, proposition, story_time, evidence_start, evidence_end, quote)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        candidate_id,
+                        new_novel_id,
+                        candidate["created_at"],
+                        new_check_id,
+                        candidate["kind"],
+                        candidate["subject"],
+                        candidate["proposition"],
+                        candidate["story_time"],
+                        candidate["evidence_start"],
+                        candidate["evidence_end"],
+                        candidate["quote"],
+                    ),
+                )
+            for candidate in old_candidates:
+                revisions = conn.execute(
+                    "SELECT * FROM fact_revision WHERE novel_id = ? AND candidate_id = ?"
+                    " ORDER BY created_at, rowid",
+                    (novel_id, candidate["id"]),
+                ).fetchall()
+                for revision in revisions:
+                    revision_id = new_id()
+                    revision_map[revision["id"]] = revision_id
+                    conn.execute(
+                        "INSERT INTO fact_revision (id, novel_id, created_at, candidate_id,"
+                        " previous_revision_id, kind, subject, proposition, story_time,"
+                        " evidence_start, evidence_end, quote, author_message_id)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            revision_id,
+                            new_novel_id,
+                            revision["created_at"],
+                            candidate_map[revision["candidate_id"]],
+                            None
+                            if revision["previous_revision_id"] is None
+                            else revision_map[revision["previous_revision_id"]],
+                            revision["kind"],
+                            revision["subject"],
+                            revision["proposition"],
+                            revision["story_time"],
+                            revision["evidence_start"],
+                            revision["evidence_end"],
+                            revision["quote"],
+                            copy_message(revision["author_message_id"], new_chapter_id),
+                        ),
+                    )
+                head = conn.execute(
+                    "SELECT * FROM fact_head WHERE novel_id = ? AND candidate_id = ?",
+                    (novel_id, candidate["id"]),
+                ).fetchone()
+                if head is not None:
+                    conn.execute(
+                        "INSERT INTO fact_head (id, novel_id, created_at, candidate_id,"
+                        " current_revision_id) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            new_id(),
+                            new_novel_id,
+                            head["created_at"],
+                            candidate_map[head["candidate_id"]],
+                            revision_map[head["current_revision_id"]],
+                        ),
+                    )
+            old_issues = conn.execute(
+                "SELECT * FROM issue WHERE novel_id = ? AND check_id = ? ORDER BY rowid",
+                (novel_id, old_check_id),
+            ).fetchall()
+            for issue in old_issues:
+                issue_id = new_id()
+                issue_map[issue["id"]] = issue_id
+                conn.execute(
+                    "INSERT INTO issue (id, novel_id, created_at, check_id, kind,"
+                    " explanation, proposed_change) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        issue_id,
+                        new_novel_id,
+                        issue["created_at"],
+                        new_check_id,
+                        issue["kind"],
+                        issue["explanation"],
+                        issue["proposed_change"],
+                    ),
+                )
+                for evidence in conn.execute(
+                    "SELECT * FROM issue_evidence WHERE novel_id = ? AND issue_id = ?"
+                    " ORDER BY rowid",
+                    (novel_id, issue["id"]),
+                ).fetchall():
+                    version_id = None
+                    basis_source_id = None
+                    if evidence["version_id"] is not None:
+                        version_id = require_mapped(version_map, evidence["version_id"], "version")
+                    if evidence["basis_source_id"] is not None:
+                        basis_source_id = require_mapped(
+                            basis_source_map, evidence["basis_source_id"], "basis_source"
+                        )
+                    conn.execute(
+                        "INSERT INTO issue_evidence (id, novel_id, created_at, issue_id,"
+                        " version_id, basis_source_id, start, end, quote)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            new_id(),
+                            new_novel_id,
+                            evidence["created_at"],
+                            issue_id,
+                            version_id,
+                            basis_source_id,
+                            evidence["start"],
+                            evidence["end"],
+                            evidence["quote"],
+                        ),
+                    )
+
+        def copy_review(old_review_id: str, new_chapter_id: str) -> str:
+            if old_review_id in review_map:
+                return review_map[old_review_id]
+            old_review = conn.execute(
+                "SELECT * FROM review WHERE novel_id = ? AND id = ?",
+                (novel_id, old_review_id),
+            ).fetchone()
+            old_check = conn.execute(
+                "SELECT * FROM check_result WHERE novel_id = ? AND id = ?",
+                (novel_id, old_review["check_id"]),
+            ).fetchone()
+            version_id = copy_version(old_review["version_id"])
+            basis_id = copy_basis(old_check["basis_id"], new_chapter_id)
+            old_run = conn.execute(
+                "SELECT * FROM run WHERE novel_id = ? AND id = ?",
+                (novel_id, old_check["run_id"]),
+            ).fetchone()
+            run_id = new_id()
+            run_map[old_run["id"]] = run_id
+            conn.execute(
+                "INSERT INTO run (id, novel_id, created_at, chapter_id, task, basis_id,"
+                " input_version_id, source_message_id, retry_of_id, status, partial_text,"
+                " result_version_id, provider, model, template_version, request_json, usage_json,"
+                " error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    new_novel_id,
+                    old_run["created_at"],
+                    new_chapter_id,
+                    old_run["task"],
+                    basis_id,
+                    version_id,
+                    copy_message(old_run["source_message_id"], new_chapter_id),
+                    old_run["status"],
+                    old_run["partial_text"],
+                    copy_version(old_run["result_version_id"])
+                    if old_run["result_version_id"] is not None
+                    else None,
+                    old_run["provider"],
+                    old_run["model"],
+                    old_run["template_version"],
+                    old_run["request_json"],
+                    old_run["usage_json"],
+                    old_run["error_code"],
+                ),
+            )
+            check_id = new_id()
+            check_map[old_check["id"]] = check_id
+            conn.execute(
+                "INSERT INTO check_result (id, novel_id, created_at, chapter_id, version_id,"
+                " basis_id, run_id, coverage_json, actual_plot, actual_ending)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    check_id,
+                    new_novel_id,
+                    old_check["created_at"],
+                    new_chapter_id,
+                    version_id,
+                    basis_id,
+                    run_id,
+                    old_check["coverage_json"],
+                    old_check["actual_plot"],
+                    old_check["actual_ending"],
+                ),
+            )
+            copy_check_facts(old_check["id"], check_id, new_chapter_id)
+            review_id = new_id()
+            review_map[old_review_id] = review_id
+            conn.execute(
+                "INSERT INTO review (id, novel_id, created_at, chapter_id, version_id,"
+                " check_id, basis_id, author_message_id, read_declared, accepted_plot,"
+                " accepted_ending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    review_id,
+                    new_novel_id,
+                    old_review["created_at"],
+                    new_chapter_id,
+                    version_id,
+                    check_id,
+                    basis_id,
+                    copy_message(old_review["author_message_id"], new_chapter_id),
+                    old_review["read_declared"],
+                    old_review["accepted_plot"],
+                    old_review["accepted_ending"],
+                ),
+            )
+            for resolution in conn.execute(
+                "SELECT * FROM resolution WHERE novel_id = ? AND review_id = ? ORDER BY rowid",
+                (novel_id, old_review_id),
+            ).fetchall():
+                decision_revision_id = None
+                fact_revision_id = None
+                if resolution["decision_revision_id"] is not None:
+                    decision_revision_id = require_mapped(
+                        story_item_map, resolution["decision_revision_id"], "story_item"
+                    )
+                if resolution["fact_revision_id"] is not None:
+                    fact_revision_id = require_mapped(
+                        revision_map, resolution["fact_revision_id"], "fact_revision"
+                    )
+                conn.execute(
+                    "INSERT INTO resolution (id, novel_id, created_at, review_id, issue_id,"
+                    " action, author_message_id, explanation, decision_revision_id,"
+                    " fact_revision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        new_id(),
+                        new_novel_id,
+                        resolution["created_at"],
+                        review_id,
+                        require_mapped(issue_map, resolution["issue_id"], "issue"),
+                        resolution["action"],
+                        copy_message(resolution["author_message_id"], new_chapter_id),
+                        resolution["explanation"],
+                        decision_revision_id,
+                        fact_revision_id,
+                    ),
+                )
+            return review_id
+
+        def copy_snapshots(old_adoption_id: str, new_chapter_id: str) -> None:
+            rows = conn.execute(
+                "SELECT * FROM snapshot WHERE novel_id = ? AND adoption_id = ? ORDER BY rowid",
+                (novel_id, old_adoption_id),
+            ).fetchall()
+            for row in rows:
+                copy_review(row["review_id"], new_chapter_id)
+                snapshot_id = new_id()
+                snapshot_map[row["id"]] = snapshot_id
+                conn.execute(
+                    "INSERT INTO snapshot (id, novel_id, created_at, chapter_id, adoption_id,"
+                    " check_id, review_id, basis_id, previous_snapshot_id, status, error_code)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        snapshot_id,
+                        new_novel_id,
+                        row["created_at"],
+                        new_chapter_id,
+                        adoption_map[row["adoption_id"]],
+                        require_mapped(check_map, row["check_id"], "check"),
+                        require_mapped(review_map, row["review_id"], "review"),
+                        require_mapped(basis_map, row["basis_id"], "basis"),
+                        None
+                        if row["previous_snapshot_id"] is None
+                        else require_mapped(snapshot_map, row["previous_snapshot_id"], "snapshot"),
+                        row["status"],
+                        row["error_code"],
+                    ),
+                )
+                facts = conn.execute(
+                    "SELECT * FROM snapshot_fact WHERE novel_id = ? AND snapshot_id = ?"
+                    " ORDER BY rowid",
+                    (novel_id, row["id"]),
+                ).fetchall()
+                for fact in facts:
+                    candidate_id = None
+                    revision_id = None
+                    if fact["candidate_id"] is not None:
+                        candidate_id = require_mapped(
+                            candidate_map, fact["candidate_id"], "candidate_fact"
+                        )
+                    if fact["fact_revision_id"] is not None:
+                        revision_id = require_mapped(
+                            revision_map, fact["fact_revision_id"], "fact_revision"
+                        )
+                    conn.execute(
+                        "INSERT INTO snapshot_fact (id, novel_id, created_at, snapshot_id,"
+                        " candidate_id, fact_revision_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            new_id(),
+                            new_novel_id,
+                            fact["created_at"],
+                            snapshot_id,
+                            candidate_id,
+                            revision_id,
+                        ),
+                    )
+
+        def copy_adoption(old_adoption_id: str) -> str:
+            if old_adoption_id in adoption_map:
+                return adoption_map[old_adoption_id]
+            old = conn.execute(
+                "SELECT * FROM adoption WHERE novel_id = ? AND id = ?", (novel_id, old_adoption_id)
+            ).fetchone()
+            if old["chapter_id"] not in chapter_map:
+                raise WorkbenchError(ErrorCode.WRONG_SCOPE, "分支不能复制未来章节采用记录。")
+            new_chapter_id = chapter_map[old["chapter_id"]]
+            previous_id = None
+            if old["previous_adoption_id"] in needed_adoptions:
+                previous_id = copy_adoption(old["previous_adoption_id"])
+            version_id = copy_version(old["version_id"])
+            review_id = copy_review(old["review_id"], new_chapter_id)
+            adoption_id = new_id()
+            adoption_map[old["id"]] = adoption_id
+            conn.execute(
+                "INSERT INTO adoption (id, novel_id, created_at, chapter_id, version_id,"
+                " review_id, previous_adoption_id, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    adoption_id,
+                    new_novel_id,
+                    old["created_at"],
+                    new_chapter_id,
+                    version_id,
+                    review_id,
+                    previous_id,
+                    old["request_id"],
+                ),
+            )
+            copy_snapshots(old["id"], new_chapter_id)
+            return adoption_id
+
+        adoption_order = conn.execute(
+            "SELECT a.id FROM adoption a JOIN chapter c ON c.novel_id = a.novel_id"
+            " AND c.id = a.chapter_id WHERE a.novel_id = ?"
+            " ORDER BY c.number, a.created_at, a.rowid",
+            (novel_id,),
+        ).fetchall()
+        for row in adoption_order:
+            if row["id"] in needed_adoptions:
+                copy_adoption(row["id"])
+
+        for chapter in chapters:
+            new_chapter_id = chapter_map[chapter.id]
+            if chapter.adopted_id is None:
+                continue
+            copied_adoption = adoption_map[chapter.adopted_id]
+            copied_source_adoption = get_adoption(conn, novel_id, chapter.adopted_id)
+            copied_version = version_map[copied_source_adoption.version_id]
+            copied_snapshot = (
+                None
+                if chapter.current_snapshot_id is None
+                else snapshot_map.get(chapter.current_snapshot_id)
+            )
+            conn.execute(
+                "UPDATE chapter SET current_draft_id = ?, adopted_id = ?, current_snapshot_id = ?"
+                " WHERE novel_id = ? AND id = ?",
+                (copied_version, copied_adoption, copied_snapshot, new_novel_id, new_chapter_id),
+            )
+
+        publication_map: dict[str, str] = {}
+        pub_rows = conn.execute(
+            "SELECT * FROM publication WHERE novel_id = ? AND chapter_id IN ("
+            + ",".join("?" for _ in chapter_map)
+            + ") ORDER BY published_at, rowid",
+            (novel_id, *chapter_map.keys()),
+        ).fetchall()
+        for pub in pub_rows:
+            publication_id = new_id()
+            publication_map[pub["id"]] = publication_id
+            conn.execute(
+                "INSERT INTO publication (id, novel_id, created_at, chapter_id, version_id,"
+                " adoption_id, ready_snapshot_id, author_message_id, request_id,"
+                " published_at, note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    publication_id,
+                    new_novel_id,
+                    pub["created_at"],
+                    chapter_map[pub["chapter_id"]],
+                    version_map[pub["version_id"]],
+                    adoption_map[pub["adoption_id"]],
+                    snapshot_map[pub["ready_snapshot_id"]],
+                    copy_message(pub["author_message_id"], chapter_map[pub["chapter_id"]]),
+                    pub["request_id"],
+                    pub["published_at"],
+                    pub["note"],
+                ),
+            )
+        for div in conn.execute(
+            "SELECT * FROM publication_divergence WHERE novel_id = ? ORDER BY created_at, rowid",
+            (novel_id,),
+        ).fetchall():
+            if div["publication_id"] not in publication_map:
+                continue
+            if (
+                div["old_adoption_id"] not in adoption_map
+                or div["new_adoption_id"] not in adoption_map
+            ):
+                continue
+            publication = conn.execute(
+                "SELECT chapter_id FROM publication WHERE novel_id = ? AND id = ?",
+                (novel_id, div["publication_id"]),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO publication_divergence (id, novel_id, created_at, publication_id,"
+                " old_adoption_id, new_adoption_id, author_message_id, reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    new_novel_id,
+                    div["created_at"],
+                    publication_map[div["publication_id"]],
+                    adoption_map[div["old_adoption_id"]],
+                    adoption_map[div["new_adoption_id"]],
+                    copy_message(div["author_message_id"], chapter_map[publication["chapter_id"]]),
+                    div["reason"],
+                ),
+            )
+        for plan in conn.execute(
+            "SELECT * FROM remediation_plan WHERE novel_id = ? ORDER BY created_at, rowid",
+            (novel_id,),
+        ).fetchall():
+            if plan["publication_id"] not in publication_map:
+                continue
+            conn.execute(
+                "INSERT INTO remediation_plan (id, novel_id, created_at, publication_id,"
+                " chapter_id, source_message_id, request_id, body, status)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    new_novel_id,
+                    plan["created_at"],
+                    publication_map[plan["publication_id"]],
+                    chapter_map[plan["chapter_id"]],
+                    copy_message(plan["source_message_id"], chapter_map[plan["chapter_id"]]),
+                    plan["request_id"],
+                    plan["body"],
+                    plan["status"],
+                ),
+            )
+        for event in conn.execute(
+            "SELECT * FROM foreshadow_event WHERE novel_id = ? ORDER BY created_at, rowid",
+            (novel_id,),
+        ).fetchall():
+            if event["chapter_id"] not in chapter_map:
+                continue
+            if event["adoption_id"] not in adoption_map:
+                continue
+            conn.execute(
+                "INSERT INTO foreshadow_event (id, novel_id, created_at, logical_id, stage,"
+                " chapter_id, adoption_id, version_id, source_message_id, body, quote)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    new_novel_id,
+                    event["created_at"],
+                    event["logical_id"],
+                    event["stage"],
+                    chapter_map[event["chapter_id"]],
+                    adoption_map[event["adoption_id"]],
+                    None if event["version_id"] is None else version_map[event["version_id"]],
+                    copy_message(event["source_message_id"], chapter_map[event["chapter_id"]]),
+                    event["body"],
+                    event["quote"],
+                ),
+            )
+    return get_branch(conn, branch_id)
+
+
+def commit_branch_ready(conn: sqlite3.Connection, branch_id: str) -> BranchRecord:
+    with transaction(conn):
+        branch = get_branch(conn, branch_id)
+        conn.execute(
+            "UPDATE branch SET materialization_status = ? WHERE id = ?",
+            (BranchMaterializationStatus.READY.value, branch.id),
+        )
+    return get_branch(conn, branch_id)
+
+
+def commit_branch_materialized(conn: sqlite3.Connection, branch_id: str) -> BranchRecord:
+    return commit_branch_ready(conn, branch_id)
+
+
+def _copy_message(
+    conn: sqlite3.Connection,
+    old_novel_id: str,
+    new_novel_id: str,
+    old_message_id: str,
+    new_chapter_id: str,
+    *,
+    fallback: str | None = None,
+) -> str:
+    row = conn.execute(
+        "SELECT role, body FROM message WHERE novel_id = ? AND id = ?",
+        (old_novel_id, old_message_id),
+    ).fetchone()
+    message_id = new_id()
+    conn.execute(
+        "INSERT INTO message (id, novel_id, created_at, role, body, chapter_id)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            message_id,
+            new_novel_id,
+            now_utc(),
+            MessageRole.AUTHOR.value if row is None else row["role"],
+            fallback if row is None else row["body"],
+            new_chapter_id,
+        ),
+    )
+    return message_id
+
+
+def list_remediation_plans(
+    conn: sqlite3.Connection, novel_id: str, publication_id: str | None = None
+) -> tuple[RemediationPlanRecord, ...]:
+    if publication_id is None:
+        rows = conn.execute(
+            "SELECT * FROM remediation_plan WHERE novel_id = ? ORDER BY created_at, rowid",
+            (novel_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM remediation_plan WHERE novel_id = ? AND publication_id = ?"
+            " ORDER BY created_at, rowid",
+            (novel_id, publication_id),
+        ).fetchall()
+    return tuple(
+        RemediationPlanRecord(
+            r["id"],
+            r["novel_id"],
+            r["publication_id"],
+            r["chapter_id"],
+            r["body"],
+            r["status"],
+            r["source_message_id"],
+            r["created_at"],
+            r["request_id"],
+        )
+        for r in rows
+    )
+
+
+def commit_remediation_plan(
+    conn: sqlite3.Connection,
+    novel_id: str,
+    publication_id: str,
+    source_message_id: str,
+    body: str,
+    request_id: str | None = None,
+) -> RemediationPlanRecord:
+    plan_id = new_id()
+    request_id = request_id or new_id()
+    with transaction(conn):
+        publication = get_publication(conn, novel_id, publication_id)
+        existing = conn.execute(
+            "SELECT * FROM remediation_plan WHERE novel_id = ? AND request_id = ?",
+            (novel_id, request_id),
+        ).fetchone()
+        if existing is not None:
+            return RemediationPlanRecord(
+                existing["id"],
+                novel_id,
+                publication_id,
+                publication.chapter_id,
+                existing["body"],
+                existing["status"],
+                existing["source_message_id"],
+                existing["created_at"],
+                existing["request_id"],
+            )
+        created = now_utc()
+        conn.execute(
+            "INSERT INTO remediation_plan (id, novel_id, created_at, publication_id,"
+            " chapter_id, source_message_id, request_id, body, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed')",
+            (
+                plan_id,
+                novel_id,
+                created,
+                publication_id,
+                publication.chapter_id,
+                source_message_id,
+                request_id,
+                body,
+            ),
+        )
+    return RemediationPlanRecord(
+        plan_id,
+        novel_id,
+        publication_id,
+        publication.chapter_id,
+        body,
+        "proposed",
+        source_message_id,
+        created,
+        request_id,
+    )
 
 
 # ---------------------------------------------------------------- 备份（R04）

@@ -15,6 +15,7 @@ from story_workbench.ai.context import (
     MessageSource,
     OmitReason,
     PlanSource,
+    ReaderHistorySource,
     SourceRole,
     StoryItemSource,
     TextSource,
@@ -22,10 +23,13 @@ from story_workbench.ai.context import (
     build_context,
     default_estimate_tokens,
 )
+from story_workbench.application import authoring
+from story_workbench.application import generation as app_generation
 from story_workbench.domain.records import (
     Authority,
     DelegationScope,
     ErrorCode,
+    Expected,
     FactKind,
     IssueKind,
     Lifecycle,
@@ -39,11 +43,16 @@ from story_workbench.domain.records import (
 from story_workbench.domain.rules import validate_evidence_span
 from story_workbench.infrastructure.provider import CallOptions, EventKind
 from tests.conftest import fixed_complete, fixed_stream
+from tests.test_workflow import adopt_current, inspection_json
 
 # ---------------------------------------------------------------- 夹具
 
 CH2 = "chapter-2"
 OPTIONS = CallOptions(model="fixed", max_output_tokens=800, timeout_seconds=5)
+GEN_CONFIG = app_generation.GenerationConfig(
+    options=CallOptions(model="fixed", max_output_tokens=1000, timeout_seconds=5),
+    limits=ContextLimits(total_tokens=20000, template_reserve=500, output_reserve=1000),
+)
 BODY = (
     "沈砚爬回井沿，把绳子收好。他还疑心井底那人就是师父，只是不敢认。\n\n"
     "旁边旧屋的门卡在门框里。他用肩膀顶了两次，木门擦过地面，慢慢让出一道缝。\n\n"
@@ -101,6 +110,22 @@ def chapter_two_sources(**overrides) -> ContextSources:
             MessageSource("m1", MessageRole.AUTHOR, "写得克制一点。", 2),
             MessageSource("m2", MessageRole.MODEL, "好的。", 2),
             MessageSource("m3", MessageRole.AUTHOR, "第三章别揭示屋里是谁。", 3),
+        ),
+        reader_history=(
+            ReaderHistorySource(
+                "pub1",
+                "publication_text",
+                "[publication] 第1章已发布正文：\n读者已经看过井边蓝火。",
+                1,
+                version_id="pub-v1",
+            ),
+            ReaderHistorySource(
+                "pub3",
+                "publication_text",
+                "[publication] 第3章已发布正文：\n未来发布内容。",
+                3,
+                version_id="v3",
+            ),
         ),
         previous_snapshot_id="snap1",
         previous_snapshot_status=SnapshotStatus.READY,
@@ -184,6 +209,8 @@ def test_rejected_and_future_sources_never_enter_chapter_two():
     assert draft.rules == "师父右腕有旧伤"
     assert "井底那人是师父" in draft.previous_state and "[character_belief]" in draft.previous_state
     assert "第1章（已采用）" in draft.adopted_text
+    assert "读者已经看过井边蓝火" in draft.reader_history
+    assert "未来发布内容" not in draft.reader_history
     assert draft.plan_id == "p2" and draft.previous_snapshot_id == "snap1"
     assert draft.design_revision == 3 and draft.missing_inputs == ()
 
@@ -209,13 +236,14 @@ def test_omitted_sources_are_traceable_by_reason():
     assert reasons[("issue", "i-done")] is OmitReason.RESOLVED_ISSUE
     assert reasons[("message", "m3")] is OmitReason.FUTURE_CHAPTER
     assert reasons[("plan", "p3")] is OmitReason.FUTURE_CHAPTER
+    assert reasons[("reader_history", "pub3")] is OmitReason.FUTURE_CHAPTER
     assert draft.issue_ids == ("i1",)
 
 
 def test_citations_map_to_basis_source_rows():
     draft = build_chapter_two()
     by_id = {c.source_id: c for c in draft.citations}
-    assert set(by_id) == {"s-wrist", "s-future", "snap1", "v1", "m1", "m2"}
+    assert set(by_id) == {"s-wrist", "s-future", "snap1", "v1", "pub-v1", "m1", "m2"}
     text = by_id["v1"]
     assert text.role is SourceRole.TEXT and text.version_id == "v1"
     assert text.quote == "第一章正文。" and (text.excerpt_start, text.excerpt_end) == (0, 6)
@@ -230,7 +258,7 @@ def test_capacity_trims_discussion_first_and_records_omission():
     required = full.section_tokens["rules"] + full.section_tokens["plan"]
     required += full.section_tokens["previous_state"]
     keep = required + full.section_tokens["author_intent"] + full.section_tokens["open_issues"]
-    keep += full.section_tokens["adopted_text"]
+    keep += full.section_tokens["reader_history"] + full.section_tokens["adopted_text"]
     limits = ContextLimits(keep + 100, template_reserve=50, output_reserve=50)
 
     draft = build_context(chapter_two_sources(), 2, WriteMode.FORMAL, limits)
@@ -602,6 +630,158 @@ def test_validate_evidence_span_details_are_safe():
     with pytest.raises(WorkbenchError) as empty:
         validate_evidence_span(BODY, 3, 3, "")
     assert empty.value.details["reason"] == "empty_quote"
+
+
+# ---------------------------------------------------------------- 影响分析
+
+
+def impact_payload() -> dict:
+    return {
+        "summary": "第三章受影响，第四章暂未检查。",
+        "chapters": [
+            {
+                "chapter_number": 3,
+                "status": "affected",
+                "reason": "仍把蓝火当作旧设定。",
+                "evidence": [{"quote": "蓝火再次亮起。"}],
+            },
+            {
+                "chapter_number": 4,
+                "status": "unchecked",
+                "reason": "缺少这一章与旧设定关系的可靠判断。",
+                "evidence": [],
+            },
+        ],
+        "coverage": {"checked": ["第3章正文"], "unchecked": ["第4章因证据不足未判断"]},
+    }
+
+
+def test_impact_requires_every_later_chapter_with_traceable_coverage():
+    later = {
+        3: ("v3", "蓝火再次亮起。沈砚停下脚步。"),
+        4: ("v4", "他走进雨里。"),
+    }
+    report, _usage = tasks.impact(
+        request(TaskKind.IMPACT),
+        build_chapter_two(),
+        2,
+        later,
+        fixed_complete(json.dumps(impact_payload(), ensure_ascii=False)),
+        options=OPTIONS,
+    )
+
+    assert [chapter.chapter_number for chapter in report.chapters] == [3, 4]
+    assert [chapter.status for chapter in report.chapters] == ["affected", "unchecked"]
+    assert report.coverage_checked == ("第3章正文",)
+    assert report.coverage_unchecked == ("第4章因证据不足未判断",)
+    assert len(report.findings) == 1
+    assert report.findings[0].evidence[0].version_id == "v3"
+
+
+def test_impact_rejects_partial_or_untraceable_output():
+    later = {
+        3: ("v3", "蓝火再次亮起。沈砚停下脚步。"),
+        4: ("v4", "他走进雨里。"),
+    }
+    payload = impact_payload()
+    payload["chapters"] = payload["chapters"][:1]
+    with pytest.raises(WorkbenchError) as missing:
+        tasks.impact(
+            request(TaskKind.IMPACT),
+            build_chapter_two(),
+            2,
+            later,
+            fixed_complete(json.dumps(payload, ensure_ascii=False)),
+            options=OPTIONS,
+        )
+    assert missing.value.code is ErrorCode.MODEL_FAILED
+    assert missing.value.details["missing_chapters"] == [4]
+
+    payload = impact_payload()
+    payload["chapters"][0]["evidence"] = []
+    with pytest.raises(WorkbenchError) as no_evidence:
+        tasks.impact(
+            request(TaskKind.IMPACT),
+            build_chapter_two(),
+            2,
+            later,
+            fixed_complete(json.dumps(payload, ensure_ascii=False)),
+            options=OPTIONS,
+        )
+    assert no_evidence.value.code is ErrorCode.MODEL_FAILED
+
+
+def _adopt_generated(project, number: int, body: str):
+    chapter = authoring.create_chapter(project, number)
+    message_id = authoring.record_message(project, f"第{number}章计划。", chapter.id)
+    authoring.save_plan(
+        project,
+        chapter.id,
+        f"第{number}章剧情",
+        f"第{number}章结尾",
+        Expected(),
+        message_id,
+    )
+    clients = app_generation.Clients(
+        stream=fixed_stream([body]),
+        complete=fixed_complete(
+            inspection_json(body, plot=f"第{number}章剧情", ending=f"第{number}章结尾")
+        ),
+    )
+    result = app_generation.write_chapter(
+        project, chapter.id, WriteMode.FORMAL, message_id, clients, GEN_CONFIG
+    )
+    adopted = adopt_current(project, chapter.id, result)
+    return authoring.get_chapter(project, chapter.id), result, adopted
+
+
+def test_generation_impact_analysis_persists_evidence_for_unrelated_and_unchecked(project):
+    _ch1, _result1, adopted1 = _adopt_generated(project, 1, "井边蓝火已经熄灭。")
+    _ch2, result2, _adopted2 = _adopt_generated(project, 2, "蓝火再次亮起。沈砚停下脚步。")
+    _ch3, result3, _adopted3 = _adopt_generated(project, 3, "雨声盖住脚步。")
+    message_id = authoring.record_message(project, "分析蓝火影响。", _ch1.id)
+    payload = {
+        "summary": "第二章无关，第三章未能确认。",
+        "chapters": [
+            {
+                "chapter_number": 2,
+                "status": "unrelated",
+                "reason": "蓝火描写不依赖第一章新采用内容。",
+                "evidence": [{"quote": "蓝火再次亮起。"}],
+            },
+            {
+                "chapter_number": 3,
+                "status": "unchecked",
+                "reason": "雨声场景证据不足。",
+                "evidence": [{"quote": "雨声盖住脚步。"}],
+            },
+        ],
+        "coverage": {"checked": ["第2章正文"], "unchecked": ["第3章只保留证据待复核"]},
+    }
+    clients = app_generation.Clients(
+        stream=fixed_stream([]),
+        complete=fixed_complete(json.dumps(payload, ensure_ascii=False)),
+    )
+
+    run_id, _report = app_generation.analyze_impact(
+        project, adopted1.adoption_id, message_id, clients, GEN_CONFIG
+    )
+
+    rows = project.conn.execute(
+        "SELECT ia.impact_class, ia.id AS analysis_id, ie.analysis_id AS evidence_analysis_id,"
+        " ie.version_id, ie.quote FROM impact_analysis ia"
+        " JOIN impact_evidence ie ON ie.analysis_id = ia.id"
+        " WHERE ia.run_id = ? ORDER BY ia.impact_class",
+        (run_id,),
+    ).fetchall()
+    by_class = {row["impact_class"]: row for row in rows}
+    assert set(by_class) == {"unchecked", "unrelated"}
+    assert by_class["unrelated"]["analysis_id"] == by_class["unrelated"]["evidence_analysis_id"]
+    assert by_class["unrelated"]["version_id"] == result2.version_id
+    assert by_class["unrelated"]["quote"] == "蓝火再次亮起。"
+    assert by_class["unchecked"]["analysis_id"] == by_class["unchecked"]["evidence_analysis_id"]
+    assert by_class["unchecked"]["version_id"] == result3.version_id
+    assert by_class["unchecked"]["quote"] == "雨声盖住脚步。"
 
 
 # ---------------------------------------------------------------- 阅读体验诊断

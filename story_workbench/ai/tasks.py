@@ -12,7 +12,7 @@ import json
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -20,12 +20,16 @@ from story_workbench.ai import prompts
 from story_workbench.ai.context import ContextDraft
 from story_workbench.domain.records import (
     ErrorCode,
+    EvidenceInput,
     FactKind,
     IssueKind,
     TaskKind,
     TaskRequest,
     WorkbenchError,
     WriteMode,
+)
+from story_workbench.domain.records import (
+    ImpactFinding as DomainImpactFinding,
 )
 from story_workbench.domain.rules import validate_evidence_span
 from story_workbench.infrastructure.provider import (
@@ -54,6 +58,30 @@ class IssueFinding:
     explanation: str
     proposed_change: str
     evidence: tuple[EvidenceSpan, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactChapter:
+    chapter_number: int
+    status: Literal["affected", "unrelated", "unchecked"]
+    reason: str
+    evidence: tuple[EvidenceInput, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactReport:
+    summary: str
+    chapters: tuple[ImpactChapter, ...]
+    coverage_checked: tuple[str, ...]
+    coverage_unchecked: tuple[str, ...]
+
+    @property
+    def findings(self) -> tuple[DomainImpactFinding, ...]:
+        return tuple(
+            DomainImpactFinding(chapter.chapter_number, chapter.reason, chapter.evidence)
+            for chapter in self.chapters
+            if chapter.status == "affected"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +197,24 @@ class _DiagnosisModel(_Strict):
     problems: list[_ProblemModel]
     options: list[_OptionModel]
     new_settings_requiring_authorization: list[str]
+
+
+class _ImpactChapterModel(_Strict):
+    chapter_number: int
+    status: Literal["affected", "unrelated", "unchecked"]
+    reason: str
+    evidence: list[_EvidenceModel] = Field(default_factory=list)
+
+
+class _ImpactCoverageModel(_Strict):
+    checked: list[str]
+    unchecked: list[str]
+
+
+class _ImpactModel(_Strict):
+    summary: str
+    chapters: list[_ImpactChapterModel]
+    coverage: _ImpactCoverageModel
 
 
 # ---------------------------------------------------------------- 公共检查
@@ -319,6 +365,27 @@ def build_diagnose_messages(
         body=body,
     )
     return [ChatMessage("system", prompts.DIAGNOSE_SYSTEM), ChatMessage("user", user)]
+
+
+def build_impact_messages(
+    request: TaskRequest,
+    context: ContextDraft,
+    source_chapter_number: int,
+    later_texts: dict[int, str],
+) -> list[ChatMessage]:
+    _require_task(request, TaskKind.IMPACT)
+    _require_scope(request, context)
+    if not later_texts:
+        raise WorkbenchError(ErrorCode.INVALID_INPUT, "没有后续已采用正文可分析。")
+    blocks = []
+    for number in sorted(later_texts):
+        blocks.append(f"### 第{number}章\n{later_texts[number]}")
+    user = prompts.IMPACT_USER.format(
+        context=render_context(context),
+        source_chapter_number=source_chapter_number,
+        later_texts="\n\n".join(blocks),
+    )
+    return [ChatMessage("system", prompts.IMPACT_SYSTEM), ChatMessage("user", user)]
 
 
 # ---------------------------------------------------------------- 流式任务
@@ -499,4 +566,87 @@ def diagnose(
         new_settings_requiring_authorization=tuple(parsed.new_settings_requiring_authorization),
         template_version=request.template_version,
         usage=dict(result.usage),
+    )
+
+
+def impact(
+    request: TaskRequest,
+    context: ContextDraft,
+    source_chapter_number: int,
+    later_versions: dict[int, tuple[str, str]],
+    complete_call: CompleteCall,
+    *,
+    options: CallOptions,
+    cancel: CancelSignal | None = None,
+) -> tuple[ImpactReport, dict[str, int]]:
+    """影响分析：返回后续章节受影响原因和逐字证据；不保存。"""
+    later_texts = {number: body for number, (_version_id, body) in later_versions.items()}
+    messages = build_impact_messages(request, context, source_chapter_number, later_texts)
+    result = complete_call(messages, _options_for(request, options), cancel or CancelSignal())
+    parsed = _parse_payload(result, _ImpactModel, TaskKind.IMPACT)
+    assert isinstance(parsed, _ImpactModel)
+
+    expected = set(later_versions)
+    seen: set[int] = set()
+    chapters: list[ImpactChapter] = []
+    for i, chapter in enumerate(parsed.chapters):
+        if chapter.chapter_number in seen:
+            raise _model_failed(
+                "模型重复报告了同一后续章节。",
+                {"task": TaskKind.IMPACT.value, "loc": f"chapters[{i}].chapter_number"},
+            )
+        seen.add(chapter.chapter_number)
+        if chapter.chapter_number not in later_versions:
+            raise _model_failed(
+                "模型报告了不在分析范围内的章节。",
+                {"task": TaskKind.IMPACT.value, "loc": f"chapters[{i}].chapter_number"},
+            )
+        if chapter.status == "affected" and not chapter.evidence:
+            raise _model_failed(
+                "受影响章节必须提供逐字证据。",
+                {"task": TaskKind.IMPACT.value, "loc": f"chapters[{i}].evidence"},
+            )
+        version_id, body = later_versions[chapter.chapter_number]
+        evidence: list[EvidenceInput] = []
+        for j, span in enumerate(chapter.evidence):
+            resolved = _resolve_span(body, span, f"chapters[{i}].evidence[{j}]")
+            evidence.append(
+                EvidenceInput(
+                    quote=resolved.quote,
+                    version_id=version_id,
+                    start=resolved.start,
+                    end=resolved.end,
+                )
+            )
+        chapters.append(
+            ImpactChapter(chapter.chapter_number, chapter.status, chapter.reason, tuple(evidence))
+        )
+    if seen != expected:
+        raise _model_failed(
+            "影响分析必须覆盖每个后续已采用章节。",
+            {
+                "task": TaskKind.IMPACT.value,
+                "missing_chapters": sorted(expected - seen),
+                "unexpected_chapters": sorted(seen - expected),
+            },
+        )
+    checked_statuses = {chapter.status for chapter in chapters if chapter.status != "unchecked"}
+    if checked_statuses and not parsed.coverage.checked:
+        raise _model_failed(
+            "影响分析必须列出已检查范围。",
+            {"task": TaskKind.IMPACT.value, "loc": "coverage.checked"},
+        )
+    if any(chapter.status == "unchecked" for chapter in chapters) and not parsed.coverage.unchecked:
+        raise _model_failed(
+            "影响分析必须列出未检查范围。",
+            {"task": TaskKind.IMPACT.value, "loc": "coverage.unchecked"},
+        )
+    return (
+        ImpactReport(
+            parsed.summary,
+            tuple(chapters),
+            tuple(parsed.coverage.checked),
+            tuple(parsed.coverage.unchecked),
+        ),
+        dict(result.usage),
     )

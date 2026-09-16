@@ -9,6 +9,7 @@ from pathlib import Path
 
 from story_workbench.domain import rules
 from story_workbench.domain.records import (
+    BranchRecord,
     ErrorCode,
     NovelRecord,
     ReconcileOutcome,
@@ -27,6 +28,7 @@ class Project:
 
     root: Path
     novel: NovelRecord
+    branch: BranchRecord
     conn: sqlite3.Connection
     lock: files.ProjectLock
 
@@ -57,10 +59,11 @@ def create_project(path: Path, title: str) -> Project:
         conn = database.connect(root / files.DB_FILENAME)
         database.migrate(conn)
         novel = database.commit_new_novel(conn, title.strip())
+        branch = database.current_branch(conn)
     except Exception:
         lock.release()
         raise
-    return Project(root=root, novel=novel, conn=conn, lock=lock)
+    return Project(root=root, novel=novel, branch=branch, conn=conn, lock=lock)
 
 
 def open_project(path: Path) -> tuple[Project, RecoveryNotice]:
@@ -82,7 +85,8 @@ def open_project(path: Path) -> tuple[Project, RecoveryNotice]:
         novel = database.get_novel(conn)
         if novel is None:
             raise WorkbenchError(ErrorCode.STORAGE_FAILED, "数据库中没有作品记录。")
-        interrupted = database.commit_mark_runs_interrupted(conn, novel.id)
+        branch = database.current_branch(conn)
+        interrupted = database.commit_mark_project_runs_interrupted(conn)
     except Exception:
         lock.release()
         raise
@@ -90,14 +94,55 @@ def open_project(path: Path) -> tuple[Project, RecoveryNotice]:
     if interrupted:
         notes.append("上次有未完成的任务已标记为中断，可以查看后决定是否重试。")
     notice = RecoveryNotice(interrupted_run_ids=interrupted, notes=tuple(notes))
-    return Project(root=root, novel=novel, conn=conn, lock=lock), notice
+    return Project(root=root, novel=novel, branch=branch, conn=conn, lock=lock), notice
 
 
 # ---------------------------------------------------------------- 工作副本对账（S03）
 
 
-def _workcopy_path(chapter_number: int) -> str:
-    return f"{files.WORK_DIR}/chapter-{chapter_number:03d}.md"
+def _workcopy_path(project: Project, chapter_number: int) -> str:
+    directory = files.WORK_DIR
+    if project.branch.work_subdir:
+        directory = f"{files.WORK_DIR}/{project.branch.work_subdir}"
+    return f"{directory}/chapter-{chapter_number:03d}.md"
+
+
+def list_branches(project: Project) -> tuple[BranchRecord, ...]:
+    return database.list_branches(project.conn)
+
+
+def create_branch(project: Project, name: str, source_adoption_id: str) -> BranchRecord:
+    branch = database.commit_branch_from_adoption(
+        project.conn,
+        project.novel_id,
+        name,
+        source_adoption_id,
+    )
+    files.ensure_branch_dir(project.root, branch.id)
+    if branch.work_subdir:
+        files.safe_relative(project.root, files.WORK_DIR + "/" + branch.work_subdir).mkdir(
+            parents=True, exist_ok=True
+        )
+    return database.commit_branch_ready(project.conn, branch.id)
+
+
+def switch_branch(project: Project, branch_id: str) -> BranchRecord:
+    for workcopy in database.list_workcopies(project.conn, project.novel_id):
+        reconcile_workcopy(project, workcopy.chapter_id)
+    branch = database.get_branch(project.conn, branch_id)
+    project.novel = database.switch_branch(project.conn, branch.id)
+    branch = database.get_branch(project.conn, branch.id)
+    project.branch = branch
+    files.ensure_layout(project.root)
+    if branch.work_subdir:
+        files.safe_relative(project.root, files.WORK_DIR + "/" + branch.work_subdir).mkdir(
+            parents=True, exist_ok=True
+        )
+    return branch
+
+
+def fork_branch(project: Project, name: str, source_adoption_id: str) -> BranchRecord:
+    return create_branch(project, name, source_adoption_id)
 
 
 def create_workcopy(project: Project, chapter_id: str) -> ReconcileResult:
@@ -109,7 +154,7 @@ def create_workcopy(project: Project, chapter_id: str) -> ReconcileResult:
     existing = database.get_workcopy(project.conn, project.novel_id, chapter_id)
     if existing is not None:
         return reconcile_workcopy(project, chapter_id)
-    relative_path = _workcopy_path(chapter.number)
+    relative_path = _workcopy_path(project, chapter.number)
     observation = files.observe_workcopy(project.root, relative_path, None)
     if observation.exists:
         database.commit_workcopy_binding(

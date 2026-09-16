@@ -6,7 +6,7 @@ tasks 在调用前比较 TaskRequest.template_version，避免记录与实际发
 
 from __future__ import annotations
 
-TEMPLATE_VERSION = "2026-09-14.4"
+TEMPLATE_VERSION = "2026-09-16.2"
 
 SECTION_TITLES: dict[str, str] = {
     "rules": "作者规则与决定（必须遵守，不得改写）",
@@ -14,6 +14,7 @@ SECTION_TITLES: dict[str, str] = {
     "previous_state": "上一章结束时的故事状态（正式事实；带类别标签）",
     "adopted_text": "已采用的前文",
     "open_issues": "尚未处理的问题",
+    "reader_history": "读者已见历史（发布正文、发布快照、补救与伏笔记录）",
     "author_intent": "作者的后续意图（尚未发生；人物不知情，不得在本章揭示）",
     "discussion": "相关讨论（参考，不是决定）",
 }
@@ -170,5 +171,46 @@ DIAGNOSE_USER = """{context}
 
 ## 待诊断正文（第{chapter_number}章）
 {body}
+
+请输出 JSON。"""
+
+IMPACT_SYSTEM = (
+    COMMON_SYSTEM
+    + """
+
+本次是影响分析：前文已重新采用，检查后续已采用正文是否依赖旧信息、需要复核或需要补救。
+- 只报告与这次前文变化有关的后续章节影响，不泛泛评价文风。
+- 已发布章节不能建议删除读者已看到的前文，只能提出后续解释、补充因果、揭示误解或调整未来剧情。
+- 即使未发现影响，也要为每个后续章节输出一条 status 为 unrelated 的 chapters 记录。
+只输出一个 JSON 对象，不加解释、不加代码围栏。结构（字段名必须完全一致）：
+{
+  "summary": "整体影响摘要",
+  "chapters": [
+    {
+      "chapter_number": 2,
+      "status": "affected | unrelated | unchecked",
+      "reason": "为什么这一章受影响、无关或无法检查",
+      "evidence": [{"quote": "该章正文原文片段"}]
+    }
+  ],
+  "coverage": {"checked": ["检查过的范围"], "unchecked": ["没有检查或证据不足的范围"]}
+}
+
+规则：
+- quote 必须逐字复制对应章节正文，保留标点与换行；不要输出 start/end。
+- 每条 quote 必须在该章正文中只出现一次；重复时扩展前后原文直到能够唯一定位。
+- chapters 必须对每个后续章节输出且只输出一次；chapter_number 必须是后续章节号。
+- status 为 affected 时 evidence 至少一条；status 为 unrelated 或 unchecked 时 evidence
+  可以为空数组。
+- coverage.checked 与 coverage.unchecked 必须都出现，用中文列出已检查和未检查的范围。"""
+)
+
+IMPACT_USER = """{context}
+
+## 来源变化
+第{source_chapter_number}章刚采用了新版本。请判断下面后续章节是否受影响。
+
+## 后续已采用正文
+{later_texts}
 
 请输出 JSON。"""

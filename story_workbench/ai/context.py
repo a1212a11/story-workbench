@@ -24,6 +24,7 @@ from story_workbench.domain.records import (
     Authority,
     ErrorCode,
     FactKind,
+    ForeshadowStage,
     IssueKind,
     Lifecycle,
     MessageRole,
@@ -111,6 +112,26 @@ class MessageSource:
 
 
 @dataclass(frozen=True, slots=True)
+class ForeshadowSource:
+    event_id: str
+    logical_id: str
+    stage: ForeshadowStage
+    body: str
+    chapter_number: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderHistorySource:
+    history_id: str
+    kind: str
+    body: str
+    chapter_number: int
+    version_id: str | None = None
+    snapshot_id: str | None = None
+    message_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ContextSources:
     """generation 查询到的候选来源全集；过滤由 build_context 负责。"""
 
@@ -123,6 +144,8 @@ class ContextSources:
     texts: tuple[TextSource, ...] = ()
     issues: tuple[IssueSource, ...] = ()
     messages: tuple[MessageSource, ...] = ()
+    foreshadow: tuple[ForeshadowSource, ...] = ()
+    reader_history: tuple[ReaderHistorySource, ...] = ()
     previous_snapshot_id: str | None = None
     previous_snapshot_status: SnapshotStatus | None = None
 
@@ -212,6 +235,7 @@ class ContextDraft:
     previous_state: str
     adopted_text: str
     open_issues: str
+    reader_history: str
     discussion: str
     author_intent: str
     citations: tuple[SourceCitation, ...]
@@ -229,6 +253,7 @@ class ContextDraft:
             ("previous_state", self.previous_state),
             ("adopted_text", self.adopted_text),
             ("open_issues", self.open_issues),
+            ("reader_history", self.reader_history),
             ("author_intent", self.author_intent),
             ("discussion", self.discussion),
         )
@@ -307,6 +332,7 @@ def _collect(
         "previous_state": [],
         "adopted_text": [],
         "open_issues": [],
+        "reader_history": [],
         "author_intent": [],
         "discussion": [],
     }
@@ -449,6 +475,65 @@ def _collect(
                 issue.chapter_number,
                 estimate(text),
                 issue.issue_id,
+            )
+        )
+
+    for event in sources.foreshadow:
+        if event.chapter_number > chapter_number:
+            omitted.append(
+                OmittedSource(
+                    "foreshadow_event",
+                    event.event_id,
+                    OmitReason.FUTURE_CHAPTER,
+                    event.chapter_number,
+                )
+            )
+            continue
+        text = f"[foreshadow:{event.stage.value}] 第{event.chapter_number}章：{event.body}"
+        buckets["author_intent"].append(
+            _Item(
+                "author_intent",
+                text,
+                None,
+                "foreshadow_event",
+                event.chapter_number,
+                estimate(text),
+                event.event_id,
+            )
+        )
+
+    for history in sources.reader_history:
+        if history.chapter_number > chapter_number:
+            omitted.append(
+                OmittedSource(
+                    "reader_history",
+                    history.history_id,
+                    OmitReason.FUTURE_CHAPTER,
+                    history.chapter_number,
+                )
+            )
+            continue
+        citation: SourceCitation | None = None
+        if history.version_id or history.snapshot_id or history.message_id:
+            citation = SourceCitation(
+                role=SourceRole.FACT,
+                section="reader_history",
+                excerpt_start=0,
+                excerpt_end=len(history.body),
+                quote=history.body,
+                version_id=history.version_id,
+                snapshot_id=history.snapshot_id,
+                message_id=history.message_id,
+            )
+        buckets["reader_history"].append(
+            _Item(
+                "reader_history",
+                history.body,
+                citation,
+                "reader_history",
+                history.chapter_number,
+                estimate(history.body),
+                history.history_id,
             )
         )
 
@@ -602,12 +687,14 @@ def build_context(
         "previous_state": list(buckets["previous_state"]),
         "adopted_text": [],
         "open_issues": [],
+        "reader_history": [],
         "author_intent": [],
         "discussion": [],
     }
     remaining = limits.available - required
 
-    # 可选来源按优先级装入：作者意图 → 未解决问题 → 已采用正文（近章优先）→ 讨论（近期优先）。
+    # 可选来源按优先级装入：作者意图 → 读者历史 → 未解决问题
+    # → 已采用正文（近章优先）→ 讨论（近期优先）。
     # 放不下的记入 omitted(capacity)；讨论优先级最低，因此最先被裁掉。
     def fill(section: str, ordered: list[_Item]) -> None:
         nonlocal remaining
@@ -626,6 +713,7 @@ def build_context(
         section_tokens[section] = used
 
     fill("author_intent", buckets["author_intent"])
+    fill("reader_history", buckets["reader_history"])
     fill("open_issues", buckets["open_issues"])
     texts_recent_first = sorted(
         buckets["adopted_text"], key=lambda i: i.chapter_number or 0, reverse=True
@@ -635,10 +723,18 @@ def build_context(
 
     # 正文与讨论恢复自然顺序展示。
     included["adopted_text"].sort(key=lambda i: i.chapter_number or 0)
+    included["reader_history"].sort(key=lambda i: i.chapter_number or 0)
     included["discussion"].reverse()
 
     citations: list[SourceCitation] = []
-    for section in ("rules", "previous_state", "adopted_text", "author_intent", "discussion"):
+    for section in (
+        "rules",
+        "previous_state",
+        "adopted_text",
+        "reader_history",
+        "author_intent",
+        "discussion",
+    ):
         citations.extend(item.citation for item in included[section] if item.citation is not None)
     issue_ids = tuple(item.issue_id for item in included["open_issues"] if item.issue_id)
 
@@ -660,6 +756,7 @@ def build_context(
         previous_state=_join(included["previous_state"]),
         adopted_text="\n\n".join(adopted_parts),
         open_issues=_join(included["open_issues"]),
+        reader_history=_join(included["reader_history"]),
         discussion=_join(included["discussion"]),
         author_intent=_join(included["author_intent"]),
         citations=tuple(citations),
