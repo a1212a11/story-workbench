@@ -18,6 +18,7 @@ build/
 *.sqlite3-wal
 *.sqlite3-shm
 project.lock
+.trial-output/
 
 # 密钥与本地配置
 .env
