@@ -15,7 +15,9 @@ uv run ruff check . && uv run ruff format .   # lint 与格式
 
 ## 依赖方向
 
-`cli` → `application` → { `domain`, `ai`, `infrastructure` }。
+`tui` / `cli` → `console` → `application` → { `domain`, `ai`, `infrastructure` }。
+
+- `console`（作者交互层）：`port` 定义 say/emit/ask/edit/run_model 端口；`workbench` 是全部作者门槛流程，只经端口交互；`tools` 把模型的工具调用映射到流程；`engine` 是一轮作者发言的调度循环。`tui`（Textual 全屏界面）与旧版 `cli` 都只是端口实现，不复制规则。引擎线程拥有 Project 与 SQLite 连接；界面线程不碰数据库。
 
 - `domain`（records、rules）：纯函数与记录，不读文件、数据库、网络、时钟，不 import 其他包。
 - `ai/context`、`ai/tasks`：纯构建与解析，只通过传入的客户端函数调用模型，不写数据库。

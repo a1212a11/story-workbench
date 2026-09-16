@@ -132,7 +132,7 @@ M3 本地闭环已进入可验收状态；M4 仍按长篇能力与导出体验�
 
 - [x] M5-01 供应商层工具调用。完成条件：`ChatMessage` 支持内容块，`CallOptions.tools`，`TOOL_USE` 事件；假 SDK 与真实往返测试通过；不传 tools 时请求不变。证据：`tests/test_recovery.py::test_deepseek_tool_use_round_trip_without_network`（真实 SDK + 本地模拟传输，同步与异步：tools 参数、流式 input_json_delta 解析、非流式 tool_uses、tool_result 消息序列化、不传 tools 时无 tools 字段）；`tests/test_provider_live.py::test_live_tool_use_round_trip` 默认跳过，待真实密钥执行。
 - [x] M5-02 门槛流程抽取、工具目录与代理引擎。完成条件：旧 CLI 改用 `console/workbench` 后全部测试仍通过；引擎测试覆盖已读声明、失败不自动重试、拒绝零记录、取消先落库、单轮调用上限；schema v5 允许 `assist` 任务。证据：`console/port.py`、`console/workbench.py`（从 cli.py 抽出，旧 CLI 只剩命令表与端口）、`ai/assistant.py`（27 个工具定义与系统提示）、`console/tools.py`、`console/engine.py`、`application/assistant.py`（assist run 记录用量与终态）；`tests/test_assistant.py` 17 项：一轮内三次调度全部记 run、采用需「已读，采用」、模型口头宣称采用零记录、付费失败后同轮拒绝所有付费工具、无密钥不发请求、单轮上限、取消先落库且不存回复、未知工具与坏参数不执行、编辑器与计划确认；`tests/test_m3.py` v4→v5 迁移。
-- [ ] M5-03 Textual 全屏界面。完成条件：三章走查可在新界面完成；T05 对话版人工记录。
-- [ ] M5-04 入口切换与旧 CLI 退役。完成条件：默认进入新界面，`--classic` 保留旧版；文档更新；一轮真实三章对话验收后删除旧 CLI。
+- [ ] M5-03 Textual 全屏界面。完成条件：三章走查可在新界面完成；T05 对话版人工记录。进度：`tui/app.py` 已实现对话记录、状态栏、多行输入、问题卡、全屏编辑器、Esc 取消与引擎线程；`tests/test_tui.py` 5 项通过（写作流式回显、采用问题卡、编辑器保存与取消、取消先落库、新项目询问标题）。真实终端三章走查与输入法记录待作者执行。
+- [ ] M5-04 入口切换与旧 CLI 退役。完成条件：默认进入新界面，`--classic` 保留旧版；文档更新；一轮真实三章对话验收后删除旧 CLI。进度：`python -m story_workbench` 默认进入新界面，`--classic` 进旧版；README、架构、技术选型、AGENTS 分层规则已更新。删除旧 CLI 待真实验收。
 
 UI 在 CLI 产品流程验证后另行规划；云同步、社区、发布平台集成和全自动长篇不纳入本计划。本文不启动应用开发，也不把待选择的模型或依赖写成已批准事项。

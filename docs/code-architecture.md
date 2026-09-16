@@ -128,7 +128,7 @@ tests/                       仓库根目录，与包同级
 | workcopy | chapter_id, relative_path, base_version_id?, base_hash?, observed_version_id?, sync_status | 每章一行；记录最后同步基准与当前观察稿；路径由应用生成 |
 | basis | chapter_id, plan_id?, previous_snapshot_id?, design_revision, purpose, omitted_sources_json | 某次任务所用的不可变依据；第一章可无前章状态；设计修订号可检测新加入的规则 |
 | basis_source | basis_id, version_id?, story_item_id?, snapshot_id?, fact_revision_id?, message_id?, role, excerpt_start?, excerpt_end?, quote | 每行恰有一个来源引用；文本来源保留区间和准确摘录，结构化状态保存实际发送的确定性序列化文本；role 区分规则、事实、作者意图、讨论 |
-| run | chapter_id?, task, basis_id?, input_version_id?, source_message_id, retry_of_id?, status, partial_text, result_version_id?, provider?, model?, template_version, request_json, usage_json?, error_code?, finished_at? | request_json 保存缺口、假设、输出限制与 delegation_scope；scope 本期仅允许本次请求本章，不能授权改决定或采用；阶段独立建记录；同一生成 run 最多一个完整结果版本；provider/model 记录本次请求使用的供应商与模型名；finished_at 在任务进入终态时写入（成功/失败为提交时刻，取消为取消落库时刻，中断为重新打开时的标记时刻，不代表真实结束），v4 之前的历史记录为空 |
+| run | chapter_id?, task（discuss/generate/inspect/impact/diagnose/recompute/assist）, basis_id?, input_version_id?, source_message_id, retry_of_id?, status, partial_text, result_version_id?, provider?, model?, template_version, request_json, usage_json?, error_code?, finished_at? | request_json 保存缺口、假设、输出限制与 delegation_scope；scope 本期仅允许本次请求本章，不能授权改决定或采用；阶段独立建记录；同一生成 run 最多一个完整结果版本；provider/model 记录本次请求使用的供应商与模型名；finished_at 在任务进入终态时写入（成功/失败为提交时刻，取消为取消落库时刻，中断为重新打开时的标记时刻，不代表真实结束），v4 之前的历史记录为空 |
 | check_result | chapter_id, version_id, basis_id, run_id, coverage_json, actual_plot, actual_ending | 只保存校验有效的完整结果；失败保留在 run；结尾和剧情是候选解释 |
 | issue | check_id, kind, explanation, proposed_change | 问题在保存后不可变；关系证据单独保存 |
 | issue_evidence | issue_id, version_id?, basis_source_id?, start?, end?, quote | 来源二选一；必须是该检查正文或同一 basis 的来源；文本区间必须匹配原文 |
@@ -350,7 +350,7 @@ SQLite 与文件系统没有共同事务；外部编辑器也不遵守项目进�
 
 项目路径由启动参数决定；非敏感模型配置放项目外用户配置目录，密钥优先环境变量。支持模型名、输出上限、请求超时及用量预算；没有可靠价格信息时显示用量，不伪造费用。锁由操作系统持有，崩溃释放；macOS 首期可使用标准库平台锁，其他平台接入前补相应实现，不能单凭锁文件存在推断进程活着。
 
-数据库 schema 版本用 `PRAGMA user_version` 管理。v1 建库，v2 增加 `draft_rejection`（拒绝稿只追加记录）与 `story_item.chapter_id`（NULL 表示全书规则），v3 重建 `run` 并增加分支、发布与伏笔相关表，v4 为 `run` 增加 `finished_at`（用 ALTER TABLE 追加，历史行保持 NULL，不伪造结束时间）。重建被引用的表必须在事务外先关闭外键，迁移事务末尾执行 `PRAGMA foreign_key_check`，有违规即回滚，结束后恢复外键；将来升级先备份，在事务中迁移，失败回滚；遇更高版本只报告不兼容，不自动降级。备份使用数据库一致性备份能力并包含 work/recovery 文件、内容摘要和清单；短暂暂停应用写入，对外部文件前后复核，检测变化则重试或报告备份未完成。恢复只到空新目录，校验摘要、数据库完整性、外键及引用后开放使用；配置密钥不打包。
+数据库 schema 版本用 `PRAGMA user_version` 管理。v1 建库，v2 增加 `draft_rejection`（拒绝稿只追加记录）与 `story_item.chapter_id`（NULL 表示全书规则），v3 重建 `run` 并增加分支、发布与伏笔相关表，v4 为 `run` 增加 `finished_at`（用 ALTER TABLE 追加，历史行保持 NULL，不伪造结束时间），v5 重建 `run` 使 task 允许 `assist`（对话助手的调度调用）。重建被引用的表必须在事务外先关闭外键，迁移事务末尾执行 `PRAGMA foreign_key_check`，有违规即回滚，结束后恢复外键；将来升级先备份，在事务中迁移，失败回滚；遇更高版本只报告不兼容，不自动降级。备份使用数据库一致性备份能力并包含 work/recovery 文件、内容摘要和清单；短暂暂停应用写入，对外部文件前后复核，检测变化则重试或报告备份未完成。恢复只到空新目录，校验摘要、数据库完整性、外键及引用后开放使用；配置密钥不打包。
 
 ## 10. 实现顺序与可执行验收落点
 

@@ -23,6 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="小说项目目录；不存在时按新项目初始化",
     )
+    parser.add_argument(
+        "--classic", action="store_true", help="使用旧版单字母命令界面（对话式工作台是默认）"
+    )
     parser.add_argument("--version", action="version", version=f"story_workbench {__version__}")
     return parser
 
@@ -42,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     from story_workbench import bootstrap, cli
+    from story_workbench.tui import app as tui
 
     # 非敏感配置来自用户配置目录，密钥只读环境变量；没有密钥时 clients 为 None，
     # CLI 对写作、检查与 AI 讨论提示“模型尚未接入”，其余操作照常。
@@ -59,7 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print(f"本次模型：{settings.provider} / {settings.model}")
-    return cli.run(args.project, clients=clients, config=config)
+    if args.classic:
+        return cli.run(args.project, clients=clients, config=config)
+    return tui.run(args.project, clients=clients, config=config)
 
 
 if __name__ == "__main__":
