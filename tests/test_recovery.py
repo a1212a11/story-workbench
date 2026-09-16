@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from story_workbench.application import authoring
@@ -684,3 +686,153 @@ def test_deepseek_uses_real_sdk_for_stream_and_complete_without_network(monkeypa
     assert next(e.usage for e in events if e.kind is EventKind.USAGE) == final["usage"]
     assert result.text == "井底。" and result.usage == final["usage"] and not result.truncated
     assert len(requests) == 2
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_deepseek_tool_use_round_trip_without_network(monkeypatch, asynchronous):
+    """M5-01：tools、tool_use 与 tool_result 经真实 SDK 序列化；不传 tools 时请求不变。"""
+    import json
+
+    import anthropic
+    import httpx2 as httpx
+
+    from story_workbench import bootstrap
+    from story_workbench.infrastructure.provider import (
+        CancelSignal,
+        ChatMessage,
+        EventKind,
+        TextBlock,
+        ToolResultBlock,
+        ToolSpec,
+        ToolUseBlock,
+    )
+
+    requests = []
+    tool_input = {"chapter": 2, "mode": "formal"}
+    final = {
+        "id": "test-message",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-flash",
+        "content": [
+            {"type": "text", "text": "先看计划。"},
+            {"type": "tool_use", "id": "toolu_1", "name": "get_chapter", "input": tool_input},
+        ],
+        "stop_reason": "tool_use",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 20, "output_tokens": 9},
+    }
+
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if not payload.get("stream"):
+            return httpx.Response(200, json=final)
+        partial = json.dumps(tool_input)
+
+        def delta(index, **body):
+            return {"type": "content_block_delta", "index": index, "delta": body}
+
+        tool_block = {"type": "tool_use", "id": "toolu_1", "name": "get_chapter", "input": {}}
+        text_block = {"type": "text", "text": ""}
+        events = [
+            {"type": "message_start", "message": {**final, "content": [], "stop_reason": None}},
+            {"type": "content_block_start", "index": 0, "content_block": text_block},
+            delta(0, type="text_delta", text="先看计划。"),
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1, "content_block": tool_block},
+            delta(1, type="input_json_delta", partial_json=partial[:7]),
+            delta(1, type="input_json_delta", partial_json=partial[7:]),
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": 9},
+            },
+            {"type": "message_stop"},
+        ]
+        body = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only")
+    settings = bootstrap.Settings(provider="deepseek")
+    base_options = bootstrap.build_generation_config(settings).options
+    spec = ToolSpec(
+        name="get_chapter",
+        description="读取某一章的计划与状态。",
+        input_schema={"type": "object", "properties": {"chapter": {"type": "integer"}}},
+    )
+    options = replace(base_options, tools=(spec,))
+    first = [ChatMessage("system", "系统"), ChatMessage("user", "写第二章")]
+    follow_up = first + [
+        ChatMessage(
+            "assistant",
+            (TextBlock("先看计划。"), ToolUseBlock("toolu_1", "get_chapter", tool_input)),
+        ),
+        ChatMessage("user", (ToolResultBlock("toolu_1", "第二章：剧情……", is_error=False),)),
+    ]
+
+    if asynchronous:
+        import asyncio
+
+        original = anthropic.AsyncAnthropic
+        monkeypatch.setattr(
+            anthropic,
+            "AsyncAnthropic",
+            lambda **kw: original(
+                http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)), **kw
+            ),
+        )
+        clients = bootstrap.build_clients(settings)
+
+        async def call():
+            events = [e async for e in clients.async_stream(first, options, CancelSignal())]
+            result = await clients.async_complete(follow_up, options, CancelSignal())
+            plain = await clients.async_complete(first, base_options, CancelSignal())
+            return events, result, plain
+
+        events, result, plain = asyncio.run(call())
+    else:
+        original = anthropic.Anthropic
+        with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+            monkeypatch.setattr(
+                anthropic, "Anthropic", lambda **kw: original(http_client=http, **kw)
+            )
+            clients = bootstrap.build_clients(settings)
+            events = list(clients.stream(first, options, CancelSignal()))
+            result = clients.complete(follow_up, options, CancelSignal())
+            plain = clients.complete(first, base_options, CancelSignal())
+
+    # 流式：文本在前，tool_use 在 usage 之前，工具调用结束算 completed
+    assert [e.kind for e in events] == [
+        EventKind.TEXT,
+        EventKind.TOOL_USE,
+        EventKind.USAGE,
+        EventKind.COMPLETED,
+    ]
+    assert events[1].tool_use == ToolUseBlock("toolu_1", "get_chapter", tool_input)
+    # 请求里带工具定义
+    assert requests[0]["tools"] == [
+        {"name": spec.name, "description": spec.description, "input_schema": spec.input_schema}
+    ]
+    # 非流式：tool_uses 归一化，文本保留
+    assert result.tool_uses == (ToolUseBlock("toolu_1", "get_chapter", tool_input),)
+    assert result.text == "先看计划。" and not result.truncated
+    # 工具往返消息按 Anthropic 协议序列化
+    assert requests[1]["messages"][1:] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "先看计划。"},
+                {"type": "tool_use", "id": "toolu_1", "name": "get_chapter", "input": tool_input},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "第二章：剧情……"}
+            ],
+        },
+    ]
+    # 不传 tools 时请求没有 tools 字段
+    assert "tools" not in requests[2] and plain.text == "先看计划。"

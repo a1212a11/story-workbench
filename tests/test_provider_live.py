@@ -94,3 +94,48 @@ def test_live_inspection_evidence_locations(project, chapter, author_message):
         f"\n[live inspect] {time.monotonic() - started:.2f}s "
         f"facts={len(facts)} issues={len(check.issues)} usage={run.usage_json}"
     )
+
+
+def test_live_tool_use_round_trip():
+    """M5-01：真实供应商返回 tool_use，并接受 tool_result 后继续；一次往返两次付费请求。"""
+    from dataclasses import replace
+
+    from story_workbench.infrastructure.provider import (
+        TextBlock,
+        ToolResultBlock,
+        ToolSpec,
+    )
+
+    settings = load_settings()
+    if not os.environ.get(settings.api_key_env, "").strip():
+        pytest.skip(f"需要 {settings.api_key_env}")
+    clients = build_clients(settings)
+    assert clients is not None
+    spec = ToolSpec(
+        name="get_chapter",
+        description="读取某一章的剧情、结尾与状态。需要了解章节情况时调用。",
+        input_schema={
+            "type": "object",
+            "properties": {"chapter": {"type": "integer", "description": "章号"}},
+            "required": ["chapter"],
+        },
+    )
+    options = replace(build_generation_config(settings).options, tools=(spec,))
+    messages = [
+        ChatMessage("system", "你是小说创作助手。回答前必须先用工具读取相关章节。只用中文。"),
+        ChatMessage("user", "第二章的结尾状态是什么？"),
+    ]
+    events = list(clients.stream(messages, options, CancelSignal()))
+    assert events[-1].kind is EventKind.COMPLETED, events[-1]
+    uses = [e.tool_use for e in events if e.kind is EventKind.TOOL_USE]
+    assert uses and uses[0].name == "get_chapter" and uses[0].input.get("chapter") == 2
+    print(f"\n[live tool_use] {uses[0]}")
+    text = "".join(e.text for e in events if e.kind is EventKind.TEXT)
+    blocks = ((TextBlock(text),) if text else ()) + (*(ToolUseBlock for ToolUseBlock in uses),)
+    follow_up = messages + [
+        ChatMessage("assistant", blocks),
+        ChatMessage("user", (ToolResultBlock(uses[0].id, "第二章结尾状态：封片仍在她手里。"),)),
+    ]
+    result = clients.complete(follow_up, options, CancelSignal())
+    assert result.text.strip() and "封片" in result.text
+    print(f"[live tool_result] usage={result.usage} text={result.text!r}")

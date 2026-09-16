@@ -1,7 +1,8 @@
-"""模型客户端合同。首期只定义事件与调用函数签名；真实供应商在 G05 接入。
+"""模型客户端合同：事件、消息与调用函数签名，以及 Anthropic 协议客户端。
 
 客户端只处理协议、认证、超时、流与网络错误；不理解采用与 Canon，
-不执行模型提出的动作，不自动重试付费请求。
+不执行模型提出的动作，不自动重试付费请求。工具调用只是把模型提出的
+tool_use 块原样归一化交给调用方，由调用方决定是否执行。
 """
 
 from __future__ import annotations
@@ -10,11 +11,12 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class EventKind(StrEnum):
     TEXT = "text"
+    TOOL_USE = "tool_use"
     USAGE = "usage"
     COMPLETED = "completed"
     TRUNCATED = "truncated"
@@ -22,19 +24,58 @@ class EventKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """提供给模型的工具定义；input_schema 为 JSON Schema 对象。"""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class TextBlock:
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolUseBlock:
+    """模型提出的一次工具调用；是否执行由调用方决定。"""
+
+    id: str
+    name: str
+    input: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResultBlock:
+    tool_use_id: str
+    content: str
+    is_error: bool = False
+
+
+ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
+
+
+@dataclass(frozen=True, slots=True)
 class StreamEvent:
-    """供应商事件归一化后的形态。截断和异常必须区别于 completed。"""
+    """供应商事件归一化后的形态。截断和异常必须区别于 completed。
+
+    tool_use 事件在文本之后、usage 之前产出；模型以工具调用结束发言也算 completed。
+    """
 
     kind: EventKind
     text: str = ""
     usage: dict[str, int] = field(default_factory=dict)
     error: str | None = None
+    tool_use: ToolUseBlock | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ChatMessage:
+    """纯文本消息 content 为 str；带工具调用或工具结果的消息 content 为内容块序列。"""
+
     role: str  # system / user / assistant
-    content: str
+    content: str | tuple[ContentBlock, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +84,7 @@ class CallOptions:
     max_output_tokens: int
     timeout_seconds: float
     temperature: float | None = None
+    tools: tuple[ToolSpec, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +92,7 @@ class CompleteResult:
     text: str
     usage: dict[str, int]
     truncated: bool
+    tool_uses: tuple[ToolUseBlock, ...] = ()
 
 
 CancelSignal = threading.Event
@@ -86,12 +129,56 @@ class ProviderError(Exception):
     """协议或网络层错误；由用例转记为 MODEL_FAILED。不含密钥或请求头。"""
 
 
-def _split_messages(messages: list[ChatMessage]) -> tuple[str, list[dict[str, str]]]:
-    system_parts = [m.content for m in messages if m.role == "system"]
+def _block_param(block: ContentBlock) -> dict[str, Any]:
+    if isinstance(block, TextBlock):
+        return {"type": "text", "text": block.text}
+    if isinstance(block, ToolUseBlock):
+        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+    param: dict[str, Any] = {
+        "type": "tool_result",
+        "tool_use_id": block.tool_use_id,
+        "content": block.content,
+    }
+    if block.is_error:
+        param["is_error"] = True
+    return param
+
+
+def _content_param(content: str | tuple[ContentBlock, ...]) -> str | list[dict[str, Any]]:
+    if isinstance(content, str):
+        return content
+    return [_block_param(block) for block in content]
+
+
+def _text_of(content: str | tuple[ContentBlock, ...]) -> str:
+    if isinstance(content, str):
+        return content
+    return "\n\n".join(block.text for block in content if isinstance(block, TextBlock))
+
+
+def _split_messages(messages: list[ChatMessage]) -> tuple[str, list[dict[str, Any]]]:
+    system_parts = [_text_of(m.content) for m in messages if m.role == "system"]
     chat = [
-        {"role": m.role, "content": m.content} for m in messages if m.role in ("user", "assistant")
+        {"role": m.role, "content": _content_param(m.content)}
+        for m in messages
+        if m.role in ("user", "assistant")
     ]
     return "\n\n".join(system_parts), chat
+
+
+def _tool_uses(message) -> tuple[ToolUseBlock, ...]:
+    return tuple(
+        ToolUseBlock(
+            id=str(getattr(block, "id", "")),
+            name=str(getattr(block, "name", "")),
+            input=dict(getattr(block, "input", None) or {}),
+        )
+        for block in getattr(message, "content", None) or ()
+        if getattr(block, "type", "") == "tool_use"
+    )
+
+
+_FINISHED_STOP_REASONS = ("end_turn", "stop_sequence", "tool_use")
 
 
 def _usage(message) -> dict[str, int]:
@@ -115,6 +202,11 @@ def _request_kwargs(messages, options, disable_thinking):
         kwargs["system"] = system
     if options.temperature is not None:
         kwargs["temperature"] = options.temperature
+    if options.tools:
+        kwargs["tools"] = [
+            {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+            for t in options.tools
+        ]
     if disable_thinking:
         kwargs["thinking"] = {"type": "disabled"}
     return kwargs
@@ -160,10 +252,12 @@ def make_anthropic_clients(
         if cancel.is_set():
             yield StreamEvent(EventKind.ERROR, error="cancelled")
             return
+        for tool_use in _tool_uses(final):
+            yield StreamEvent(EventKind.TOOL_USE, tool_use=tool_use)
         yield StreamEvent(EventKind.USAGE, usage=_usage(final))
         if getattr(final, "stop_reason", None) == "max_tokens":
             yield StreamEvent(EventKind.TRUNCATED)
-        elif getattr(final, "stop_reason", None) in ("end_turn", "stop_sequence"):
+        elif getattr(final, "stop_reason", None) in _FINISHED_STOP_REASONS:
             yield StreamEvent(EventKind.COMPLETED)
         else:
             yield StreamEvent(EventKind.ERROR, error="unexpected_stop_reason")
@@ -182,7 +276,7 @@ def make_anthropic_clients(
             raise ProviderError(type(exc).__name__) from None
         if cancel.is_set():
             raise ProviderError("cancelled")
-        if getattr(message, "stop_reason", None) not in ("end_turn", "stop_sequence", "max_tokens"):
+        if getattr(message, "stop_reason", None) not in (*_FINISHED_STOP_REASONS, "max_tokens"):
             raise ProviderError("unexpected_stop_reason")
         text = "".join(
             getattr(block, "text", "")
@@ -193,6 +287,7 @@ def make_anthropic_clients(
             text=text,
             usage=_usage(message),
             truncated=getattr(message, "stop_reason", None) == "max_tokens",
+            tool_uses=_tool_uses(message),
         )
 
     return stream, complete
@@ -238,10 +333,12 @@ def make_async_anthropic_clients(
         if cancel.is_set():
             yield StreamEvent(EventKind.ERROR, error="cancelled")
             return
+        for tool_use in _tool_uses(final):
+            yield StreamEvent(EventKind.TOOL_USE, tool_use=tool_use)
         yield StreamEvent(EventKind.USAGE, usage=_usage(final))
         if getattr(final, "stop_reason", None) == "max_tokens":
             yield StreamEvent(EventKind.TRUNCATED)
-        elif getattr(final, "stop_reason", None) in ("end_turn", "stop_sequence"):
+        elif getattr(final, "stop_reason", None) in _FINISHED_STOP_REASONS:
             yield StreamEvent(EventKind.COMPLETED)
         else:
             yield StreamEvent(EventKind.ERROR, error="unexpected_stop_reason")
@@ -261,7 +358,7 @@ def make_async_anthropic_clients(
             raise ProviderError(type(exc).__name__) from None
         if cancel.is_set():
             raise ProviderError("cancelled")
-        if getattr(message, "stop_reason", None) not in ("end_turn", "stop_sequence", "max_tokens"):
+        if getattr(message, "stop_reason", None) not in (*_FINISHED_STOP_REASONS, "max_tokens"):
             raise ProviderError("unexpected_stop_reason")
         text = "".join(
             getattr(block, "text", "")
@@ -272,6 +369,7 @@ def make_async_anthropic_clients(
             text=text,
             usage=_usage(message),
             truncated=getattr(message, "stop_reason", None) == "max_tokens",
+            tool_uses=_tool_uses(message),
         )
 
     return stream, complete

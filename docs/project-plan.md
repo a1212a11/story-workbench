@@ -130,7 +130,7 @@ M3 本地闭环已进入可验收状态；M4 仍按长篇能力与导出体验�
 
 2026-09-16 作者评价现有单字母命令 CLI 体验很差，要求做成 Codex CLI 那样的对话式代理加全屏界面；设计见[对话式工作台设计](conversational-workbench.md)。作者权限规则不变。
 
-- [ ] M5-01 供应商层工具调用。完成条件：`ChatMessage` 支持内容块，`CallOptions.tools`，`TOOL_USE` 事件；假 SDK 与真实往返测试通过；不传 tools 时请求不变。
+- [x] M5-01 供应商层工具调用。完成条件：`ChatMessage` 支持内容块，`CallOptions.tools`，`TOOL_USE` 事件；假 SDK 与真实往返测试通过；不传 tools 时请求不变。证据：`tests/test_recovery.py::test_deepseek_tool_use_round_trip_without_network`（真实 SDK + 本地模拟传输，同步与异步：tools 参数、流式 input_json_delta 解析、非流式 tool_uses、tool_result 消息序列化、不传 tools 时无 tools 字段）；`tests/test_provider_live.py::test_live_tool_use_round_trip` 默认跳过，待真实密钥执行。
 - [ ] M5-02 门槛流程抽取、工具目录与代理引擎。完成条件：旧 CLI 改用 `console/flows` 后全部测试仍通过；引擎测试覆盖已读声明、失败不自动重试、拒绝零记录、取消先落库、单轮调用上限；schema v5 允许 `assist` 任务。
 - [ ] M5-03 Textual 全屏界面。完成条件：三章走查可在新界面完成；T05 对话版人工记录。
 - [ ] M5-04 入口切换与旧 CLI 退役。完成条件：默认进入新界面，`--classic` 保留旧版；文档更新；一轮真实三章对话验收后删除旧 CLI。
