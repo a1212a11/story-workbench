@@ -53,6 +53,7 @@ DeepSeek 复用现有 SDK，通过[官方 Anthropic 兼容接口](https://api-do
 - [需求基线](docs/requirements.md)：产品边界、功能需求、权限规则与验收场景。
 - [实施方案](docs/implementation.md)：CLI 交互、本地数据、AI 职责、交付顺序与待定事项。
 - [魔法冷战三章试用材料](docs/magic-cold-war-trial.md)：《寒灯协定》工作设定、三章初稿、知识边界与人工核对样本。
+- [对话式工作台设计](docs/conversational-workbench.md)：M5 的代理循环、工具目录、Textual 界面与实施顺序。
 - [三章创作交互走查](docs/three-chapter-walkthrough.md)：含完整短章的纸面模拟，覆盖普通文字编辑、试写、采用、回改和失败恢复；非应用实测。
 
 ## 核心闭环
