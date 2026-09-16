@@ -257,7 +257,10 @@ class ThreadPort:
 class WorkbenchApp(App[int]):
     CSS = """
     Screen { layout: vertical; background: $background; }
-    #transcript { height: 1fr; padding: 0 2; }
+    #transcript {
+        height: 1fr; padding: 0 2;
+        scrollbar-size-vertical: 1; scrollbar-color: $surface; scrollbar-background: $background;
+    }
     #transcript > * { margin-bottom: 1; }
     .welcome { border: round $accent; padding: 0 1; width: auto; }
     .author { color: $text-muted; }
@@ -490,11 +493,18 @@ class WorkbenchApp(App[int]):
         self._log.append(text)
         self._mount(Static(text, classes="welcome", markup=False))
 
+    def _log_tool_stream(self) -> None:
+        block = self._current_tool
+        if block is not None and block.stream_text.strip():
+            self._log.append(block.stream_text)
+
     def show_line(self, text: str) -> None:
-        self._log.append(text)
         if self._current_tool is not None:
+            self._log_tool_stream()
+            self._log.append(text)
             self._current_tool.add_line(text)
         else:
+            self._log.append(text)
             self._flush_reply_stream()
             self._mount(Static(text, classes="system", markup=False))
         self._scroll()
@@ -549,6 +559,7 @@ class WorkbenchApp(App[int]):
         self._mount(block)
 
     def end_tool(self, is_error: bool) -> None:
+        self._log_tool_stream()
         block = self._current_tool
         self._current_tool = None
         if block is not None:

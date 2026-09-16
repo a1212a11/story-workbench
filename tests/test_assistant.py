@@ -161,7 +161,7 @@ def test_turn_orchestrates_tools_and_records_every_model_call(project):
     ]
     assert tool_results and "本章剧情：调查旧井" in tool_results[0].content
     assert "本章剧情：调查旧井" in port.output
-    assert "生成结束。以下是完整正文：" in port.output and BODY in port.output
+    assert "生成结束。以上是完整正文：" in port.output and BODY not in port.output
     assert "".join(port.chunks).count(BODY) == 1  # 正文流式回显一次
     # 系统提示带当前状态；对话持久化为作者/模型消息
     assert second_call[0].role == "system" and "第一章（" in second_call[0].content

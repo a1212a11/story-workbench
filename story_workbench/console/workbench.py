@@ -227,12 +227,19 @@ class Workbench:
         return authoring.adopted_version_id(self.project, chapter.id)
 
     def display_draft(
-        self, chapter: ChapterRecord, version: VersionRecord, *, explicit: bool = False
+        self,
+        chapter: ChapterRecord,
+        version: VersionRecord,
+        *,
+        explicit: bool = False,
+        body_shown: bool = False,
     ) -> None:
+        """展示稿件并记为「最近展示」；body_shown 表示正文刚流式显示过，只打标签不重复。"""
         self.say(draft_label(chapter, version, self.adopted_version_id(chapter)))
-        self.say("")
-        self.say(version.body)
-        self.say("")
+        if not body_shown:
+            self.say("")
+            self.say(version.body)
+            self.say("")
         self.shown = Shown(chapter.id, version.id, explicit)
 
     def latest_check(self, version: VersionRecord) -> CheckRecord | None:
@@ -544,7 +551,13 @@ class Workbench:
             assumptions = (assumption,) if assumption else ()
             text = f"试写{label}。" + (f"假设：{assumption}" if assumption else "")
         message_id = authoring.record_message(self.project, text, chapter.id)
-        self.say("开始写作，输出会逐段显示；结束后展示全文与检查。")
+        self.say("开始写作，输出会逐段显示；结束后展示检查。")
+        streamed_parts: list[str] = []
+
+        def on_text(chunk: str) -> None:
+            streamed_parts.append(chunk)
+            self.emit(chunk)
+
         try:
             result = self.run_model(
                 generation.write_chapter,
@@ -552,7 +565,7 @@ class Workbench:
                 mode,
                 message_id,
                 assumptions=assumptions,
-                on_text=self.emit,
+                on_text=on_text,
             )
         except WorkbenchError as exc:
             self.emit("\n")
@@ -565,8 +578,13 @@ class Workbench:
             self.say(
                 "生成期间这一章的编辑稿已经变化；这一稿已保存为另一稿，现在的编辑稿没有被替换。"
             )
-        self.say("生成结束。以下是完整正文：")
-        self.display_draft(fresh, version)
+        streamed = "".join(streamed_parts)
+        if streamed == version.body:
+            self.say("生成结束。以上是完整正文：")
+            self.display_draft(fresh, version, body_shown=True)
+        else:
+            self.say("生成结束。以下是完整正文：")
+            self.display_draft(fresh, version)
         if result.check_id is None:
             self.say("检查没有完成，这一稿保留；可以用 k 重新检查。")
         else:

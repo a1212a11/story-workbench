@@ -421,7 +421,8 @@ def test_cli_plan_write_review_adopt_and_state_ready(pipe, tmp_path):
     out = run_cli(pipe, path, script, clients=sequenced_clients((BODY_1, CHECK_1)), emit=chunks)
     assert chunks == [BODY_1[:5], BODY_1[5:], "\n"]
     assert "开始写作，输出会逐段显示" in out
-    assert "生成结束。以下是完整正文：\n第一章 · 写作稿 · 未采用\n\n" + BODY_1 in out
+    # 正文已流式回显，生成结束只打标签不重复；采用前的再次展示仍含全文
+    assert "生成结束。以上是完整正文：\n第一章 · 写作稿 · 未采用\n" in out
     assert "实际剧情：沈砚下井发现尸体" in out
     assert "未发现需要处理的问题" in out
     assert "人物认知 · 沈砚：沈砚怀疑尸体是师父（原文：「他怀疑是师父」）" in out
