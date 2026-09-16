@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from story_workbench.ai import assistant as prompts
 from story_workbench.application import assistant, authoring
-from story_workbench.console.tools import ToolSession, execute
+from story_workbench.console.tools import ToolSession, describe_call, execute
 from story_workbench.console.workbench import Workbench, chapter_label
 from story_workbench.domain.records import WorkbenchError
 from story_workbench.infrastructure.provider import (
@@ -31,9 +31,14 @@ class TurnResult:
 
 
 class Engine:
-    def __init__(self, workbench: Workbench, *, max_calls: int = MAX_CALLS_PER_TURN) -> None:
+    """observer 可选：界面据此区分助手自己的回复与工具里的流式输出，并折叠工具结果。"""
+
+    def __init__(
+        self, workbench: Workbench, *, max_calls: int = MAX_CALLS_PER_TURN, observer=None
+    ) -> None:
         self.workbench = workbench
         self.max_calls = max_calls
+        self.observer = observer
         self.transcript: list[ChatMessage] = prompts.history_from_messages(
             [
                 prompts.HistoryEntry(m.role.value, m.body)
@@ -75,6 +80,11 @@ class Engine:
         self.transcript = prompts.fit_transcript(self.transcript, self._budget(), estimate)
         return [ChatMessage("system", self.system_prompt()), *self.transcript]
 
+    def _notify(self, event: str, *args) -> None:
+        hook = getattr(self.observer, event, None)
+        if hook is not None:
+            hook(*args)
+
     # ------------------------------------------------------------ 一轮
 
     def handle(self, author_text: str) -> TurnResult:
@@ -96,6 +106,7 @@ class Engine:
                 stopped_early = True
                 break
             calls += 1
+            self._notify("reply_started")
             try:
                 reply = wb.run_model(
                     assistant.call_model,
@@ -107,12 +118,12 @@ class Engine:
                     on_text=wb.emit,
                 )
             except WorkbenchError as exc:
-                wb.emit("\n")
+                self._notify("reply_finished", "")
                 wb.say(f"助手没有完成回复：{exc.message}")
                 stopped_early = True
                 break
+            self._notify("reply_finished", reply.text)
             if reply.text:
-                wb.emit("\n")
                 reply_parts.append(reply.text)
             blocks = ((TextBlock(reply.text),) if reply.text else ()) + reply.tool_uses
             self.transcript.append(ChatMessage("assistant", blocks))
@@ -120,7 +131,9 @@ class Engine:
                 break
             results = []
             for use in reply.tool_uses:
+                self._notify("tool_started", use.name, describe_call(use.name, use.input))
                 outcome = execute(session, use.name, use.input)
+                self._notify("tool_finished", use.name, outcome.text, outcome.is_error)
                 results.append(ToolResultBlock(use.id, outcome.text, outcome.is_error))
             self.transcript.append(ChatMessage("user", tuple(results)))
         final = "\n\n".join(part for part in reply_parts if part.strip())

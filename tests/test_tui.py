@@ -62,15 +62,21 @@ def test_author_message_drives_tools_and_streams_body(tmp_path):
     async def scenario():
         app = WorkbenchApp(path, clients=clients, config=CONFIG)
         async with app.run_test(size=(100, 30)) as pilot:
-            await _wait(app, pilot, lambda: "已打开《井下回声》" in app.transcript_text())
-            assert "fixed / fixed" in app.status_text
+            await _wait(app, pilot, lambda: "《井下回声》" in app.transcript_text())
+            await _wait(app, pilot, lambda: "fixed" in app.status_text)
             await _send(pilot, "写第一章")
             await _wait(app, pilot, lambda: "写完了。" in app.transcript_text())
             text = app.transcript_text()
-            assert "你：写第一章" in text and BODY in text and "生成结束" in text
-            await _wait(
-                app, pilot, lambda: "本次用量" in app.status_text and "0/0" not in app.status_text
-            )
+            assert "> 写第一章" in text and BODY in text and "生成结束" in text
+            assert "⏺ 写作(第一章 · 正式)" in text and "⎿  完成" in text
+            await _wait(app, pilot, lambda: "↑" in app.status_text and "↑0 " not in app.status_text)
+            # 工具输出可折叠
+            from story_workbench.tui.app import ToolBlock
+
+            block = app.query_one(ToolBlock)
+            assert block.body().display
+            await pilot.press("ctrl+o")
+            assert not block.body().display
             await pilot.press("ctrl+d")
 
     _run(scenario())
@@ -101,7 +107,7 @@ def test_question_card_collects_read_declaration_for_adoption(tmp_path):
     async def scenario():
         app = WorkbenchApp(path, clients=clients, config=CONFIG)
         async with app.run_test(size=(100, 30)) as pilot:
-            await _wait(app, pilot, lambda: "已打开" in app.transcript_text())
+            await _wait(app, pilot, lambda: "《井下回声》" in app.transcript_text())
             await _send(pilot, "写第一章")
             await _wait(app, pilot, lambda: "写完了。" in app.transcript_text())
             await _send(pilot, "采用")
@@ -167,7 +173,7 @@ def test_escape_cancels_model_task_after_persisting_cancel(tmp_path):
     async def scenario():
         app = WorkbenchApp(path, clients=clients, config=CONFIG)
         async with app.run_test(size=(100, 30)) as pilot:
-            await _wait(app, pilot, lambda: "已打开" in app.transcript_text())
+            await _wait(app, pilot, lambda: "《井下回声》" in app.transcript_text())
             await _send(pilot, "随便聊聊")
             await _wait(app, pilot, lambda: "先写一段" in app.transcript_text())
             await pilot.press("escape")
@@ -199,7 +205,7 @@ def test_new_project_asks_title_through_question_card(tmp_path):
             await _wait(app, pilot, lambda: app.mode == "answer")
             assert "作品标题" in str(app.query_one("#question").content)
             await _send(pilot, "寒灯协定")
-            await _wait(app, pilot, lambda: "已打开《寒灯协定》" in app.transcript_text())
+            await _wait(app, pilot, lambda: "《寒灯协定》" in app.transcript_text())
             await pilot.press("ctrl+d")
 
     _run(scenario())

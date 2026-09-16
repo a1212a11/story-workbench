@@ -1,8 +1,13 @@
-"""Textual 全屏工作台：对话记录、状态栏、多行输入、问题卡与正文编辑器。
+"""Textual 对话式工作台，外观与交互仿照 Claude Code：
+
+对话像终端一样向下滚动；作者的话是灰色的「> 你的话」，助手回复带「⏺」并按 Markdown 渲染；
+工具调用显示为「⏺ 写作(第二章 · 正式)」，其下缩进显示流程输出，结束后一行「⎿ 完成 · N 行」，
+ctrl+o 折叠或展开；工作时输入框上方有旋转指示与已用时间，esc 中断；底部是圆角输入框，
+下面一行左侧快捷键、右侧当前章、模型与本次用量；需要作者确认时显示带边框的问题卡。
 
 界面在主线程跑事件循环；引擎在专用线程里拥有 Project 与 SQLite 连接，所有用例与数据库
-操作只在该线程执行。作者输入经队列送给引擎，引擎经 call_from_thread 把 say/emit/ask/edit
-投递到界面。取消标志是线程安全的事件；取消先落库，再通知客户端。
+操作只在该线程执行。作者输入经队列送给引擎，引擎经 call_from_thread 把输出投递到界面。
+取消先落库，再通知客户端。
 """
 
 from __future__ import annotations
@@ -10,15 +15,16 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Static, TextArea
+from textual.widgets import Markdown, Static, TextArea
 
 from story_workbench.application import generation
 from story_workbench.application.projects import Project, create_project, open_project
@@ -32,8 +38,14 @@ HELP = (
     "直接用一句话说你要做什么，例如「写第二章」「这稿采用」「第一章读起来太赶，帮我看看」。\n"
     "固定操作：/chapters 章节列表 · /go 2 去第二章 · /new 新建章节 · /edit 编辑正文 ·"
     " /status 历史状态 · /branch 分支 · /help · /quit\n"
-    "按键：Enter 发送 · Ctrl-J 换行 · Esc 取消进行中的模型任务 · Ctrl-D 退出"
+    "按键：Enter 发送 · Ctrl-J 换行 · Esc 中断模型任务 · Ctrl-O 折叠/展开工具输出 · Ctrl-D 退出"
 )
+SPINNER = "·✢✳✶✻✽"
+IDLE_HINT = "? /help 查看操作 · Enter 发送 · Ctrl-J 换行"
+BUSY_HINT = "esc 中断 · 已保存的内容会保留"
+
+
+# ---------------------------------------------------------------- 输入与编辑器
 
 
 class PromptArea(TextArea):
@@ -90,6 +102,64 @@ class EditorScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+# ---------------------------------------------------------------- 对话记录中的条目
+
+
+class ToolBlock(Vertical):
+    """一次工具调用：标题、缩进的流程输出、结束行；可折叠。"""
+
+    def __init__(self, label: str) -> None:
+        super().__init__(classes="tool")
+        self.label = label
+        self.lines = 0
+        self.stream: Static | None = None
+        self.stream_text = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"⏺ {self.label}", classes="tool-header running", markup=False)
+        yield Vertical(classes="tool-body")
+        yield Static("", classes="tool-footer", markup=False)
+
+    def body(self) -> Vertical:
+        return self.query_one(".tool-body", Vertical)
+
+    def add_line(self, text: str) -> None:
+        self.flush_stream()
+        self.body().mount(Static(text, classes="tool-line", markup=False))
+        self.lines += 1 + text.count("\n")
+
+    def add_chunk(self, chunk: str) -> None:
+        if self.stream is None:
+            self.stream = Static("", classes="tool-line", markup=False)
+            self.stream_text = ""
+            self.body().mount(self.stream)
+        self.stream_text += chunk
+        self.stream.update(self.stream_text)
+
+    def flush_stream(self) -> None:
+        if self.stream is not None:
+            if self.stream_text.strip():
+                self.lines += 1 + self.stream_text.rstrip("\n").count("\n")
+            else:
+                self.stream.remove()
+            self.stream = None
+            self.stream_text = ""
+
+    def finish(self, is_error: bool) -> None:
+        self.flush_stream()
+        header = self.query_one(".tool-header", Static)
+        header.remove_class("running")
+        header.add_class("error" if is_error else "ok")
+        state = "出错" if is_error else "完成"
+        self.query_one(".tool-footer", Static).update(f"  ⎿  {state} · {self.lines} 行")
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self.body().display = not collapsed
+
+
+# ---------------------------------------------------------------- 引擎线程端口
+
+
 class ThreadPort:
     """引擎线程使用的作者端口：输出投递到界面，提问与编辑阻塞等待作者作答。"""
 
@@ -107,6 +177,7 @@ class ThreadPort:
         except RuntimeError:  # 界面已关闭
             pass
 
+    # 作者端口
     def say(self, text: str) -> None:
         self._ui(self.app.show_line, text)
 
@@ -166,29 +237,62 @@ class ThreadPort:
         finally:
             self._ui(self.app.set_busy, False)
 
+    # 引擎观察者
+    def reply_started(self) -> None:
+        self._ui(self.app.begin_reply)
+
+    def reply_finished(self, text: str) -> None:
+        self._ui(self.app.end_reply, text)
+
+    def tool_started(self, name: str, label: str) -> None:
+        self._ui(self.app.begin_tool, label)
+
+    def tool_finished(self, name: str, text: str, is_error: bool) -> None:
+        self._ui(self.app.end_tool, is_error)
+
+
+# ---------------------------------------------------------------- 应用
+
 
 class WorkbenchApp(App[int]):
     CSS = """
-    Screen { layout: vertical; }
-    #status { height: 1; background: $primary; color: $text; padding: 0 1; }
-    #transcript { height: 1fr; padding: 0 1; }
-    #transcript > Static { margin-bottom: 1; }
-    .author { color: $accent; text-style: bold; }
-    .assistant { color: $text; }
-    .stream { color: $text; }
+    Screen { layout: vertical; background: $background; }
+    #transcript { height: 1fr; padding: 0 2; }
+    #transcript > * { margin-bottom: 1; }
+    .welcome { border: round $accent; padding: 0 1; width: auto; }
+    .author { color: $text-muted; }
     .system { color: $text-muted; }
-    #question { height: auto; background: $warning 20%; padding: 0 1; }
-    #input { height: 4; }
-    #hint { height: 1; color: $text-muted; padding: 0 1; }
-    #editor-title { height: 1; background: $primary; color: $text; padding: 0 1; }
+    .reply { height: auto; }
+    .reply > .dot { width: 2; color: $accent; }
+    .reply > Static, .reply > Markdown { width: 1fr; }
+    .reply > Markdown { margin: 0; padding: 0; }
+    .tool { height: auto; margin-bottom: 1; }
+    .tool-header { color: $accent; }
+    .tool-header.ok { color: $success; }
+    .tool-header.error { color: $error; }
+    .tool-body { height: auto; padding-left: 2; }
+    .tool-line { color: $text; }
+    .tool-footer { color: $text-muted; }
+    #spinner { height: 1; padding: 0 2; color: $accent; }
+    #question { border: round $warning; padding: 0 1; margin: 0 2; height: auto; }
+    #inputbox { border: round $accent; height: auto; max-height: 8; margin: 0 1; }
+    #inputbox > .prompt { width: 2; padding-left: 1; color: $accent; }
+    #input { height: auto; max-height: 6; border: none; padding: 0; background: transparent; }
+    #input:focus { border: none; }
+    #hint { height: 1; margin: 0 2; color: $text-muted; }
+    #hint-left { width: 1fr; }
+    #hint-right { width: auto; text-align: right; }
+    #editor-title { height: 1; background: $accent; color: $text; padding: 0 1; }
     #editor { height: 1fr; }
     """
 
     BINDINGS = [
-        Binding("escape", "cancel_model", "取消模型任务", priority=True, show=False),
+        Binding("escape", "cancel_model", "中断模型任务", priority=True, show=False),
+        Binding("ctrl+c", "interrupt", "中断或退出", priority=True, show=False),
         Binding("ctrl+d", "quit_app", "退出", priority=True, show=False),
         # Textual 自带的 ctrl+q 退出优先于屏幕绑定；编辑器打开时 ctrl+q 应是取消编辑。
         Binding("ctrl+q", "editor_cancel_or_quit", "退出", priority=True, show=False),
+        Binding("ctrl+o", "toggle_tools", "折叠/展开工具输出", priority=True, show=False),
     ]
 
     def __init__(
@@ -206,23 +310,36 @@ class WorkbenchApp(App[int]):
         self.inbox: queue.Queue[str | None] = queue.Queue()
         self.stopping = threading.Event()
         self.mode = "chat"
-        self._stream_widget: Static | None = None
-        self._stream_text = ""
+        self.busy = False
+        self.busy_since = 0.0
+        self.busy_verb = "思考中"
+        self.tools_collapsed = False
+        self._current_tool: ToolBlock | None = None
+        self._reply_row: Horizontal | None = None
+        self._reply_stream: Static | None = None
+        self._reply_text = ""
+        self._log: list[str] = []
         self.session_started = database.now_utc()
-        self.status_text = "正在打开作品……"
+        self.status_text = ""
 
     # ------------------------------------------------------------ 布局
 
     def compose(self) -> ComposeResult:
-        yield Static(self.status_text, id="status", markup=False)
         yield VerticalScroll(id="transcript")
+        yield Static("", id="spinner", markup=False)
         yield Static("", id="question", markup=False)
-        yield PromptArea(id="input", soft_wrap=True)
-        yield Static("Enter 发送 · Ctrl-J 换行 · Esc 取消 · /help 帮助", id="hint", markup=False)
+        with Horizontal(id="inputbox"):
+            yield Static(">", classes="prompt", markup=False)
+            yield PromptArea(id="input", soft_wrap=True)
+        with Horizontal(id="hint"):
+            yield Static(IDLE_HINT, id="hint-left", markup=False)
+            yield Static("", id="hint-right", markup=False)
 
     def on_mount(self) -> None:
         self.query_one("#question", Static).display = False
+        self.query_one("#spinner", Static).display = False
         self.query_one("#input", PromptArea).focus()
+        self.set_interval(0.1, self._tick)
         self.run_worker(self.engine_loop, thread=True, exclusive=True, exit_on_error=False)
 
     # ------------------------------------------------------------ 引擎线程
@@ -237,15 +354,26 @@ class WorkbenchApp(App[int]):
         if project is None:
             return
         workbench = Workbench(project, port, clients=self.clients, config=self.config)
-        engine = Engine(workbench)
+        engine = Engine(workbench, observer=port)
         try:
-            port.say(f"已打开《{project.novel.title}》。")
+            model = (
+                f"{self.config.provider} / {self.config.options.model}"
+                if self.config and self.clients
+                else "未接入（没有密钥）"
+            )
+            port._ui(
+                self.show_welcome,
+                f"✻ 故事工作台 · 《{project.novel.title}》\n\n"
+                f"  分支：{project.branch.name}\n"
+                f"  模型：{model}\n"
+                f"  目录：{self.path}\n\n"
+                "  直接说你要做什么；/help 查看固定操作。",
+            )
             workbench.show_chapters()
             if self.clients is None:
                 port.say(
                     "未检测到模型密钥：可以记录想法、编辑正文；写作与检查需要设置密钥后重新打开。"
                 )
-            port.say(HELP)
             self._refresh_status(workbench)
             while not self.stopping.is_set():
                 try:
@@ -261,6 +389,7 @@ class WorkbenchApp(App[int]):
                 except Exception as exc:  # 界面不因单次异常退出；已保存的内容都在
                     port.say(f"这一步出错：{type(exc).__name__}。已保存的内容都在。")
                 self._refresh_status(workbench)
+                port._ui(self.end_turn)
         finally:
             project.close()
 
@@ -334,12 +463,9 @@ class WorkbenchApp(App[int]):
     def _refresh_status(self, wb: Workbench) -> None:
         chapter = wb.refresh()
         where = chapter_label(chapter) if chapter else "未选章"
-        model = f"{wb.config.provider} / {wb.config.options.model}" if wb.config else "模型未接入"
+        model = wb.config.options.model if (wb.config and wb.clients) else "模型未接入"
         used_in, used_out = self._session_usage(wb)
-        text = (
-            f"《{wb.project.novel.title}》 · {wb.project.branch.name} · {where} · {model}"
-            f" · 本次用量 {used_in}/{used_out} token"
-        )
+        text = f"{where} · {model} · ↑{_short(used_in)} ↓{_short(used_out)} tokens"
         self.port._ui(self.set_status, text)
 
     # ------------------------------------------------------------ 界面更新（主线程）
@@ -347,63 +473,134 @@ class WorkbenchApp(App[int]):
     def _transcript(self) -> VerticalScroll:
         return self.query_one("#transcript", VerticalScroll)
 
-    def _mount(self, widget: Static) -> None:
+    def _mount(self, widget) -> None:
         transcript = self._transcript()
         transcript.mount(widget)
         transcript.scroll_end(animate=False)
 
-    def _flush_stream(self) -> None:
-        if self._stream_widget is not None:
-            if not self._stream_text.strip():
-                self._stream_widget.remove()
-            self._stream_widget = None
-            self._stream_text = ""
-
-    def show_line(self, text: str) -> None:
-        self._flush_stream()
-        self._mount(Static(text, classes="system", markup=False))
-
-    def show_chunk(self, chunk: str) -> None:
-        if self._stream_widget is None:
-            self._stream_text = ""
-            self._stream_widget = Static("", classes="stream", markup=False)
-            self._mount(self._stream_widget)
-        self._stream_text += chunk
-        self._stream_widget.update(self._stream_text)
+    def _scroll(self) -> None:
         self._transcript().scroll_end(animate=False)
 
+    def _flush_reply_stream(self) -> None:
+        if self._reply_stream is not None and not self._reply_text.strip():
+            self._reply_stream.remove()
+        self._reply_stream = None
+
+    def show_welcome(self, text: str) -> None:
+        self._log.append(text)
+        self._mount(Static(text, classes="welcome", markup=False))
+
+    def show_line(self, text: str) -> None:
+        self._log.append(text)
+        if self._current_tool is not None:
+            self._current_tool.add_line(text)
+        else:
+            self._flush_reply_stream()
+            self._mount(Static(text, classes="system", markup=False))
+        self._scroll()
+
+    def show_chunk(self, chunk: str) -> None:
+        if self._current_tool is not None:
+            self._current_tool.add_chunk(chunk)
+        else:
+            if self._reply_stream is None:
+                self.begin_reply()
+            self._reply_text += chunk
+            assert self._reply_stream is not None
+            self._reply_stream.update(self._reply_text)
+        self._scroll()
+
     def show_author(self, text: str) -> None:
-        self._flush_stream()
-        self._mount(Static(f"你：{text}", classes="author", markup=False))
+        self._log.append(f"> {text}")
+        self._flush_reply_stream()
+        self._mount(Static(f"> {text}", classes="author", markup=False))
+
+    def begin_reply(self) -> None:
+        self._flush_reply_stream()
+        self._reply_text = ""
+        self._reply_stream = Static("", markup=False)
+        self._reply_row = Horizontal(
+            Static("⏺", classes="dot", markup=False), self._reply_stream, classes="reply"
+        )
+        self.busy_verb = "思考中"
+        self._mount(self._reply_row)
+
+    def end_reply(self, text: str) -> None:
+        row, stream = self._reply_row, self._reply_stream
+        self._reply_row = self._reply_stream = None
+        self._reply_text = ""
+        if row is None:
+            return
+        if not text.strip():
+            row.remove()
+            return
+        self._log.append(text)
+        if stream is not None:
+            stream.remove()
+        row.mount(Markdown(text))
+        self._scroll()
+
+    def begin_tool(self, label: str) -> None:
+        self._flush_reply_stream()
+        block = ToolBlock(label)
+        self._current_tool = block
+        self.busy_verb = label.split("(", 1)[0] + "中"
+        self._log.append(f"⏺ {label}")
+        self._mount(block)
+
+    def end_tool(self, is_error: bool) -> None:
+        block = self._current_tool
+        self._current_tool = None
+        if block is not None:
+            block.finish(is_error)
+            block.set_collapsed(self.tools_collapsed)
+            self._log.append(f"  ⎿  {'出错' if is_error else '完成'}")
+        self._scroll()
+
+    def end_turn(self) -> None:
+        self._flush_reply_stream()
+        self._current_tool = None
 
     def begin_question(self, prompt: str) -> None:
-        self._flush_stream()
+        self._log.append(prompt)
         question = self.query_one("#question", Static)
-        question.update(prompt)
+        question.update(f"需要你确认\n\n{prompt}\n\n在下方输入后按 Enter；直接 Enter 表示回车。")
         question.display = True
         self.mode = "answer"
         self.query_one("#input", PromptArea).focus()
 
     def begin_edit(self, initial: str, title: str) -> None:
-        self._flush_stream()
         self.push_screen(EditorScreen(initial, title), callback=self.port.edits.put)
 
     def set_busy(self, busy: bool) -> None:
-        hint = self.query_one("#hint", Static)
-        hint.update(
-            "模型任务进行中 · Esc 取消 · 已保存的内容会保留"
-            if busy
-            else "Enter 发送 · Ctrl-J 换行 · Esc 取消 · /help 帮助"
+        self.busy = busy
+        if busy:
+            self.busy_since = time.monotonic()
+        spinner = self.query_one("#spinner", Static)
+        spinner.display = busy
+        self.query_one("#hint-left", Static).update(BUSY_HINT if busy else IDLE_HINT)
+
+    def _tick(self) -> None:
+        if not self.busy:
+            return
+        elapsed = int(time.monotonic() - self.busy_since)
+        frame = SPINNER[(elapsed * 10 + int(time.monotonic() * 10)) % len(SPINNER)]
+        self.query_one("#spinner", Static).update(
+            f"{frame} {self.busy_verb}… ({elapsed}s · esc 中断)"
         )
 
     def set_status(self, text: str) -> None:
         self.status_text = text
-        self.query_one("#status", Static).update(text)
+        self.query_one("#hint-right", Static).update(text)
 
     def transcript_text(self) -> str:
-        return "\n".join(str(widget.content) for widget in self._transcript().query(Static))
+        """已记录的对话文本，含正在流式显示的部分；供测试与调试。"""
+        live = [self._reply_text]
+        if self._current_tool is not None:
+            live.append(self._current_tool.stream_text)
+        return "\n".join([*self._log, *(part for part in live if part)])
 
-    # ------------------------------------------------------------ 作者输入
+    # ------------------------------------------------------------ 作者输入与按键
 
     def on_prompt_area_submitted(self, message: PromptArea.Submitted) -> None:
         text = message.text.strip()
@@ -411,7 +608,8 @@ class WorkbenchApp(App[int]):
             question = self.query_one("#question", Static)
             question.display = False
             self.mode = "chat"
-            self._mount(Static(f"你：{text or '（回车）'}", classes="author", markup=False))
+            self._log.append(f"> {text or '（回车）'}")
+            self._mount(Static(f"> {text or '（回车）'}", classes="author", markup=False))
             self.port.answers.put(text)
             return
         if not text:
@@ -420,8 +618,27 @@ class WorkbenchApp(App[int]):
         self.inbox.put(text)
 
     def action_cancel_model(self) -> None:
-        self.port.cancel_requested.set()
-        self.query_one("#hint", Static).update("正在取消……")
+        if self.busy:
+            self.port.cancel_requested.set()
+            self.query_one("#hint-left", Static).update("正在中断……")
+
+    def action_interrupt(self) -> None:
+        """ctrl+c：模型工作中则中断；输入框有字则清空；否则退出。"""
+        if self.busy:
+            self.action_cancel_model()
+            return
+        area = self.query_one("#input", PromptArea)
+        if area.text:
+            area.clear()
+            return
+        self.action_quit_app()
+
+    def action_toggle_tools(self) -> None:
+        self.tools_collapsed = not self.tools_collapsed
+        for block in self._transcript().query(ToolBlock):
+            if block is not self._current_tool:
+                block.set_collapsed(self.tools_collapsed)
+        self._scroll()
 
     def action_editor_cancel_or_quit(self) -> None:
         if isinstance(self.screen, EditorScreen):
@@ -438,6 +655,10 @@ class WorkbenchApp(App[int]):
         # 无论如何退出（含测试中途失败），都让引擎线程结束阻塞等待并关闭作品。
         self.stopping.set()
         self.inbox.put(None)
+
+
+def _short(count: int) -> str:
+    return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
 
 
 def run(

@@ -112,6 +112,64 @@ def _bind_version(wb: Workbench, chapter: ChapterRecord, args: dict[str, Any]) -
     return True
 
 
+_TOOL_LABEL = {
+    "list_chapters": "章节列表",
+    "get_chapter": "读取章节",
+    "read_draft": "阅读正文",
+    "get_check": "查看检查",
+    "list_story_items": "想法与决定",
+    "history_status": "历史状态",
+    "create_chapter": "新建章节",
+    "select_chapter": "选章",
+    "set_plan": "记录计划",
+    "record_candidate": "记为候选",
+    "decide": "记录决定",
+    "manage_decisions": "整理决定",
+    "open_editor": "打开编辑器",
+    "reject_draft": "拒绝稿件",
+    "restore_version": "恢复历史版本",
+    "write_chapter": "写作",
+    "check_draft": "检查",
+    "diagnose_draft": "阅读诊断",
+    "analyze_impact": "影响分析",
+    "retry_failed": "重试失败阶段",
+    "consult_story": "查阅故事",
+    "adopt_draft": "采用",
+    "revalidate_chapter": "复核",
+    "mark_published": "标记发布",
+    "remediation_discussion": "补救讨论",
+    "record_foreshadow": "记录伏笔",
+    "manage_branches": "分支",
+}
+
+
+def describe_call(name: str, args: dict[str, Any] | None) -> str:
+    """工具调用的中文标签，形如「写作(第二章 · 正式)」；供界面显示。"""
+    from story_workbench.console.workbench import chinese_number
+
+    args = args or {}
+    parts: list[str] = []
+    chapter = args.get("chapter")
+    if isinstance(chapter, int) and not isinstance(chapter, bool):
+        parts.append(f"第{chinese_number(chapter)}章")
+    version = args.get("version")
+    if isinstance(version, int) and not isinstance(version, bool):
+        parts.append(f"第 {version} 稿")
+    mode = args.get("mode")
+    if mode == "formal":
+        parts.append("正式")
+    elif mode == "exploratory":
+        parts.append("试写")
+    for key in ("text", "feedback", "question", "requirements", "reason", "plot"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            short = value.strip().splitlines()[0]
+            parts.append(short if len(short) <= 24 else short[:24] + "…")
+            break
+    label = _TOOL_LABEL.get(name, name)
+    return f"{label}({' · '.join(parts)})" if parts else f"{label}()"
+
+
 # ---------------------------------------------------------------- 各工具
 
 
