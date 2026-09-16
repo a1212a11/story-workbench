@@ -65,7 +65,7 @@ from story_workbench.domain.records import (
     WorkcopyRecord,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # 共有字段说明：id TEXT 主键；created_at UTC ISO 文本；除 novel 外均有 novel_id。
 _SCHEMA_V1 = """
@@ -707,7 +707,22 @@ CREATE INDEX idx_publication_chapter ON publication(novel_id, chapter_id, create
 CREATE INDEX idx_foreshadow_chapter ON foreshadow_event(novel_id, chapter_id, created_at);
 """
 
-_MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3}
+# v4：run 增加 finished_at（任务进入终态的落库时刻）。用 ALTER TABLE 追加，
+# 历史行保持 NULL，不伪造结束时间。
+_SCHEMA_V4 = """
+ALTER TABLE run ADD COLUMN finished_at TEXT;
+"""
+
+_MIGRATIONS: dict[int, str] = {
+    1: _SCHEMA_V1,
+    2: _SCHEMA_V2,
+    3: _SCHEMA_V3,
+    4: _SCHEMA_V4,
+}
+
+_TERMINAL_RUN_STATUSES = frozenset(
+    {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.INTERRUPTED}
+)
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -773,6 +788,18 @@ def migrate(conn: sqlite3.Connection) -> int:
         )
     if current == SCHEMA_VERSION:
         return current
+    # 重建表（如 v3 的 run）要 DROP 被其他表引用的旧表，外键开启时会在有数据的库上失败。
+    # 按 SQLite 的表重建流程：事务外关闭外键，迁移完成后在同一事务内做外键复核，
+    # 有违规即回滚；无论成败都恢复外键开关。PRAGMA foreign_keys 在事务内无效，故放在事务外。
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        _migrate_in_transaction(conn, current)
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return SCHEMA_VERSION
+
+
+def _migrate_in_transaction(conn: sqlite3.Connection, current: int) -> None:
     with transaction(conn):
         for target in range(current + 1, SCHEMA_VERSION + 1):
             # executescript 会隐式提交，因此逐条执行以留在同一事务内。
@@ -802,8 +829,14 @@ def migrate(conn: sqlite3.Connection) -> int:
                         " VALUES (1, ?, ?, ?)",
                         (novel["id"], novel["id"], branch_id),
                     )
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise WorkbenchError(
+                ErrorCode.STORAGE_FAILED,
+                "数据库升级后的数据关系校验未通过，本次没有写入。",
+                {"violations": [tuple(row) for row in violations[:10]]},
+            )
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-    return SCHEMA_VERSION
 
 
 def integrity_ok(conn: sqlite3.Connection) -> bool:
@@ -1327,9 +1360,12 @@ def commit_mark_runs_interrupted(conn: sqlite3.Connection, novel_id: str) -> tup
         ).fetchall()
         ids = tuple(r["id"] for r in rows)
         if ids:
+            # finished_at 记录的是重新打开时的标记时刻，不是模型真实结束时间。
+            marked = now_utc()
             conn.executemany(
-                "UPDATE run SET status = 'interrupted' WHERE novel_id = ? AND id = ?",
-                [(novel_id, i) for i in ids],
+                "UPDATE run SET status = 'interrupted',"
+                " finished_at = COALESCE(finished_at, ?) WHERE novel_id = ? AND id = ?",
+                [(marked, novel_id, i) for i in ids],
             )
     return ids
 
@@ -1345,9 +1381,12 @@ def commit_mark_project_runs_interrupted(conn: sqlite3.Connection) -> tuple[str,
         ).fetchall()
         ids = tuple(row["id"] for row in rows)
         if rows:
+            # finished_at 记录的是重新打开时的标记时刻，不是模型真实结束时间。
+            marked = now_utc()
             conn.executemany(
-                "UPDATE run SET status = 'interrupted' WHERE novel_id = ? AND id = ?",
-                [(row["novel_id"], row["id"]) for row in rows],
+                "UPDATE run SET status = 'interrupted',"
+                " finished_at = COALESCE(finished_at, ?) WHERE novel_id = ? AND id = ?",
+                [(marked, row["novel_id"], row["id"]) for row in rows],
             )
     return ids
 
@@ -1478,18 +1517,26 @@ def commit_run(
     input_version_id: str | None = None,
     retry_of_id: str | None = None,
     request_json: str = "{}",
+    provider: str | None = None,
+    model: str | None = None,
 ) -> str:
-    """建立一条任务阶段记录。流保存、取消与迟到保护在 G04 补充。"""
+    """建立一条任务阶段记录；provider/model 记录本次请求使用的供应商与模型名。
+
+    建立时已是终态的记录，finished_at 等于 created_at。
+    """
     run_id = new_id()
+    created = now_utc()
+    finished = created if status in _TERMINAL_RUN_STATUSES else None
     with transaction(conn):
         conn.execute(
             "INSERT INTO run (id, novel_id, created_at, chapter_id, task, basis_id,"
             " input_version_id, source_message_id, retry_of_id, status, template_version,"
-            " request_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " request_json, provider, model, finished_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 novel_id,
-                now_utc(),
+                created,
                 chapter_id,
                 task.value,
                 basis_id,
@@ -1499,6 +1546,9 @@ def commit_run(
                 status.value,
                 template_version,
                 request_json,
+                provider,
+                model,
+                finished,
             ),
         )
     return run_id
@@ -1521,22 +1571,18 @@ def commit_run_status(
         if row is None:
             raise WorkbenchError(ErrorCode.NOT_FOUND, "任务不存在。", {"run_id": run_id})
         current = RunStatus(row["status"])
-        terminal = {
-            RunStatus.SUCCEEDED,
-            RunStatus.FAILED,
-            RunStatus.CANCELLED,
-            RunStatus.INTERRUPTED,
-        }
-        if current in terminal and status is not current:
+        if current in _TERMINAL_RUN_STATUSES and status is not current:
             raise WorkbenchError(
                 ErrorCode.INVALID_INPUT,
                 "任务已结束，不能改变状态；重试请新建任务。",
                 {"run_id": run_id, "status": current.value},
             )
+        finished = now_utc() if status in _TERMINAL_RUN_STATUSES else None
         conn.execute(
             "UPDATE run SET status = ?, error_code = COALESCE(?, error_code),"
-            " usage_json = COALESCE(?, usage_json) WHERE novel_id = ? AND id = ?",
-            (status.value, error_code, usage_json, novel_id, run_id),
+            " usage_json = COALESCE(?, usage_json), finished_at = COALESCE(finished_at, ?)"
+            " WHERE novel_id = ? AND id = ?",
+            (status.value, error_code, usage_json, finished, novel_id, run_id),
         )
 
 
@@ -2648,6 +2694,9 @@ def get_run(conn: sqlite3.Connection, novel_id: str, run_id: str) -> RunRecord:
         usage_json=row["usage_json"],
         error_code=row["error_code"],
         created_at=row["created_at"],
+        provider=row["provider"],
+        model=row["model"],
+        finished_at=row["finished_at"],
     )
 
 
@@ -2709,8 +2758,9 @@ def commit_run_result(
         )
         conn.execute(
             "UPDATE run SET status = 'succeeded', result_version_id = ?, partial_text = ?,"
-            " usage_json = COALESCE(?, usage_json) WHERE novel_id = ? AND id = ?",
-            (result.version_id, body, usage_json, novel_id, run_id),
+            " usage_json = COALESCE(?, usage_json), finished_at = COALESCE(finished_at, ?)"
+            " WHERE novel_id = ? AND id = ?",
+            (result.version_id, body, usage_json, now_utc(), novel_id, run_id),
         )
         return result
 
@@ -2719,9 +2769,9 @@ def commit_run_cancel(conn: sqlite3.Connection, novel_id: str, run_id: str) -> b
     """取消先落库：只有 pending/running 可取消；返回是否真的改变了状态。"""
     with transaction(conn):
         cur = conn.execute(
-            "UPDATE run SET status = 'cancelled' WHERE novel_id = ? AND id = ?"
-            " AND status IN ('pending', 'running')",
-            (novel_id, run_id),
+            "UPDATE run SET status = 'cancelled', finished_at = COALESCE(finished_at, ?)"
+            " WHERE novel_id = ? AND id = ? AND status IN ('pending', 'running')",
+            (now_utc(), novel_id, run_id),
         )
         return cur.rowcount == 1
 
@@ -3011,8 +3061,8 @@ def commit_impact_resolution(
         run_id = new_id()
         conn.execute(
             "INSERT INTO run (id, novel_id, created_at, chapter_id, task, basis_id,"
-            " input_version_id, source_message_id, status, template_version, request_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " input_version_id, source_message_id, status, template_version, request_json,"
+            " finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 novel_id,
@@ -3025,6 +3075,7 @@ def commit_impact_resolution(
                 RunStatus.SUCCEEDED.value,
                 "impact-rebase",
                 json.dumps({"impact_id": impact_id, "analysis_id": analysis_id}),
+                created,
             ),
         )
         check_id = new_id()
@@ -3967,7 +4018,8 @@ def commit_branch_from_adoption(
                 "INSERT INTO run (id, novel_id, created_at, chapter_id, task, basis_id,"
                 " input_version_id, source_message_id, retry_of_id, status, partial_text,"
                 " result_version_id, provider, model, template_version, request_json, usage_json,"
-                " error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " error_code, finished_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     new_novel_id,
@@ -3988,6 +4040,7 @@ def commit_branch_from_adoption(
                     old_run["request_json"],
                     old_run["usage_json"],
                     old_run["error_code"],
+                    old_run["finished_at"],
                 ),
             )
             check_id = new_id()

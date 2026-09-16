@@ -483,6 +483,8 @@ def write_chapter(
         source_message_id=source_message_id,
         template_version=prompts.TEMPLATE_VERSION,
         status=RunStatus.RUNNING,
+        provider=config.provider,
+        model=config.options.model,
         basis_id=basis_id,
         input_version_id=input_version_id,
         retry_of_id=retry_of,
@@ -613,6 +615,8 @@ def diagnose_draft(
         source_message_id=author_message_id,
         template_version=prompts.TEMPLATE_VERSION,
         status=RunStatus.RUNNING,
+        provider=config.provider,
+        model=config.options.model,
         basis_id=basis_id,
         input_version_id=target.version_id,
         request_json=_request_json(request, {"feedback": author_feedback}),
@@ -697,6 +701,8 @@ def analyze_impact(
         source_message_id=source_message_id,
         template_version=prompts.TEMPLATE_VERSION,
         status=RunStatus.RUNNING,
+        provider=config.provider,
+        model=config.options.model,
         basis_id=basis_id,
         request_json=_request_json(request, {"source_adoption_id": source_adoption_id}),
     )
@@ -856,6 +862,8 @@ def check_draft(
         source_message_id=source_message_id,
         template_version=prompts.TEMPLATE_VERSION,
         status=RunStatus.RUNNING,
+        provider=config.provider,
+        model=config.options.model,
         basis_id=basis_id,
         input_version_id=target.version_id,
         retry_of_id=retry_of,
@@ -968,6 +976,8 @@ def discuss(
         source_message_id=author_message_id,
         template_version=prompts.TEMPLATE_VERSION,
         status=RunStatus.RUNNING,
+        provider=config.provider,
+        model=config.options.model,
         basis_id=basis_id,
         request_json=_request_json(request),
     )
@@ -990,7 +1000,12 @@ def discuss(
     if final is not EventKind.COMPLETED or run.status is not RunStatus.RUNNING:
         if run.status is RunStatus.RUNNING:
             database.commit_run_status(
-                project.conn, project.novel_id, run_id, RunStatus.FAILED, error_code=final.value
+                project.conn,
+                project.novel_id,
+                run_id,
+                RunStatus.FAILED,
+                error_code=final.value,
+                usage_json=usage_json,
             )
         raise WorkbenchError(
             ErrorCode.MODEL_FAILED,

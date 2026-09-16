@@ -367,6 +367,9 @@ def test_cancel_is_recorded_first_and_late_chunks_do_not_update_draft(project):
     run = database.get_run(project.conn, project.novel_id, exc.value.details["run_id"])
     assert run.partial_text == "第一块"  # 只有已落库的块可恢复
     assert run.status is RunStatus.CANCELLED and run.result_version_id is None
+    assert run.finished_at is not None  # 取消落库时刻
+    database.commit_run_status(project.conn, project.novel_id, run.id, RunStatus.CANCELLED)
+    assert database.get_run(project.conn, project.novel_id, run.id).finished_at == run.finished_at
     assert authoring.list_versions(project, ch1.id) == []
     assert authoring.get_chapter(project, ch1.id).current_draft_id is None
     # 取消后没有在途任务，可以再次生成
@@ -404,7 +407,24 @@ def test_truncated_stream_is_failed_not_completed(project):
     assert exc.value.details["status"] == "truncated"
     run = database.get_run(project.conn, project.novel_id, exc.value.details["run_id"])
     assert run.status is RunStatus.FAILED and run.partial_text == "半截"
+    assert (run.provider, run.model) == ("fixed", "fixed")
+    assert run.finished_at is not None and run.finished_at >= run.created_at
     assert authoring.list_versions(project, ch1.id) == []
+
+
+def test_truncated_discussion_is_failed_and_keeps_usage(project):
+    ch1, _ = plan_chapter(project, 1, None, None)
+    clients = generation.Clients(
+        stream=fixed_stream(["半句"], truncated=True), complete=fixed_complete("{}")
+    )
+    with pytest.raises(WorkbenchError) as exc:
+        generation.discuss(project, ch1.id, "第一章从哪写起？", clients, CONFIG)
+    assert exc.value.code is ErrorCode.MODEL_FAILED
+    run = database.get_run(project.conn, project.novel_id, exc.value.details["run_id"])
+    assert run.status is RunStatus.FAILED and run.error_code == "truncated"
+    assert run.usage_json is not None  # 失败请求也保留供应商返回的用量
+    assert (run.provider, run.model) == ("fixed", "fixed")
+    assert run.finished_at is not None
 
 
 def test_edit_during_generation_keeps_result_as_historical_draft(project):
@@ -957,9 +977,11 @@ def test_t12_diagnosis_provider_error_marks_run_failed(project):
         )
     assert exc.value.code is ErrorCode.MODEL_FAILED
     row = project.conn.execute(
-        "SELECT status, error_code FROM run WHERE task = 'diagnose' ORDER BY rowid DESC LIMIT 1"
+        "SELECT status, error_code, provider, model, finished_at FROM run"
+        " WHERE task = 'diagnose' ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
-    assert tuple(row) == ("failed", "MODEL_FAILED")
+    assert tuple(row)[:4] == ("failed", "MODEL_FAILED", "fixed", "fixed")
+    assert row["finished_at"] is not None
 
 
 def test_retry_failed_trial_revision_keeps_selected_source_and_candidate_status(project):

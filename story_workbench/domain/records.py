@@ -564,6 +564,9 @@ class RunRecord:
     usage_json: str | None
     error_code: str | None
     created_at: str
+    provider: str | None = None
+    model: str | None = None
+    finished_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

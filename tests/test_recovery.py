@@ -284,6 +284,7 @@ def test_interrupted_generation_is_reported_and_retry_is_new_run(project_dir):
         assert notice.interrupted_run_ids == (run_id,)
         run = database.get_run(reopened.conn, reopened.novel_id, run_id)
         assert run.status is RunStatus.INTERRUPTED and run.partial_text == "写了一半"
+        assert run.finished_at is not None  # 重新打开时的标记时刻
         assert authoring.list_versions(reopened, ch2.id) == []  # 未落库为版本
         # 迟到的块不能再写入中断的任务
         assert not database.commit_run_chunk(reopened.conn, reopened.novel_id, run_id, "迟到")
@@ -296,6 +297,8 @@ def test_interrupted_generation_is_reported_and_retry_is_new_run(project_dir):
         result = generation.retry_run(reopened, run_id, msg2, clients, config)
         new_run = database.get_run(reopened.conn, reopened.novel_id, result.run_id)
         assert new_run.retry_of_id == run_id and new_run.status is RunStatus.SUCCEEDED
+        assert (new_run.provider, new_run.model) == ("fixed", "fixed")
+        assert new_run.finished_at is not None and new_run.finished_at >= new_run.created_at
         assert [v.body for v in authoring.list_versions(reopened, ch2.id)] == [body]
     finally:
         reopened.close()

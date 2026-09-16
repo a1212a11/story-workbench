@@ -115,6 +115,19 @@ def local_time(created_at: str) -> str:
     return datetime.fromisoformat(created_at).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
+def elapsed_seconds(started_at: str, finished_at: str) -> int:
+    """两个记录时间戳之间的整秒数，非负。"""
+    delta = datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
+    return max(0, round(delta.total_seconds()))
+
+
+_RUN_STATUS_LABEL = {
+    RunStatus.FAILED: "失败",
+    RunStatus.CANCELLED: "已取消",
+    RunStatus.INTERRUPTED: "上次退出时中断",
+}
+
+
 def draft_label(
     chapter: ChapterRecord, version: VersionRecord, adopted_version_id: str | None = None
 ) -> str:
@@ -1287,6 +1300,14 @@ class Workbench:
                     "检查（只重新检查原稿）" if run.task is TaskKind.INSPECT else "写作（重新生成）"
                 )
                 label += f" · {local_time(run.created_at)}"
+                status_text = _RUN_STATUS_LABEL.get(run.status)
+                if status_text:
+                    label += f" · {status_text}"
+                if run.model:
+                    label += f" · {run.model}" + (f"（{run.provider}）" if run.provider else "")
+                # 中断时间是重新打开时的标记时刻，不能当作用时。
+                if run.finished_at and run.status is not RunStatus.INTERRUPTED:
+                    label += f" · 用时 {elapsed_seconds(run.created_at, run.finished_at)} 秒"
                 if run.input_version_id:
                     label += f" · {first_line(self.version(chapter, run.input_version_id).body)}"
             self.say(f"  {index}. {label}")

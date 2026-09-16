@@ -149,6 +149,7 @@ def test_open_project_interrupts_runs_on_all_branches(project, project_dir):
         assert run_id in notice.interrupted_run_ids
         run = database.get_run(reopened.conn, branch.novel_id, run_id)
         assert run.status is RunStatus.INTERRUPTED
+        assert run.finished_at is not None  # 重新打开时的标记时刻
     finally:
         reopened.close()
 
@@ -890,17 +891,79 @@ def test_migrate_v2_to_v3_with_data_preserves_integrity():
     conn = _new_raw_conn()
     _apply_schema(conn, 2)
     novel_id = database.new_id()
+    chapter_id, message_id, run_id, version_id = (database.new_id() for _ in range(4))
+    created = database.now_utc()
     conn.execute(
         "INSERT INTO novel (id, created_at, title, design_revision) VALUES (?, ?, ?, 0)",
-        (novel_id, database.now_utc(), "旧库"),
+        (novel_id, created, "旧库"),
+    )
+    # 真实库里 version/check_result 引用 run；重建 run 时外键开启会让 DROP 失败。
+    conn.execute(
+        "INSERT INTO chapter (id, novel_id, created_at, number) VALUES (?, ?, ?, 1)",
+        (chapter_id, novel_id, created),
+    )
+    conn.execute(
+        "INSERT INTO message (id, novel_id, created_at, role, body, chapter_id)"
+        " VALUES (?, ?, ?, 'author', '写', ?)",
+        (message_id, novel_id, created, chapter_id),
+    )
+    conn.execute(
+        "INSERT INTO run (id, novel_id, created_at, chapter_id, task, source_message_id,"
+        " status, template_version) VALUES (?, ?, ?, ?, 'generate', ?, 'succeeded', 'old')",
+        (run_id, novel_id, created, chapter_id, message_id),
+    )
+    conn.execute(
+        "INSERT INTO version (id, novel_id, created_at, chapter_id, body, content_hash,"
+        " origin, run_id) VALUES (?, ?, ?, ?, '正文', 'h', 'generated', ?)",
+        (version_id, novel_id, created, chapter_id, run_id),
     )
     conn.commit()
 
-    assert database.migrate(conn) == 3
+    assert database.migrate(conn) == database.SCHEMA_VERSION
 
     state = conn.execute("SELECT main_novel_id, active_novel_id FROM project_state").fetchone()
     assert (state["main_novel_id"], state["active_novel_id"]) == (novel_id, novel_id)
     assert conn.execute("SELECT COUNT(*) FROM branch").fetchone()[0] == 1
+    assert (
+        conn.execute("SELECT run_id FROM version WHERE id = ?", (version_id,)).fetchone()[0]
+        == run_id
+    )
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1  # 迁移后外键恢复开启
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert database.integrity_ok(conn)
+
+
+def test_migrate_v3_to_v4_keeps_historical_runs_unfilled():
+    conn = _new_raw_conn()
+    _apply_schema(conn, 3)
+    novel_id = database.new_id()
+    message_id = database.new_id()
+    run_id = database.new_id()
+    created = database.now_utc()
+    conn.execute(
+        "INSERT INTO novel (id, created_at, title, design_revision) VALUES (?, ?, ?, 0)",
+        (novel_id, created, "旧库"),
+    )
+    conn.execute(
+        "INSERT INTO message (id, novel_id, created_at, role, body)"
+        " VALUES (?, ?, ?, 'author', '写')",
+        (message_id, novel_id, created),
+    )
+    conn.execute(
+        "INSERT INTO run (id, novel_id, created_at, task, source_message_id, status,"
+        " template_version) VALUES (?, ?, ?, 'discuss', ?, 'succeeded', 'old')",
+        (run_id, novel_id, created, message_id),
+    )
+    conn.commit()
+
+    assert database.migrate(conn) == 4
+
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(run)")}
+    assert "finished_at" in columns
+    row = conn.execute(
+        "SELECT provider, model, finished_at FROM run WHERE id = ?", (run_id,)
+    ).fetchone()
+    assert tuple(row) == (None, None, None)  # 历史记录不回填结束时间
     assert database.integrity_ok(conn)
 
 
@@ -1030,6 +1093,8 @@ def test_branch_copies_published_adoption_review_closure_with_issue_resolution(p
         status=RunStatus.SUCCEEDED,
         basis_id=basis_id,
         input_version_id=saved1.version_id,
+        provider="fixed",
+        model="fixed",
     )
     issue = IssueInput(
         kind=IssueKind.NEW_PERSISTENT_SETTING,
@@ -1089,6 +1154,14 @@ def test_branch_copies_published_adoption_review_closure_with_issue_resolution(p
 
     branch = projects.create_branch(project, "复制审阅闭包", adopted2.adoption_id)
     projects.switch_branch(project, branch.id)
+
+    copied_run = project.conn.execute(
+        "SELECT provider, model, finished_at, created_at FROM run"
+        " WHERE novel_id = ? AND task = 'inspect' ORDER BY created_at LIMIT 1",
+        (branch.novel_id,),
+    ).fetchone()
+    assert (copied_run["provider"], copied_run["model"]) == ("fixed", "fixed")
+    assert copied_run["finished_at"] == copied_run["created_at"]  # 建立即终态
 
     copied_publication = adoption.list_publications(project)[0]
     assert copied_publication.published_at == publication.published_at
