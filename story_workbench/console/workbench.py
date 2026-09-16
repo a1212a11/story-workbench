@@ -160,6 +160,7 @@ class Workbench:
         self.config = config
         self.chapter: ChapterRecord | None = None
         self.shown: Shown | None = None
+        self.last_failure: WorkbenchError | None = None
 
     # ------------------------------------------------------------ 输入输出
 
@@ -176,9 +177,15 @@ class Workbench:
         return self.port.edit(initial, title)
 
     def run_model(self, operation, *args, **kwargs):
-        return self.port.run_model(
-            self.project, self.clients, self.config, operation, *args, **kwargs
-        )
+        """执行模型任务；失败保留在 last_failure，供工具层判断本轮是否已有付费失败。"""
+        self.last_failure = None
+        try:
+            return self.port.run_model(
+                self.project, self.clients, self.config, operation, *args, **kwargs
+            )
+        except WorkbenchError as exc:
+            self.last_failure = exc
+            raise
 
     def refresh(self) -> ChapterRecord | None:
         if self.chapter is not None:
@@ -260,6 +267,70 @@ class Workbench:
             self.say(f"  {chapter.number:>3}. {chapter_label(chapter)} · {' · '.join(marks)}")
         return True
 
+    def select_chapter(self, number: int) -> ChapterRecord | None:
+        """按章号选中章节；没有则说明并返回 None。"""
+        by_number = {c.number: c for c in authoring.list_chapters(self.project)}
+        chapter = by_number.get(number)
+        if chapter is None:
+            self.say(f"没有第{chinese_number(number)}章。")
+            return None
+        if self.chapter is None or self.chapter.id != chapter.id:
+            self.shown = None
+        self.chapter = chapter
+        return chapter
+
+    def version_by_index(self, chapter: ChapterRecord, index: int) -> VersionRecord | None:
+        """稿件序号与 describe_chapter / restore 列表一致（按时间先后从 1 起）。"""
+        versions = authoring.list_versions(self.project, chapter.id)
+        if not 1 <= index <= len(versions):
+            self.say(f"{chapter_label(chapter)}没有第 {index} 号稿件。")
+            return None
+        return versions[index - 1]
+
+    def describe_chapter(self, chapter: ChapterRecord) -> None:
+        """章节概况：计划、状态、稿件清单（带序号）与当前稿的检查摘要。"""
+        chapter = authoring.get_chapter(self.project, chapter.id)
+        label = chapter_label(chapter)
+        marks = ["有正文" if chapter.current_draft_id else "还没有正文"]
+        if chapter.adopted_id:
+            marks.append("已采用")
+            if chapter.needs_review:
+                marks.append("待复核")
+            elif chapter.current_snapshot_id is None:
+                marks.append("故事状态待更新")
+        self.say(f"{label} · {' · '.join(marks)}")
+        plan = authoring.get_current_plan(self.project, chapter.id)
+        self.say(f"本章剧情：{(plan.plot if plan else None) or '（暂不确定）'}")
+        self.say(f"本章结尾状态：{(plan.ending if plan else None) or '（暂不确定）'}")
+        versions = authoring.list_versions(self.project, chapter.id)
+        rejected = database.list_rejected_version_ids(self.project.conn, self.project.novel_id)
+        adopted = self.adopted_version_id(chapter)
+        if not versions:
+            self.say("稿件：还没有。")
+        else:
+            self.say("稿件（序号用于指定某一稿）：")
+            for index, version in enumerate(versions, start=1):
+                items = [local_time(version.created_at), _ORIGIN_LABEL[version.origin]]
+                if version.id == chapter.current_draft_id:
+                    items.append("现在的编辑稿")
+                if version.id == adopted:
+                    items.append("已采用")
+                if version.id in rejected:
+                    items.append("已拒绝")
+                items.append(first_line(version.body))
+                self.say(f"  {index:>3}. {' · '.join(items)}")
+        current = self.current_draft(chapter)
+        check = self.latest_check(current) if current else None
+        if current is None:
+            return
+        if check is None:
+            self.say("现在的编辑稿还没有检查。")
+        else:
+            self.say(
+                f"现在的编辑稿的最新检查：{len(check.issues)} 条问题；"
+                f"已检查范围：{'、'.join(check.coverage_checked) or '未说明'}。"
+            )
+
     def new_chapter(self) -> bool:
         chapters = authoring.list_chapters(self.project)
         number = max((c.number for c in chapters), default=0) + 1
@@ -286,9 +357,9 @@ class Workbench:
 
     # ------------------------------------------------------------ 讨论、计划、想法与决定
 
-    def discuss(self) -> bool:
+    def discuss(self, text: str | None = None) -> bool:
         chapter = self.refresh()
-        text = self.ask("你说：")
+        text = text if text is not None else self.ask("你说：")
         if not text:
             return True
         if chapter is None or self.clients is None or self.config is None:
@@ -308,13 +379,14 @@ class Workbench:
         self.emit("\n")
         return True
 
-    def set_plan(self) -> bool:
+    def set_plan(self, plot: str | None = None, ending: str | None = None) -> bool:
         chapter = self.require_chapter()
         if chapter is None:
             return True
-        self.say(f"为{chapter_label(chapter)}写下剧情与结尾状态；留空表示这一项暂不确定。")
-        plot = self.ask("本章剧情：")
-        ending = self.ask("本章结尾状态：")
+        if plot is None and ending is None:
+            self.say(f"为{chapter_label(chapter)}写下剧情与结尾状态；留空表示这一项暂不确定。")
+        plot = plot if plot is not None else self.ask("本章剧情：")
+        ending = ending if ending is not None else self.ask("本章结尾状态：")
         if not plot and not ending:
             self.say("两项都为空，计划没有改变。")
             return True
@@ -335,9 +407,9 @@ class Workbench:
         self.refresh()
         self.say(f"{chapter_label(chapter)}的剧情与结尾已记录（第 {plan.revision} 次）。")
 
-    def record_candidate(self) -> bool:
+    def record_candidate(self, text: str | None = None) -> bool:
         chapter = self.refresh()
-        text = self.ask("候选想法（一句话）：")
+        text = text if text is not None else self.ask("候选想法（一句话）：")
         if not text:
             return True
         chapter_id = chapter.id if chapter else None
@@ -354,7 +426,7 @@ class Workbench:
         self.say("已记为候选想法。候选不会自动成为决定或正式事实；用 f 可以确定它。")
         return True
 
-    def decide(self) -> bool:
+    def decide(self, text: str | None = None) -> bool:
         chapter = self.refresh()
         chapter_id = chapter.id if chapter else None
         items = [
@@ -362,11 +434,14 @@ class Workbench:
             for item in authoring.list_story_items(self.project)
             if item.lifecycle in (Lifecycle.DRAFT, Lifecycle.CANDIDATE, Lifecycle.DECIDED)
         ]
-        if items:
-            self.say("已有的想法与决定：")
-            for index, item in enumerate(items, start=1):
-                self.say(f"  {index:>3}. {_LIFECYCLE_LABEL[item.lifecycle]} · {item.body}")
-        answer = self.ask("要确定哪一条（输入序号），或直接写下新的决定（回车取消）：")
+        if text is None:
+            if items:
+                self.say("已有的想法与决定：")
+                for index, item in enumerate(items, start=1):
+                    self.say(f"  {index:>3}. {_LIFECYCLE_LABEL[item.lifecycle]} · {item.body}")
+            answer = self.ask("要确定哪一条（输入序号），或直接写下新的决定（回车取消）：")
+        else:
+            answer = text.strip()
         if not answer:
             return True
         if answer.isdigit() and 1 <= int(answer) <= len(items):
@@ -427,7 +502,9 @@ class Workbench:
     def explore(self) -> bool:
         return self.generate(WriteMode.EXPLORATORY)
 
-    def generate(self, mode: WriteMode) -> bool:
+    def generate(
+        self, mode: WriteMode, request: str | None = None, assumption: str | None = None
+    ) -> bool:
         chapter = self.require_chapter()
         if chapter is None:
             return True
@@ -451,7 +528,8 @@ class Workbench:
                     return True
                 self.save_plan(chapter, plot, ending)
                 chapter = self.refresh() or chapter
-            request = self.ask("这次写作还有什么要求（回车直接开始）：")
+            if request is None:
+                request = self.ask("这次写作还有什么要求（回车直接开始）：")
             text = f"按当前剧情与结尾写{label}。" + (f"要求：{request}" if request else "")
         else:
             gaps = [name for name, value in (("剧情", plot), ("结尾状态", ending)) if not value]
@@ -461,7 +539,8 @@ class Workbench:
                 )
             else:
                 self.say(f"试写：{label}已有剧情与结尾，这次生成只作探索。")
-            assumption = self.ask("这次试写的假设（一句话，回车留空）：")
+            if assumption is None:
+                assumption = self.ask("这次试写的假设（一句话，回车留空）：")
             assumptions = (assumption,) if assumption else ()
             text = f"试写{label}。" + (f"假设：{assumption}" if assumption else "")
         message_id = authoring.record_message(self.project, text, chapter.id)
@@ -573,7 +652,7 @@ class Workbench:
 
     # ------------------------------------------------------------ 阅读诊断与试改
 
-    def diagnose(self) -> bool:
+    def diagnose(self, feedback: str | None = None) -> bool:
         chapter = self.require_chapter()
         if chapter is None or not self.model_ready("阅读诊断"):
             return True
@@ -583,7 +662,8 @@ class Workbench:
             return True
         current_id = chapter.current_draft_id
         self.display_draft(chapter, version, explicit=True)
-        feedback = self.ask("读起来哪里不满意，或想重点看什么（回车取消）：")
+        if feedback is None:
+            feedback = self.ask("读起来哪里不满意，或想重点看什么（回车取消）：")
         if not feedback:
             return True
         target = Target(self.project.novel_id, chapter.id, version.id)
@@ -1289,7 +1369,7 @@ class Workbench:
 
     # ------------------------------------------------------------ 拒绝
 
-    def reject(self) -> bool:
+    def reject(self, reason: str | None = None) -> bool:
         chapter = self.require_chapter()
         if chapter is None:
             return True
@@ -1301,7 +1381,8 @@ class Workbench:
             self.say("这一稿已经采用，不能标记拒绝；要更换正式正文，请采用另一稿。")
             return True
         self.say(f"要拒绝的是：{draft_label(chapter, target)} · {first_line(target.body)}")
-        reason = self.ask("拒绝的原因（回车留空）：")
+        if reason is None:
+            reason = self.ask("拒绝的原因（回车留空）：")
         message_id = authoring.record_message(self.project, f"不要这版。{reason}", chapter.id)
         authoring.reject_draft(
             self.project, Target(self.project.novel_id, chapter.id, target.id), message_id, reason
@@ -1403,7 +1484,7 @@ class Workbench:
         self.say(f"已把这段文字另存为恢复文件：{self.project.root / path}")
         return text
 
-    def restore(self) -> bool:
+    def restore(self, index: int | None = None) -> bool:
         chapter = self.require_chapter()
         if chapter is None:
             return True
@@ -1413,14 +1494,16 @@ class Workbench:
             return True
         adopted = self.adopted_version_id(chapter)
         self.say(f"{chapter_label(chapter)}的历史版本：")
-        for index, version in enumerate(versions, start=1):
+        for number, version in enumerate(versions, start=1):
             marks = [local_time(version.created_at), _ORIGIN_LABEL[version.origin]]
             if version.id == chapter.current_draft_id:
                 marks.append("现在的编辑稿")
             if version.id == adopted:
                 marks.append("已采用")
-            self.say(f"  {index:>3}. {' · '.join(marks)}")
-        answer = self.ask("恢复第几个版本（输入序号，回车取消）：")
+            self.say(f"  {number:>3}. {' · '.join(marks)}")
+        answer = (
+            str(index) if index is not None else self.ask("恢复第几个版本（输入序号，回车取消）：")
+        )
         if not answer:
             return True
         if not answer.isdigit() or not 1 <= int(answer) <= len(versions):

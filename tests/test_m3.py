@@ -956,7 +956,7 @@ def test_migrate_v3_to_v4_keeps_historical_runs_unfilled():
     )
     conn.commit()
 
-    assert database.migrate(conn) == 4
+    assert database.migrate(conn) == database.SCHEMA_VERSION
 
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(run)")}
     assert "finished_at" in columns
@@ -1308,3 +1308,61 @@ def test_impact_analysis_evidence_persists_for_all_classes_and_validates_target(
         )
     assert bad_span.value.code.value == "INVALID_INPUT"
     assert project.conn.execute("SELECT COUNT(*) FROM impact_analysis").fetchone()[0] == before
+
+
+def test_migrate_v4_to_v5_keeps_runs_and_allows_assist_task():
+    conn = _new_raw_conn()
+    _apply_schema(conn, 4)
+    novel_id, chapter_id, message_id, run_id, version_id = (database.new_id() for _ in range(5))
+    created = database.now_utc()
+    conn.execute(
+        "INSERT INTO novel (id, created_at, title, design_revision) VALUES (?, ?, ?, 0)",
+        (novel_id, created, "旧库"),
+    )
+    conn.execute(
+        "INSERT INTO chapter (id, novel_id, created_at, number) VALUES (?, ?, ?, 1)",
+        (chapter_id, novel_id, created),
+    )
+    conn.execute(
+        "INSERT INTO message (id, novel_id, created_at, role, body, chapter_id)"
+        " VALUES (?, ?, ?, 'author', '写', ?)",
+        (message_id, novel_id, created, chapter_id),
+    )
+    conn.execute(
+        "INSERT INTO run (id, novel_id, created_at, chapter_id, task, source_message_id,"
+        " status, template_version, finished_at, provider, model)"
+        " VALUES (?, ?, ?, ?, 'generate', ?, 'succeeded', 'old', ?, 'deepseek', 'deepseek-flash')",
+        (run_id, novel_id, created, chapter_id, message_id, created),
+    )
+    conn.execute(
+        "INSERT INTO version (id, novel_id, created_at, chapter_id, body, content_hash,"
+        " origin, run_id) VALUES (?, ?, ?, ?, '正文', 'h', 'generated', ?)",
+        (version_id, novel_id, created, chapter_id, run_id),
+    )
+    # v4 的 CHECK 不允许 assist
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO run (id, novel_id, created_at, task, source_message_id, status,"
+            " template_version) VALUES (?, ?, ?, 'assist', ?, 'succeeded', 'a')",
+            (database.new_id(), novel_id, created, message_id),
+        )
+    conn.commit()
+
+    assert database.migrate(conn) == 5
+
+    row = conn.execute(
+        "SELECT provider, model, finished_at FROM run WHERE id = ?", (run_id,)
+    ).fetchone()
+    assert tuple(row) == ("deepseek", "deepseek-flash", created)
+    assert (
+        conn.execute("SELECT run_id FROM version WHERE id = ?", (version_id,)).fetchone()[0]
+        == run_id
+    )
+    conn.execute(
+        "INSERT INTO run (id, novel_id, created_at, task, source_message_id, status,"
+        " template_version) VALUES (?, ?, ?, 'assist', ?, 'succeeded', 'a')",
+        (database.new_id(), novel_id, created, message_id),
+    )
+    conn.commit()
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert database.integrity_ok(conn)

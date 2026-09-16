@@ -65,7 +65,7 @@ from story_workbench.domain.records import (
     WorkcopyRecord,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # 共有字段说明：id TEXT 主键；created_at UTC ISO 文本；除 novel 外均有 novel_id。
 _SCHEMA_V1 = """
@@ -713,11 +713,56 @@ _SCHEMA_V4 = """
 ALTER TABLE run ADD COLUMN finished_at TEXT;
 """
 
+# v5：run.task 允许 assist（对话助手的调度调用）。CHECK 约束不能 ALTER，按 v3 方式重建；
+# 迁移事务外已关闭外键，末尾复核。
+_SCHEMA_V5 = """
+CREATE TABLE run_v5 (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL REFERENCES novel(id),
+    created_at TEXT NOT NULL,
+    chapter_id TEXT,
+    task TEXT NOT NULL CHECK (task IN (
+        'discuss', 'generate', 'inspect', 'impact', 'diagnose', 'recompute', 'assist')),
+    basis_id TEXT,
+    input_version_id TEXT,
+    source_message_id TEXT NOT NULL,
+    retry_of_id TEXT,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+    partial_text TEXT NOT NULL DEFAULT '',
+    result_version_id TEXT,
+    provider TEXT,
+    model TEXT,
+    template_version TEXT NOT NULL,
+    request_json TEXT NOT NULL DEFAULT '{}',
+    usage_json TEXT,
+    error_code TEXT,
+    finished_at TEXT,
+    UNIQUE (novel_id, id),
+    FOREIGN KEY (novel_id, chapter_id) REFERENCES chapter(novel_id, id),
+    FOREIGN KEY (novel_id, basis_id) REFERENCES basis(novel_id, id),
+    FOREIGN KEY (novel_id, input_version_id) REFERENCES version(novel_id, id),
+    FOREIGN KEY (novel_id, source_message_id) REFERENCES message(novel_id, id),
+    FOREIGN KEY (novel_id, retry_of_id) REFERENCES run_v5(novel_id, id),
+    FOREIGN KEY (novel_id, result_version_id) REFERENCES version(novel_id, id)
+);
+INSERT INTO run_v5 (id, novel_id, created_at, chapter_id, task, basis_id, input_version_id,
+    source_message_id, retry_of_id, status, partial_text, result_version_id, provider, model,
+    template_version, request_json, usage_json, error_code, finished_at)
+SELECT id, novel_id, created_at, chapter_id, task, basis_id, input_version_id,
+    source_message_id, retry_of_id, status, partial_text, result_version_id, provider, model,
+    template_version, request_json, usage_json, error_code, finished_at FROM run;
+DROP TABLE run;
+ALTER TABLE run_v5 RENAME TO run;
+CREATE INDEX idx_run_status ON run(novel_id, status);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _SCHEMA_V1,
     2: _SCHEMA_V2,
     3: _SCHEMA_V3,
     4: _SCHEMA_V4,
+    5: _SCHEMA_V5,
 }
 
 _TERMINAL_RUN_STATUSES = frozenset(

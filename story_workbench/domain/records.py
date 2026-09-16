@@ -90,6 +90,7 @@ class TaskKind(StrEnum):
     IMPACT = "impact"
     DIAGNOSE = "diagnose"
     RECOMPUTE = "recompute"
+    ASSIST = "assist"  # 对话助手的调度调用
 
 
 class WriteMode(StrEnum):
