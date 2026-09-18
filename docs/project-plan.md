@@ -1,6 +1,6 @@
 # 项目计划与进度
 
-更新日期：2026-09-16。当前阶段：真实 DeepSeek 三章写作、独立判读、CLI 采用与回改复核已在作者作品副本完成，V01 有可核对的正文、检查和快照引用。T05 的实机中文输入法、T07 的 M1–M7 全量语义变体及 T12 的真实诊断/试改仍有缺口；详见[验收记录](acceptance-log.md#2026-09-16-deepseek-三章与回改复核)。
+更新日期：2026-09-18。当前阶段：M5 对话式工作台被作者否定，改按 [M6 代理式工作台](agent-workbench.md) 重做，旧 CLI 与 M5 门槛流程退役。此前：真实 DeepSeek 三章写作、独立判读、CLI 采用与回改复核已在作者作品副本完成，V01 有可核对的正文、检查和快照引用。T05 的实机中文输入法、T07 的 M1–M7 全量语义变体及 T12 的真实诊断/试改仍有缺口；详见[验收记录](acceptance-log.md#2026-09-16-deepseek-三章与回改复核)。
 
 `[x]` 表示已有对应交付证据；`[ ]` 表示尚未完成，包含未开始、进行中和待验证。写出设计、测试规格或纸面模拟，不等于代码实现和验收通过。任务只有满足完成条件后才能打勾；届时在该任务后补提交号、测试结果或验证记录链接。没有实际基线前不承诺工期或完成百分比。
 
@@ -130,9 +130,20 @@ M3 本地闭环已进入可验收状态；M4 仍按长篇能力与导出体验�
 
 2026-09-16 作者评价现有单字母命令 CLI 体验很差，要求做成 Codex CLI 那样的对话式代理加全屏界面；设计见[对话式工作台设计](conversational-workbench.md)。作者权限规则不变。
 
+2026-09-18 作者看过结果后否定了这一版："应该是 AI 和人的对话来控制一切，不是现在这种要人来控制、读取对话的意志、操控软件，我要做的是 agent。"M5-03、M5-04 不再验收，由 M6 取代；M5-01 与 M5-02 的供应商工具调用、引擎骨架保留。
+
 - [x] M5-01 供应商层工具调用。完成条件：`ChatMessage` 支持内容块，`CallOptions.tools`，`TOOL_USE` 事件；假 SDK 与真实往返测试通过；不传 tools 时请求不变。证据：`tests/test_recovery.py::test_deepseek_tool_use_round_trip_without_network`（真实 SDK + 本地模拟传输，同步与异步：tools 参数、流式 input_json_delta 解析、非流式 tool_uses、tool_result 消息序列化、不传 tools 时无 tools 字段）；`tests/test_provider_live.py::test_live_tool_use_round_trip` 默认跳过，待真实密钥执行。
 - [x] M5-02 门槛流程抽取、工具目录与代理引擎。完成条件：旧 CLI 改用 `console/workbench` 后全部测试仍通过；引擎测试覆盖已读声明、失败不自动重试、拒绝零记录、取消先落库、单轮调用上限；schema v5 允许 `assist` 任务。证据：`console/port.py`、`console/workbench.py`（从 cli.py 抽出，旧 CLI 只剩命令表与端口）、`ai/assistant.py`（27 个工具定义与系统提示）、`console/tools.py`、`console/engine.py`、`application/assistant.py`（assist run 记录用量与终态）；`tests/test_assistant.py` 17 项：一轮内三次调度全部记 run、采用需「已读，采用」、模型口头宣称采用零记录、付费失败后同轮拒绝所有付费工具、无密钥不发请求、单轮上限、取消先落库且不存回复、未知工具与坏参数不执行、编辑器与计划确认；`tests/test_m3.py` v4→v5 迁移。
-- [ ] M5-03 Textual 全屏界面。完成条件：三章走查可在新界面完成；T05 对话版人工记录。进度：`tui/app.py` 已实现对话记录、状态栏、多行输入、问题卡、全屏编辑器、Esc 取消与引擎线程；`tests/test_tui.py` 5 项通过（写作流式回显、采用问题卡、编辑器保存与取消、取消先落库、新项目询问标题）。真实终端三章走查与输入法记录待作者执行。
-- [ ] M5-04 入口切换与旧 CLI 退役。完成条件：默认进入新界面，`--classic` 保留旧版；文档更新；一轮真实三章对话验收后删除旧 CLI。进度：`python -m story_workbench` 默认进入新界面，`--classic` 进旧版；README、架构、技术选型、AGENTS 分层规则已更新。删除旧 CLI 待真实验收。
+- [ ] ~~M5-03~~ 已被 M6 取代，不再验收。原目标：Textual 全屏界面。完成条件：三章走查可在新界面完成；T05 对话版人工记录。进度：`tui/app.py` 已实现对话记录、状态栏、多行输入、问题卡、全屏编辑器、Esc 取消与引擎线程；`tests/test_tui.py` 5 项通过（写作流式回显、采用问题卡、编辑器保存与取消、取消先落库、新项目询问标题）。真实终端三章走查与输入法记录待作者执行。
+- [ ] ~~M5-04~~ 已被 M6-03 取代。原目标：入口切换与旧 CLI 退役。完成条件：默认进入新界面，`--classic` 保留旧版；文档更新；一轮真实三章对话验收后删除旧 CLI。进度：`python -m story_workbench` 默认进入新界面，`--classic` 进旧版；README、架构、技术选型、AGENTS 分层规则已更新。删除旧 CLI 待真实验收。
+
+## M6 代理式工作台
+
+2026-09-18 作者否定 M5，要求做成真正的 agent：代理主导创作流程，对话即控制；正式变更像 Codex 和 Claude Code 那样弹审批卡，作者批准、不批准或直接打字说意见；没有斜杠命令、固定短语和逐项问答表单。设计见[代理式工作台设计](agent-workbench.md)。作者仍是唯一授权来源：`AuthorAction` 只由审批卡上的批准构造。
+
+- [ ] M6-01 审批端口、工具原语、系统提示与开场轮。完成条件：`console/port.py` 以 `approve(card)` 取代 `ask`；`console/tools.py` 直接调用 application 用例、不再 import `workbench`，审批工具只在批准后构造 `AuthorAction`；系统提示改为协作者人格；引擎支持开场轮；`tests/test_agent.py` 覆盖设计第 12 节的引擎与工具项（批准采用、不批准零记录且意见回到模型、口头宣称零记录、未展示不能采用、问题处理不全拒绝执行、`edit_draft` 改动卡与新稿、`decide` 修改授权、付费失败阻断、取消先落库、8 次上限、无密钥零请求）。
+- [ ] M6-02 界面。完成条件：审批卡（Enter 批准、n 不批准、打字带意见、Esc 不批准）；去掉斜杠命令与问题卡；开场轮显示；`tests/test_tui.py` 覆盖设计第 12 节的界面项。
+- [ ] M6-03 退役与文档。完成条件：删除 `cli.py`、`cli_editor.py`、`cli_model.py`、`console/workbench.py`、`tests/test_cli.py` 与 `--classic`，移除 `prompt_toolkit` 依赖；旧 CLI 测试覆盖的流程移植到 `tests/test_agent.py`；全部测试与 ruff 通过；README、AGENTS、代码架构第 12 节、技术选型更新。
+- [ ] M6-04 真实三章对话验收。完成条件：作者在真实终端用对话完成三章的写、改、采用、回改与复核；T05 对话版人工记录填入[验收记录](acceptance-log.md)；发现的问题回修并记录。
 
 UI 在 CLI 产品流程验证后另行规划；云同步、社区、发布平台集成和全自动长篇不纳入本计划。本文不启动应用开发，也不把待选择的模型或依赖写成已批准事项。
