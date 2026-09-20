@@ -521,3 +521,34 @@ def test_error_mid_reply_keeps_one_rendered_copy_and_shows_the_reason(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_dev_mode_shows_tool_args_and_call_stats(tmp_path):
+    from story_agent.tui import ToolBlock
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients(
+        [*OPENING, Reply("看看。", (use("read", "r", path="章节/第01章.md"),)), Reply("看完了。")]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "我们接着改？" in app.transcript_text())
+            await _send(pilot, "/dev")
+            await pilot.pause(0.1)
+            assert app.dev and "开发者模式已打开" in app.transcript_text()
+            await _send(pilot, "看第一章")
+            await _wait(app, pilot, lambda: "看完了。" in app.transcript_text())
+            text = app.transcript_text()
+            assert '参数 {"path": "章节/第01章.md"}' in text
+            assert "⎿  模型完成 · ↑3 ↓4" in text
+            block = list(app.query(ToolBlock))[-1]
+            assert not block.collapsed  # 开发者模式下全部展开
+            await _send(pilot, "/dev")
+            await pilot.pause(0.1)
+            assert not app.dev and block.collapsed
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

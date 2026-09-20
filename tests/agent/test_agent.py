@@ -329,3 +329,21 @@ def test_api_error_description_has_status_and_message_but_no_secrets():
     text = describe_api_error(Boom())
     assert text == "Boom · HTTP 402 · Insufficient credits. Add more at openrouter.ai"
     assert describe_api_error(TimeoutError()) == "TimeoutError"
+
+
+def test_log_file_records_calls_tools_and_failures(chapter_workspace):
+    script = [
+        Reply("看看。", (use("read", "a", path="章节/第01章.md"),)),
+        Reply("完了。", error="APIStatusError · HTTP 500 · upstream"),
+    ]
+    agent, port, _ = make_agent(chapter_workspace, script)
+    agent.handle("看第一章")
+    log = (chapter_workspace.root / ".story" / "日志.txt").read_text()
+    lines = log.splitlines()
+    assert any(
+        "模型 完成 · " in line and "↑3 ↓4" in line and "1 个工具调用" in line for line in lines
+    )
+    assert any('工具 read {"path": "章节/第01章.md"}' in line for line in lines)
+    assert any("结果 read 完成 ── 章节/第01章.md ──" in line for line in lines)
+    assert any("模型 失败" in line and "HTTP 500" in line for line in lines)
+    assert all(line[:4].isdigit() for line in lines)  # 每行带时间戳

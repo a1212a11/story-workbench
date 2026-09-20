@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -184,6 +186,7 @@ class Agent:
         self.max_calls = max_calls
         self.observer = observer
         self.session_usage = {"input_tokens": 0, "output_tokens": 0}
+        self.last_usage: dict[str, int] = {}
         rows = workspace.all_transcript()
         self.summary, self._covered = workspace.read_summary()
         self.returning = bool(rows)
@@ -335,8 +338,16 @@ class Agent:
                 break
             calls += 1
             self._notify("reply_started")
+            started = time.monotonic()
             text, uses, ok, failure = self._call(cancel)
+            seconds = time.monotonic() - started
             self._notify("reply_finished", text)
+            self._notify("call_finished", self.last_usage, seconds, ok)
+            ws.append_log(
+                f"模型 {'完成' if ok else '失败'} · {seconds:.1f}s · {_usage_text(self.last_usage)}"
+                + (f" · {len(uses)} 个工具调用" if uses else "")
+                + (f" · {failure}" if failure else "")
+            )
             if failure:
                 self.port.say(failure)
             if text:
@@ -356,8 +367,13 @@ class Agent:
                 if cancel.is_set():
                     results.append(ToolResultBlock(use.id, "作者中断了这一轮。", is_error=True))
                     continue
-                self._notify("tool_started", use.name, toolbox.describe_call(use.name, use.input))
+                self._notify(
+                    "tool_started", use.name, toolbox.describe_call(use.name, use.input), use.input
+                )
+                ws.append_log(f"工具 {use.name} {_clip(json.dumps(use.input, ensure_ascii=False))}")
                 outcome = toolbox.execute(ctx, use.name, use.input)
+                state = "出错" if outcome.is_error else "完成"
+                ws.append_log(f"结果 {use.name} {state} {_clip(outcome.text, 300)}")
                 self._notify("tool_finished", use.name, outcome.text, outcome.is_error)
                 results.append(ToolResultBlock(use.id, outcome.text, outcome.is_error))
             self.transcript.append(ChatMessage("user", tuple(results)))
@@ -406,6 +422,7 @@ class Agent:
                     close()
         except Exception as exc:  # 供应商层已归一化；这里兜底
             final, error = EventKind.ERROR, type(exc).__name__
+        self.last_usage = dict(usage)
         if usage:
             self.workspace.record_usage(usage, options.model, "对话")
             for key in self.session_usage:
@@ -420,6 +437,15 @@ class Agent:
             }.get(final, "没有正常结束")
             return text, (), False, f"助手没有完成回复：{reason}。你说一声我再试。"
         return text, tuple(uses), True, None
+
+
+def _usage_text(usage: dict[str, int]) -> str:
+    return f"↑{usage.get('input_tokens', 0)} ↓{usage.get('output_tokens', 0)}"
+
+
+def _clip(text: str, limit: int = 500) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
 
 
 def _rows_of(messages: Sequence[ChatMessage]) -> list[tuple[str, str]]:

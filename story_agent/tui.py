@@ -124,10 +124,11 @@ class EditorScreen(ModalScreen[str | None]):
 class ToolBlock(Vertical):
     """一次工具调用：标题、缩进的输出、结束行；可折叠。"""
 
-    def __init__(self, label: str, name: str = "") -> None:
+    def __init__(self, label: str, name: str = "", preface: str | None = None) -> None:
         super().__init__(classes="tool")
         self.label = label
         self.tool_name = name
+        self.preface = preface  # 开发者模式下的参数行，挂载完成后才能加
         self.lines = 0
         self.collapsed = False
         self.tool_state = "…"
@@ -138,6 +139,10 @@ class ToolBlock(Vertical):
         yield Static(f"⏺ {self.label}", classes="tool-header running", markup=False)
         yield Vertical(classes="tool-body")
         yield Static("", classes="tool-footer", markup=False)
+
+    def on_mount(self) -> None:
+        if self.preface:
+            self.add_line(self.preface)
 
     def body(self) -> Vertical:
         return self.query_one(".tool-body", Vertical)
@@ -263,8 +268,11 @@ class ThreadPort:
     def reply_finished(self, text: str) -> None:
         self._ui(self.app.end_reply, text)
 
-    def tool_started(self, name: str, label: str) -> None:
-        self._ui(self.app.begin_tool, label, name)
+    def tool_started(self, name: str, label: str, args: dict | None = None) -> None:
+        self._ui(self.app.begin_tool, label, name, args or {})
+
+    def call_finished(self, usage: dict, seconds: float, ok: bool) -> None:
+        self._ui(self.app.show_call_stats, usage, seconds, ok)
 
     def tool_finished(self, name: str, text: str, is_error: bool) -> None:
         self._ui(self.app.end_tool, is_error)
@@ -342,6 +350,7 @@ class WorkbenchApp(App[int]):
         self.busy_since = 0.0
         self.busy_verb = "思考中"
         self.verbose = False  # Ctrl-O：展开全部工具输出
+        self.dev = False  # /dev：工具参数、每次调用的用量与耗时
         self._quit_armed_at = 0.0  # 空闲时第一次 Ctrl-C 的时刻；两秒内再按一次才退出
         self._current_tool: ToolBlock | None = None
         self._reply_row: Horizontal | None = None
@@ -553,13 +562,30 @@ class WorkbenchApp(App[int]):
         row.mount(Markdown(text))
         self._scroll()
 
-    def begin_tool(self, label: str, name: str = "") -> None:
+    def begin_tool(self, label: str, name: str = "", args: dict | None = None) -> None:
         self._flush_reply_stream()
-        block = ToolBlock(label, name)
+        preface = None
+        if self.dev and args:
+            import json
+
+            preface = "参数 " + json.dumps(args, ensure_ascii=False)[:800]
+            self._log.append(preface)
+        block = ToolBlock(label, name, preface)
         self._current_tool = block
         self.busy_verb = label.split("(", 1)[0] + "中"
         self._log.append(f"⏺ {label}")
         self._mount(block)
+
+    def show_call_stats(self, usage: dict, seconds: float, ok: bool) -> None:
+        if not self.dev:
+            return
+        line = (
+            f"  ⎿  模型{'完成' if ok else '失败'} · ↑{_short(int(usage.get('input_tokens', 0)))}"
+            f" ↓{_short(int(usage.get('output_tokens', 0)))} · {seconds:.1f}s"
+        )
+        self._log.append(line)
+        self._flush_reply_stream()
+        self._mount(Static(line, classes="system", markup=False))
 
     def end_tool(self, is_error: bool) -> None:
         self._log_tool_stream()
@@ -667,6 +693,20 @@ class WorkbenchApp(App[int]):
         if command in ("/help", "/?", "/帮助"):
             self.show_author(text)
             self.show_line(HELP_TEXT)
+            return True
+        if command == "/dev":
+            self.show_author(text)
+            self.dev = not self.dev
+            self.verbose = self.dev
+            for block in self._transcript().query(ToolBlock):
+                if block is not self._current_tool:
+                    block.set_collapsed(self._default_collapsed(block))
+            self.show_line(
+                "开发者模式已打开：工具输出全部展开，显示工具参数、每次模型调用的用量与耗时。"
+                "日志一直在 .story/日志.txt。"
+                if self.dev
+                else "开发者模式已关闭。"
+            )
             return True
         return False
 

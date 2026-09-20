@@ -391,6 +391,12 @@ class Workspace:
             encoding="utf-8",
         )
 
+    def append_log(self, line: str) -> None:
+        """开发者日志 .story/日志.txt：模型调用、工具调用与结果摘要、错误。总是写。"""
+        stamp = datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        with self._private("日志.txt").open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {line.rstrip()}\n")
+
     def record_usage(self, usage: dict[str, int], model: str, purpose: str) -> None:
         record = {
             "time": datetime.now(UTC).isoformat(timespec="seconds"),
