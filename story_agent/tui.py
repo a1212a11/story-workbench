@@ -46,6 +46,7 @@ def install_cjk_wrapping() -> None:
 install_cjk_wrapping()
 
 SPINNER = "·✢✳✶✻✽"
+QUIT_CONFIRM_SECONDS = 2.0
 # 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
 QUIET_TOOLS = frozenset({"read", "search", "verify", "history"})
 HISTORY_ON_SCREEN = 12
@@ -335,6 +336,7 @@ class WorkbenchApp(App[int]):
         self.busy_since = 0.0
         self.busy_verb = "思考中"
         self.verbose = False  # Ctrl-O：展开全部工具输出
+        self._quit_armed_at = 0.0  # 空闲时第一次 Ctrl-C 的时刻；两秒内再按一次才退出
         self._current_tool: ToolBlock | None = None
         self._reply_row: Horizontal | None = None
         self._reply_stream: Static | None = None
@@ -597,6 +599,14 @@ class WorkbenchApp(App[int]):
             self.query_one("#hint-left", Static).update(BUSY_HINT if busy else IDLE_HINT)
 
     def _tick(self) -> None:
+        if (
+            self._quit_armed_at
+            and time.monotonic() - self._quit_armed_at >= QUIT_CONFIRM_SECONDS
+            and not self.busy
+            and self.mode != "approve"
+        ):
+            self._quit_armed_at = 0.0
+            self.query_one("#hint-left", Static).update(IDLE_HINT)
         if not self.busy or self.mode == "approve":
             return
         elapsed = int(time.monotonic() - self.busy_since)
@@ -654,7 +664,12 @@ class WorkbenchApp(App[int]):
         if area.text:
             area.clear()
             return
-        self.action_quit_app()
+        now = time.monotonic()
+        if now - self._quit_armed_at < QUIT_CONFIRM_SECONDS:
+            self.action_quit_app()
+            return
+        self._quit_armed_at = now
+        self.query_one("#hint-left", Static).update("再按一次 Ctrl-C 退出（Ctrl-D 直接退出）")
 
     def _default_collapsed(self, block: ToolBlock) -> bool:
         return not self.verbose and block.tool_name in QUIET_TOOLS

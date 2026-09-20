@@ -405,3 +405,30 @@ def test_page_keys_scroll_the_transcript_and_the_card(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_ctrl_c_needs_a_second_press_to_quit(tmp_path, monkeypatch):
+    from story_agent import tui
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    monkeypatch.setattr(tui, "QUIT_CONFIRM_SECONDS", 0.6)
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "模型尚未接入" in app.transcript_text())
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.1)
+            assert not app.stopping.is_set()
+            assert "再按一次 Ctrl-C" in str(app.query_one("#hint-left", Static).content)
+            await pilot.pause(0.8)  # 超时后提示恢复，再按一次仍不退出
+            assert "再按一次" not in str(app.query_one("#hint-left", Static).content)
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.1)
+            assert not app.stopping.is_set()
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.1)
+            assert app.stopping.is_set()
+
+    _run(scenario())
