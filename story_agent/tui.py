@@ -270,6 +270,36 @@ class ToolBlock(Vertical):
             self.set_collapsed(not self.collapsed)
 
 
+_PUNCT_OPEN = "“「『‘（(《〈【"
+_PUNCT_CLOSE = "”」』’）)》〉】，。、；：！？…"
+_BOLD = re.compile(r"\*\*(.+?)\*\*")
+
+
+def clean_markdown(text: str) -> str:
+    """让模型写的 Markdown 在终端里干净：
+
+    - `**` 紧挨着中文标点时按 CommonMark 不算加粗，会原样露出来；把标点挪到 `**` 外面。
+    - 单独一行的分隔线去掉，聊天里不需要。
+    """
+
+    def fix(match: re.Match) -> str:
+        inner = match.group(1)
+        lead = ""
+        while inner and inner[0] in _PUNCT_OPEN:
+            lead, inner = lead + inner[0], inner[1:]
+        tail = ""
+        while inner and inner[-1] in _PUNCT_CLOSE:
+            tail, inner = inner[-1] + tail, inner[:-1]
+        return f"{lead}**{inner}**{tail}" if inner.strip() else lead + inner + tail
+
+    lines = []
+    for line in text.split("\n"):
+        if re.fullmatch(r"\s*([-*_])\s*(\1\s*){2,}", line):
+            continue
+        lines.append(_BOLD.sub(fix, line))
+    return "\n".join(lines)
+
+
 def colorize_diff(text: str) -> Text:
     """把统一 diff 着色：删除行红、新增行绿、位置行暗；其他文字原样。"""
     result = Text()
@@ -374,7 +404,16 @@ class WorkbenchApp(App[int]):
     .reply > .dot { width: 2; color: $accent; }
     .reply > Static, .reply > Markdown { width: 1fr; }
     .reply > Markdown { margin: 0; padding: 0; background: ansi_default; }
-    .reply > Markdown MarkdownBlock { background: ansi_default; }
+    .reply > Markdown MarkdownBlock { background: ansi_default; margin: 0 0 1 0; }
+    .reply > Markdown MarkdownHorizontalRule { display: none; }
+    .reply > Markdown MarkdownH1, .reply > Markdown MarkdownH2, .reply > Markdown MarkdownH3,
+    .reply > Markdown MarkdownH4, .reply > Markdown MarkdownH5, .reply > Markdown MarkdownH6 {
+        color: ansi_default; background: ansi_default; text-style: bold; text-align: left;
+        border: none; padding: 0; margin: 0 0 1 0;
+    }
+    .reply > Markdown MarkdownBulletList, .reply > Markdown MarkdownOrderedList { margin: 0 0 1 0; }
+    .reply > Markdown MarkdownListItem { margin: 0; }
+    .reply > Markdown MarkdownListItem > MarkdownParagraph { margin: 0; }
     .tool { height: auto; margin-top: 1; }
     .tool-header { color: $accent; }
     .tool-header.ok { color: $success; }
@@ -632,7 +671,7 @@ class WorkbenchApp(App[int]):
                 self._mount(
                     Horizontal(
                         Static("⏺", classes="dot", markup=False),
-                        Markdown(text),
+                        Markdown(clean_markdown(text)),
                         classes="reply history",
                     )
                 )
@@ -698,7 +737,7 @@ class WorkbenchApp(App[int]):
         for widget in row.query(Static):
             if not widget.has_class("dot"):
                 widget.remove()
-        row.mount(Markdown(text))
+        row.mount(Markdown(clean_markdown(text)))
         self._scroll()
 
     def begin_tool(self, label: str, name: str = "", args: dict | None = None) -> None:

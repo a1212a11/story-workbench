@@ -746,3 +746,37 @@ def test_app_uses_the_story_theme_with_claude_orange(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_clean_markdown_moves_punctuation_out_of_bold_and_drops_rules():
+    from story_agent.tui import clean_markdown
+
+    assert (
+        clean_markdown("他有一股**“见不得好人遭罪”的硬骨头**。")
+        == "他有一股“**见不得好人遭罪”的硬骨头**。"
+    )
+    assert clean_markdown("**本土化质感扎实**：细节") == "**本土化质感扎实**：细节"
+    assert clean_markdown("**《寒灯协定》，**后面") == "《**寒灯协定**》，后面"
+    assert clean_markdown("一\n---\n二\n* * *\n三") == "一\n二\n三"
+    assert clean_markdown("列表\n- 项一\n- 项二") == "列表\n- 项一\n- 项二"
+
+
+def test_reply_markdown_hides_rules_and_flattens_headings(tmp_path):
+    from textual.widgets._markdown import MarkdownH3, MarkdownHorizontalRule
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients([Reply("### 二、主题\n\n---\n\n一股**“硬骨头”**。\n\n- 一\n- 二")])
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "硬骨头" in app.transcript_text())
+            await pilot.pause(0.3)
+            assert not list(app.query(MarkdownHorizontalRule))  # 分隔线在渲染前就去掉了
+            heading = app.query_one(MarkdownH3)
+            assert heading.styles.text_style.bold and heading.region.height == 1
+            assert "**" not in "".join(str(p.content) for p in app.query("MarkdownParagraph"))
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
