@@ -357,3 +357,51 @@ def test_quiet_tool_outputs_are_collapsed_by_default(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_page_keys_scroll_the_transcript_and_the_card(tmp_path):
+    from textual.containers import VerticalScroll
+
+    path = tmp_path / "novel"
+    ws = _chapter_workspace(path)
+    for i in range(40):
+        ws.append_transcript("author", f"第 {i} 句")
+        ws.append_transcript("assistant", f"回 {i}")
+    long_new = "\n\n".join(f"第 {i} 段，很长的新段落。" for i in range(60))
+    clients = scripted_clients(
+        [
+            Reply(
+                "改。", (use("edit", "e", path="章节/第01章.md", reason="长改", content=long_new),)
+            ),
+            Reply("好了。"),
+        ]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
+            transcript = app.query_one("#transcript", VerticalScroll)
+            await pilot.pause(0.3)
+            at_end = transcript.scroll_y
+            assert at_end > 0
+            await pilot.press("pageup")
+            await pilot.pause(0.1)
+            assert transcript.scroll_y < at_end
+            await pilot.press("pagedown")
+            await pilot.pause(0.1)
+            assert transcript.scroll_y == at_end
+            await _send(pilot, "重写")
+            await _wait(app, pilot, lambda: app.mode == "approve")
+            card = app.query_one("#card-diff", VerticalScroll)
+            await pilot.pause(0.2)
+            assert card.scroll_y == 0
+            transcript_before = transcript.scroll_y
+            await pilot.press("pagedown")
+            await pilot.pause(0.1)
+            assert card.scroll_y > 0 and transcript.scroll_y == transcript_before
+            await _send(pilot, "n")
+            await _wait(app, pilot, lambda: "好了。" in app.transcript_text())
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

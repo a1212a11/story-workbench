@@ -49,9 +49,9 @@ SPINNER = "·✢✳✶✻✽"
 # 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
 QUIET_TOOLS = frozenset({"read", "search", "verify", "history"})
 HISTORY_ON_SCREEN = 12
-IDLE_HINT = "Enter 发送 · Ctrl-J 换行 · Ctrl-O 展开/折叠工具输出 · Ctrl-D 退出"
+IDLE_HINT = "Enter 发送 · Ctrl-J 换行 · PgUp/PgDn 翻页 · Ctrl-O 展开/折叠工具输出 · Ctrl-D 退出"
 BUSY_HINT = "Esc 中断 · 已保存的改动都在"
-CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见"
+CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见 · PgUp/PgDn 翻看改动"
 
 
 # ---------------------------------------------------------------- 输入与编辑器
@@ -312,6 +312,8 @@ class WorkbenchApp(App[int]):
         # Textual 自带的 ctrl+q 退出优先于屏幕绑定；编辑器打开时 ctrl+q 应是取消编辑。
         Binding("ctrl+q", "editor_cancel_or_quit", "退出", priority=True, show=False),
         Binding("ctrl+o", "toggle_tools", "折叠/展开工具输出", priority=True, show=False),
+        Binding("pageup", "page('up')", "上翻", priority=True, show=False),
+        Binding("pagedown", "page('down')", "下翻", priority=True, show=False),
     ]
 
     def __init__(
@@ -656,6 +658,20 @@ class WorkbenchApp(App[int]):
 
     def _default_collapsed(self, block: ToolBlock) -> bool:
         return not self.verbose and block.tool_name in QUIET_TOOLS
+
+    def action_page(self, direction: str) -> None:
+        """PageUp/PageDown 翻看对话；审批卡打开时翻卡片里的 diff。"""
+        if isinstance(self.screen, EditorScreen):
+            return
+        target = (
+            self.query_one("#card-diff", VerticalScroll)
+            if self.mode == "approve"
+            else self._transcript()
+        )
+        if direction == "up":
+            target.scroll_page_up(animate=False)
+        else:
+            target.scroll_page_down(animate=False)
 
     def action_toggle_tools(self) -> None:
         self.verbose = not self.verbose
