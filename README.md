@@ -6,6 +6,10 @@ AI 小说创作与故事工程系统。作者决定故事，AI 帮助讨论、�
 
 交付方向：先用本地终端验证创作流程，产品稳定后再做图形界面。技术栈：Python 3.12、SQLite、Markdown 工作副本、Textual 全屏终端界面（旧版命令界面基于 prompt_toolkit 保留）；uv 管理环境，pytest 测试。启动：`uv run python -m story_workbench <项目目录>`；加 `--classic` 进入旧版单字母命令界面。
 
+## 新包 story_agent（M6，开发中）
+
+按[新包设计](docs/agent-workbench.md)重做的"写小说的 Claude Code"：作品是一个 Markdown 目录（作品.md、大纲.md、设定/、人物/、章节/、决定.md 为正式文件，故事状态.md、草稿/、技能/ 为自由文件），代理用读、搜、改、历史、核对引用、独立审读、编辑器七个工具工作，正式文件的每处改动先弹 diff 审批卡，批准后写入并记一次 git 历史。启动：`uv run python -m story_agent <作品目录>`，目录不是作品时按目录名新建。模型配置与下节相同。旧包 `story_workbench` 在新包通过三章验收前保留。
+
 ## 模型配置
 
 配置文件默认位于 `~/.config/story-workbench/config.json`，也可通过 `STORY_WORKBENCH_CONFIG` 指定。文件只放非敏感配置。选择 DeepSeek：
