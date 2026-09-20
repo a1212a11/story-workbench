@@ -317,3 +317,15 @@ def test_notes_and_preferences_appear_in_the_system_prompt(workspace):
     assert "作者拒绝过整章重写" in prompt and "代理笔记.md 是你的笔记" in prompt
     assert "作者的偏好与禁忌" in prompt
     assert "不超过十行" in prompt and "写进 草稿/ 里的文件" in prompt
+
+
+def test_api_error_description_has_status_and_message_but_no_secrets():
+    from story_agent.provider import describe_api_error
+
+    class Boom(Exception):
+        status_code = 402
+        message = "Insufficient credits.  Add more at\nopenrouter.ai"
+
+    text = describe_api_error(Boom())
+    assert text == "Boom · HTTP 402 · Insufficient credits. Add more at openrouter.ai"
+    assert describe_api_error(TimeoutError()) == "TimeoutError"

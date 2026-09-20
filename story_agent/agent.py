@@ -335,8 +335,10 @@ class Agent:
                 break
             calls += 1
             self._notify("reply_started")
-            text, uses, ok = self._call(cancel)
+            text, uses, ok, failure = self._call(cancel)
             self._notify("reply_finished", text)
+            if failure:
+                self.port.say(failure)
             if text:
                 reply_parts.append(text)
             if not ok:
@@ -369,8 +371,11 @@ class Agent:
             ws.append_transcript("assistant", final)
         return TurnResult(final, calls, tuple(session.executed), stopped_early)
 
-    def _call(self, cancel: CancelSignal) -> tuple[str, tuple[ToolUseBlock, ...], bool]:
-        """一次模型调用：流式显示文本，收集工具调用；返回 (文本, 工具调用, 是否正常结束)。"""
+    def _call(self, cancel: CancelSignal) -> tuple[str, tuple[ToolUseBlock, ...], bool, str | None]:
+        """一次模型调用：流式显示文本，收集工具调用。
+
+        返回 (文本, 工具调用, 是否正常结束, 失败说明)。
+        """
         assert self.clients is not None and self.config is not None
         options = self.config.options
         parts: list[str] = []
@@ -407,15 +412,14 @@ class Agent:
                 self.session_usage[key] += int(usage.get(key, 0))
         text = "".join(parts)
         if cancel.is_set():
-            return text, (), False
+            return text, (), False, None
         if final is not EventKind.COMPLETED:
             reason = {
                 EventKind.TRUNCATED: "输出被截断",
                 EventKind.ERROR: f"请求失败（{error or '未知错误'}）",
             }.get(final, "没有正常结束")
-            self.port.say(f"助手没有完成回复：{reason}。你说一声我再试。")
-            return text, (), False
-        return text, tuple(uses), True
+            return text, (), False, f"助手没有完成回复：{reason}。你说一声我再试。"
+        return text, tuple(uses), True, None
 
 
 def _rows_of(messages: Sequence[ChatMessage]) -> list[tuple[str, str]]:

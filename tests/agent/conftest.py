@@ -83,7 +83,7 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
     def stream(messages, options, cancel) -> Iterator[StreamEvent]:
         calls.append(list(messages))
         reply = replies.pop(0) if replies else Reply()
-        if reply.error:
+        if reply.error and not reply.text:
             yield StreamEvent(EventKind.ERROR, error=reply.error)
             return
         half = len(reply.text) // 2
@@ -95,6 +95,9 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
             yield StreamEvent(EventKind.TEXT, text=piece)
             if index == 0 and reply.hook is not None:
                 reply.hook(cancel)
+        if reply.error:
+            yield StreamEvent(EventKind.ERROR, error=reply.error)
+            return
         for block in reply.uses:
             yield StreamEvent(EventKind.TOOL_USE, tool_use=block)
         yield StreamEvent(EventKind.USAGE, usage={"input_tokens": 3, "output_tokens": 4})

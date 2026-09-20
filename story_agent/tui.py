@@ -532,7 +532,7 @@ class WorkbenchApp(App[int]):
         self._mount(self._reply_row)
 
     def end_reply(self, text: str) -> None:
-        row, stream = self._reply_row, self._reply_stream
+        row = self._reply_row
         self._reply_row = self._reply_stream = None
         self._reply_text = ""
         if row is None:
@@ -541,8 +541,9 @@ class WorkbenchApp(App[int]):
             row.remove()
             return
         self._log.append(text)
-        if stream is not None:
-            stream.remove()
+        for widget in row.query(Static):
+            if not widget.has_class("dot"):
+                widget.remove()
         row.mount(Markdown(text))
         self._scroll()
 

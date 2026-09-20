@@ -129,6 +129,19 @@ class ProviderError(Exception):
     """协议或网络层错误；由用例转记为 MODEL_FAILED。不含密钥或请求头。"""
 
 
+def describe_api_error(exc: Exception) -> str:
+    """错误类型、HTTP 状态码与供应商给的原因，截短；不含请求头与密钥。"""
+    parts = [type(exc).__name__]
+    status = getattr(exc, "status_code", None)
+    if status:
+        parts.append(f"HTTP {status}")
+    message = str(getattr(exc, "message", "") or "").strip()
+    if message:
+        message = " ".join(message.split())
+        parts.append(message if len(message) <= 160 else message[:160] + "…")
+    return " · ".join(parts)
+
+
 def _block_param(block: ContentBlock) -> dict[str, Any]:
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text}
@@ -244,7 +257,7 @@ def make_anthropic_clients(
                         yield StreamEvent(EventKind.TEXT, text=text)
                 final = response.get_final_message()
         except APIError as exc:
-            yield StreamEvent(EventKind.ERROR, error=type(exc).__name__)
+            yield StreamEvent(EventKind.ERROR, error=describe_api_error(exc))
             return
         except Exception as exc:  # 超时、网络中断等
             yield StreamEvent(EventKind.ERROR, error=type(exc).__name__)
@@ -271,7 +284,7 @@ def make_anthropic_clients(
         try:
             message = _client(options).messages.create(**kwargs)
         except APIError as exc:
-            raise ProviderError(type(exc).__name__) from None
+            raise ProviderError(describe_api_error(exc)) from None
         except Exception as exc:
             raise ProviderError(type(exc).__name__) from None
         if cancel.is_set():
@@ -325,7 +338,7 @@ def make_async_anthropic_clients(
                         yield StreamEvent(EventKind.TEXT, text=text)
                 final = await response.get_final_message()
         except APIError as exc:
-            yield StreamEvent(EventKind.ERROR, error=type(exc).__name__)
+            yield StreamEvent(EventKind.ERROR, error=describe_api_error(exc))
             return
         except Exception as exc:  # 超时、网络中断等
             yield StreamEvent(EventKind.ERROR, error=type(exc).__name__)
@@ -353,7 +366,7 @@ def make_async_anthropic_clients(
             async with _client(options) as client:
                 message = await client.messages.create(**kwargs)
         except APIError as exc:
-            raise ProviderError(type(exc).__name__) from None
+            raise ProviderError(describe_api_error(exc)) from None
         except Exception as exc:
             raise ProviderError(type(exc).__name__) from None
         if cancel.is_set():

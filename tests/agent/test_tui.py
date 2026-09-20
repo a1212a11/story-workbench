@@ -487,3 +487,32 @@ def test_status_line_shows_estimated_cost_when_prices_are_known(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_error_mid_reply_keeps_one_rendered_copy_and_shows_the_reason(tmp_path):
+    from textual.widgets import Markdown
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients(
+        [*OPENING, Reply("说到一半**就断了**。", error="APIStatusError · HTTP 429 · rate limited")]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "我们接着改？" in app.transcript_text())
+            await _send(pilot, "世界观怎么样")
+            await _wait(app, pilot, lambda: "HTTP 429" in app.transcript_text())
+            await pilot.pause(0.2)
+            rows = [r for r in app.query(".reply") if r.query(Markdown)]
+            last = rows[-1]
+            assert len(last.query(Markdown)) == 1
+            leftovers = [
+                w for w in last.children if isinstance(w, Static) and not w.has_class("dot")
+            ]
+            assert not leftovers  # 流式框已移除
+            assert "请求失败（APIStatusError · HTTP 429 · rate limited）" in app.transcript_text()
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
