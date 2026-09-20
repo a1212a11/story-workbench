@@ -324,7 +324,7 @@ def test_turn_reminder_is_sent_to_the_model_but_not_persisted(chapter_workspace)
     agent, _, clients = make_agent(chapter_workspace, [Reply("好。")])
     agent.handle("一起完善世界观")
     sent = clients.calls[0][-1].content
-    assert sent.startswith("一起完善世界观") and "一次只谈一件事" in sent
+    assert sent.startswith("一起完善世界观") and "先给你的建议和理由" in sent
     rows = transcript_rows(chapter_workspace)
     assert rows[0]["text"] == "一起完善世界观"
 
@@ -361,7 +361,9 @@ def test_log_file_records_calls_tools_and_failures(chapter_workspace):
 
 def test_persona_points_to_the_co_design_skill(workspace):
     agent, _, _ = make_agent(workspace, [])
-    assert "技能/共创.md" in agent.system_prompt()
+    prompt = agent.system_prompt()
+    assert "技能/共创.md" in prompt
+    assert "草稿/<主题>讨论.md" in prompt and "不要一个微决定问一轮" in prompt
 
 
 def test_context_usage_counts_system_prompt_and_transcript(workspace):
