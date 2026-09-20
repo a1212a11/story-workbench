@@ -397,7 +397,7 @@ class WorkbenchApp(App[int]):
     CSS = """
     Screen { layout: vertical; }
     #transcript {
-        height: 1fr; padding: 0 2;
+        height: 1fr; padding: 0 1;
         scrollbar-size: 0 0;
     }
     .welcome { color: $text-muted; margin-bottom: 1; }
@@ -427,20 +427,20 @@ class WorkbenchApp(App[int]):
     .tool-body { height: auto; padding-left: 2; }
     .tool-line { color: $text; }
     .tool-footer { color: $text-muted; }
-    #spinner { height: 1; padding: 0 2; color: $accent; }
-    #card { border: round $warning; padding: 0 1; margin: 0 2; height: auto; max-height: 24; }
+    #spinner { height: 1; padding: 0 1; color: $accent; }
+    #card { border: round $warning; padding: 0 1; margin: 0; height: auto; max-height: 24; }
     #card-title { color: $warning; text-style: bold; }
     #card-diff { height: auto; max-height: 18; scrollbar-size-vertical: 1; }
     #card-hint { color: $text-muted; }
-    #palette { margin: 0 2; height: auto; border: round #45475A; padding: 0 1; }
+    #palette { margin: 0; height: auto; border: round #45475A; padding: 0 1; }
     .palette-title { color: $warning; text-wrap: nowrap; text-overflow: ellipsis; }
     .palette-item { color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; height: 1; }
     .palette-item.selected { color: $accent; background: #313244; text-style: bold; }
-    #inputbox { border: round $accent; height: auto; max-height: 8; margin: 0 1; }
+    #inputbox { border: round $accent; height: auto; max-height: 8; margin: 0; }
     #inputbox > .prompt { width: 2; padding-left: 1; color: $accent; }
     #input { height: auto; max-height: 6; border: none; padding: 0; background: ansi_default; }
     #input:focus { border: none; }
-    #hint { height: 1; margin: 0 2; color: $text-muted; }
+    #hint { height: 1; margin: 0 1; color: $text-muted; }
     #hint-left { width: 1fr; }
     #hint-right { width: auto; text-align: right; }
     #editor-title { height: 1; background: $accent; color: ansi_black; padding: 0 1; }
