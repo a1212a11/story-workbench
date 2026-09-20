@@ -863,3 +863,31 @@ def test_transcript_has_no_scrollbar_and_only_follows_when_at_bottom(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_turn_ends_with_duration_and_finish_time(tmp_path):
+    import re as _re
+
+    from story_agent.tui import _duration
+
+    assert _duration(43.2) == "43 秒" and _duration(125) == "2 分 5 秒"
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients([Reply("开场。"), Reply("好。")])
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _wait(app, pilot, lambda: "✻ 用时" in app.transcript_text())
+            await _send(pilot, "你好")
+            await _wait(app, pilot, lambda: "好。" in app.transcript_text())
+            await pilot.pause(0.2)
+            lines = [
+                line for line in app.transcript_text().splitlines() if line.startswith("✻ 用时")
+            ]
+            assert len(lines) == 2
+            assert _re.fullmatch(r"✻ 用时 \d+ 秒 · 完成于 \d\d:\d\d", lines[-1])
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

@@ -579,11 +579,13 @@ class WorkbenchApp(App[int]):
         port = self.port
         port.cancel = CancelSignal()
         port._ui(self.set_busy, True)
+        started = time.monotonic()
+        result = None
         try:
             if text is None:
-                agent.opening(port.cancel)
+                result = agent.opening(port.cancel)
             else:
-                agent.handle(text, port.cancel)
+                result = agent.handle(text, port.cancel)
         except WorkspaceError as exc:
             port.say(f"没有完成：{exc}")
         except Exception as exc:  # 界面不因单次异常退出；已保存的改动都在
@@ -591,7 +593,10 @@ class WorkbenchApp(App[int]):
         finally:
             port._ui(self.set_busy, False)
             self._refresh_status(agent)
-            port._ui(self.end_turn)
+            seconds = time.monotonic() - started
+            calls = result.calls if result is not None else 0
+            cancelled = bool(result is not None and result.cancelled)
+            port._ui(self.end_turn, seconds, calls, cancelled)
 
     def _do_rewind(self, agent: Agent, item: tuple) -> None:
         """在代理线程里执行撤回：截断对话记录，按需把文件退回，然后重载代理与界面。"""
@@ -810,9 +815,17 @@ class WorkbenchApp(App[int]):
             self._log.append(f"  ⎿  {'出错' if is_error else '完成'}")
         self._scroll()
 
-    def end_turn(self) -> None:
+    def end_turn(self, seconds: float = 0.0, calls: int = 0, cancelled: bool = False) -> None:
         self._flush_reply_stream()
         self._current_tool = None
+        if calls:
+            # 像 Claude Code 的「✻ Brewed for 43s · done 3:00 PM」：用了多久，几点完成
+            finished = time.strftime("%H:%M")
+            state = "已中断" if cancelled else "完成"
+            line = f"✻ 用时 {_duration(seconds)} · {state}于 {finished}"
+            self._log.append(line)
+            self._mount(Static(line, classes="system", markup=False))
+            self._scroll()
 
     def begin_approval(self, card: ApprovalCard) -> None:
         self.current_card = card
@@ -1107,6 +1120,13 @@ def context_gauge(used: int, limit: int) -> tuple[str, float]:
     filled = round(ratio * GAUGE_CELLS)
     bar = "▮" * filled + "▯" * (GAUGE_CELLS - filled)
     return f"{bar} {ratio * 100:.0f}%", ratio
+
+
+def _duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f} 秒"
+    minutes, rest = divmod(int(seconds), 60)
+    return f"{minutes} 分 {rest} 秒"
 
 
 def _short_path(path: Path) -> str:
