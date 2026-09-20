@@ -801,3 +801,37 @@ def test_nested_lists_render_without_blank_lines(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_transcript_has_no_scrollbar_and_only_follows_when_at_bottom(tmp_path):
+    from textual.containers import VerticalScroll
+
+    path = tmp_path / "novel"
+    ws = _chapter_workspace(path)
+    for i in range(30):
+        ws.append_transcript("author", f"第 {i} 句")
+        ws.append_transcript("assistant", f"回 {i}")
+    clients = scripted_clients([Reply("新回复。")])
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
+            transcript = app.query_one("#transcript", VerticalScroll)
+            assert transcript.styles.scrollbar_size_vertical == 0
+            await pilot.pause(0.2)
+            assert transcript.is_vertical_scroll_end and app.follow
+            await pilot.press("pageup")
+            await pilot.pause(0.1)
+            above = transcript.scroll_y
+            assert not app.follow and not transcript.is_vertical_scroll_end
+            app.show_line("有人在下面说话")  # 新内容不把作者拽回底部
+            await pilot.pause(0.2)
+            assert transcript.scroll_y == above
+            await _send(pilot, "接着来")  # 作者说话就回到底部
+            await _wait(app, pilot, lambda: "新回复。" in app.transcript_text())
+            await pilot.pause(0.2)
+            assert app.follow and transcript.is_vertical_scroll_end
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

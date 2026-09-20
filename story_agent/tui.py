@@ -393,7 +393,7 @@ class WorkbenchApp(App[int]):
     Screen { layout: vertical; }
     #transcript {
         height: 1fr; padding: 0 2;
-        scrollbar-size-vertical: 1; scrollbar-color: #313244; scrollbar-background: ansi_default;
+        scrollbar-size: 0 0;
     }
     .welcome { color: $text-muted; margin-bottom: 1; }
     .divider { color: $text-muted; margin: 1 0; }
@@ -476,6 +476,7 @@ class WorkbenchApp(App[int]):
         self.busy_verb = "思考中"
         self.verbose = False  # Ctrl-O：展开全部工具输出
         self.dev = False  # /dev：工具参数、每次调用的用量与耗时
+        self.follow = True  # 对话区是否跟着新内容滚到底
         self.palette_items: list[tuple[str, str]] = []
         self.palette_index = 0
         self.palette_mode = "commands"  # commands / rewind / rewind-scope
@@ -647,12 +648,41 @@ class WorkbenchApp(App[int]):
         return self.query_one("#transcript", VerticalScroll)
 
     def _mount(self, widget) -> None:
+        """挂上新条目；作者停在底部时跟着滚，作者往上翻了就不打扰。"""
         transcript = self._transcript()
+        if transcript.is_vertical_scroll_end:
+            self.follow = True
         transcript.mount(widget)
-        transcript.scroll_end(animate=False)
+        if self.follow:
+            transcript.scroll_end(animate=False)
 
     def _scroll(self) -> None:
-        self._transcript().scroll_end(animate=False)
+        transcript = self._transcript()
+        if transcript.is_vertical_scroll_end:
+            self.follow = True
+        if self.follow:
+            transcript.scroll_end(animate=False)
+
+    def on_mouse_scroll_up(self, event) -> None:
+        self.follow = False  # 作者往上翻了；滚回底部或发一句话时恢复跟随
+
+    def action_page(self, direction: str) -> None:
+        """PageUp/PageDown 翻看对话；审批卡打开时翻卡片里的 diff。"""
+        if isinstance(self.screen, EditorScreen):
+            return
+        target = self._transcript()
+        if self.mode == "approve":
+            card = self.query_one("#card-diff", VerticalScroll)
+            if card.max_scroll_y > 0:  # 新建文件的卡片没有可翻的内容，翻的是上方的全文
+                target = card
+        if direction == "up":
+            if target is self._transcript():
+                self.follow = False
+            target.scroll_page_up(animate=False)
+        else:
+            target.scroll_page_down(animate=False)
+            if target is self._transcript() and target.is_vertical_scroll_end:
+                self.follow = True
 
     def _flush_reply_stream(self) -> None:
         if self._reply_stream is not None and not self._reply_text.strip():
@@ -713,6 +743,7 @@ class WorkbenchApp(App[int]):
     def show_author(self, text: str) -> None:
         self._log.append(f"> {text}")
         self._flush_reply_stream()
+        self.follow = True  # 作者说了话，回到底部
         self._mount(Static(f"> {text}", classes="author", markup=False))
 
     def begin_reply(self) -> None:
@@ -1038,20 +1069,6 @@ class WorkbenchApp(App[int]):
 
     def _default_collapsed(self, block: ToolBlock) -> bool:
         return not self.verbose and block.tool_name in QUIET_TOOLS
-
-    def action_page(self, direction: str) -> None:
-        """PageUp/PageDown 翻看对话；审批卡打开时翻卡片里的 diff。"""
-        if isinstance(self.screen, EditorScreen):
-            return
-        target = self._transcript()
-        if self.mode == "approve":
-            card = self.query_one("#card-diff", VerticalScroll)
-            if card.max_scroll_y > 0:  # 新建文件的卡片没有可翻的内容，翻的是上方的全文
-                target = card
-        if direction == "up":
-            target.scroll_page_up(animate=False)
-        else:
-            target.scroll_page_down(animate=False)
 
     def action_toggle_tools(self) -> None:
         self.verbose = not self.verbose
