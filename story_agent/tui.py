@@ -622,14 +622,21 @@ class WorkbenchApp(App[int]):
             ws.append_log(note)
         except WorkspaceError as exc:
             note = f"没有撤回：{exc}"
-        self.port._ui(self.reset_transcript_view, ws.recent_transcript(HISTORY_ON_SCREEN), note)
+        self.port._ui(
+            self.reset_transcript_view,
+            ws.recent_transcript(HISTORY_ON_SCREEN),
+            note,
+            choice["text"],
+        )
         self._refresh_status(agent)
 
     @staticmethod
     def workspace_of(agent: Agent) -> Workspace:
         return agent.workspace
 
-    def reset_transcript_view(self, rows: list[tuple[str, str]], note: str) -> None:
+    def reset_transcript_view(
+        self, rows: list[tuple[str, str]], note: str, restore_text: str = ""
+    ) -> None:
         self._transcript().remove_children()
         self._log.append(note)
         self._current_tool = None
@@ -638,6 +645,11 @@ class WorkbenchApp(App[int]):
             self.show_history(rows)
         self._mount(Static(note, classes="system", markup=False))
         self._scroll()
+        if restore_text:  # 撤回的那句话放回输入框，作者改一改再发
+            area = self.query_one("#input", PromptArea)
+            area.clear()
+            area.insert(restore_text)
+            area.focus()
 
     def _refresh_status(self, agent: Agent) -> None:
         model = agent.config.options.model if agent.model_ready and agent.config else "模型未接入"

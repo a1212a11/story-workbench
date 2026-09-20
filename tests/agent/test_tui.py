@@ -686,6 +686,7 @@ def test_double_escape_rewinds_conversation_and_files(tmp_path):
             assert app.agent is not None and len(app.agent.transcript) == 0
             assert "文件已退回到那时" in app.transcript_text()
             assert not panel.display and app.palette_mode == "commands"
+            assert app.query_one("#input", PromptArea).text == "结尾让他下去"  # 那句话回到输入框
             await pilot.press("ctrl+d")
 
     _run(scenario())
