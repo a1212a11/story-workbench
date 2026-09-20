@@ -167,7 +167,9 @@ class ToolBlock(Vertical):
 
     def _refresh_footer(self) -> None:
         hint = " · Ctrl-O 或点击展开" if self.collapsed else ""
-        self.query_one(".tool-footer", Static).update(f"  ⎿  {self.tool_state} · {self.lines} 行{hint}")
+        self.query_one(".tool-footer", Static).update(
+            f"  ⎿  {self.tool_state} · {self.lines} 行{hint}"
+        )
 
     def set_collapsed(self, collapsed: bool) -> None:
         self.collapsed = collapsed
