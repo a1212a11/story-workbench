@@ -596,3 +596,26 @@ def test_slash_opens_command_palette_with_filter_completion_and_execution(tmp_pa
             assert app.stopping.is_set()
 
     _run(scenario())
+
+
+def test_palette_only_when_slash_is_the_first_character(tmp_path):
+    from textual.containers import Vertical
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "模型尚未接入" in app.transcript_text())
+            area = app.query_one("#input", PromptArea)
+            area.insert("他说")
+            await pilot.press("slash")
+            await pilot.pause(0.1)
+            assert not app.query_one("#palette", Vertical).display and area.text == "他说/"
+            await pilot.press("enter")  # 普通发送，不当命令
+            await pilot.pause(0.1)
+            assert "> 他说/" in app.transcript_text()
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
