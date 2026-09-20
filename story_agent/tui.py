@@ -12,10 +12,12 @@ Enter 批准、n 不批准、打字是不批准并带意见、Esc 也是不批�
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 from pathlib import Path
 
+import textual._wrap as textual_wrap
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -29,6 +31,19 @@ from story_agent.approval import Approval, ApprovalCard, parse_answer
 from story_agent.config import AgentConfig, Clients
 from story_agent.provider import CancelSignal
 from story_agent.workspace import Workspace, WorkspaceError
+
+# 界面库按空格切词换行：一整段没有空格的中文会被当成一个词整体挪行，出现「1.」或「⏺」
+# 单独占一行。把每个中日韩字符（连同紧跟的收尾标点）当成一个可断的词，就能在字间换行。
+_CJK = "\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef"
+_CLOSING = "，。、；：！？）」』》〉】…—"
+CJK_CHUNK = re.compile(rf"[{_CJK}][{_CLOSING}]*\s*|\S+?(?=[{_CJK}])\s*|\S+\s*|\s+")
+
+
+def install_cjk_wrapping() -> None:
+    textual_wrap.re_chunk = CJK_CHUNK
+
+
+install_cjk_wrapping()
 
 SPINNER = "·✢✳✶✻✽"
 HISTORY_ON_SCREEN = 12
@@ -241,16 +256,16 @@ class WorkbenchApp(App[int]):
         height: 1fr; padding: 0 2;
         scrollbar-size-vertical: 1; scrollbar-color: $surface; scrollbar-background: $background;
     }
-    #transcript > * { margin-bottom: 1; }
-    .welcome { border: round $accent; padding: 0 1; width: auto; }
-    .author { color: $text-muted; }
+    .welcome { color: $text-muted; margin-bottom: 1; }
+    .divider { color: $text-muted; margin: 1 0; }
+    .author { color: $text-muted; margin-top: 1; }
     .system { color: $text-muted; }
-    .history { color: $text-muted; }
-    .reply { height: auto; }
+    .history { opacity: 70%; }
+    .reply { height: auto; margin-top: 1; }
     .reply > .dot { width: 2; color: $accent; }
     .reply > Static, .reply > Markdown { width: 1fr; }
-    .reply > Markdown { margin: 0; padding: 0; }
-    .tool { height: auto; margin-bottom: 1; }
+    .reply > Markdown { margin: 0; padding: 0; background: transparent; }
+    .tool { height: auto; margin-top: 1; }
     .tool-header { color: $accent; }
     .tool-header.ok { color: $success; }
     .tool-header.error { color: $error; }
@@ -350,10 +365,8 @@ class WorkbenchApp(App[int]):
         )
         port._ui(
             self.show_welcome,
-            f"✻ 故事工作台 · 《{workspace.title}》\n\n"
-            f"  模型：{model}\n"
-            f"  目录：{workspace.root}\n\n"
-            "  直接说你要做什么。要改正式文件时我会先给你看改动，你批准才生效。",
+            f"✻ 《{workspace.title}》 · {model}\n"
+            f"  {_short_path(workspace.root)} · 直接说你要做什么；改正式文件前我会先给你看改动。",
         )
         if self.clients is None:
             port.say("未检测到模型密钥：可以记录想法；写作与审读需要设置密钥后重新打开。")
@@ -431,13 +444,22 @@ class WorkbenchApp(App[int]):
     def show_history(self, rows: list[tuple[str, str]]) -> None:
         """重新打开时回放最近的对话，淡色显示；代理的上下文里也有这些。"""
         self._log.append("── 上次的对话 ──")
-        self._mount(Static("── 上次的对话 ──", classes="system", markup=False))
+        self._mount(Static("── 上次的对话 ──", classes="divider", markup=False))
         for role, text in rows:
-            line = f"> {text}" if role == "author" else f"⏺ {text}"
-            self._log.append(line)
-            self._mount(Static(line, classes="history", markup=False))
+            if role == "author":
+                self._log.append(f"> {text}")
+                self._mount(Static(f"> {text}", classes="author history", markup=False))
+            else:
+                self._log.append(f"⏺ {text}")
+                self._mount(
+                    Horizontal(
+                        Static("⏺", classes="dot", markup=False),
+                        Markdown(text),
+                        classes="reply history",
+                    )
+                )
         self._log.append("── 现在 ──")
-        self._mount(Static("── 现在 ──", classes="system", markup=False))
+        self._mount(Static("── 现在 ──", classes="divider", markup=False))
 
     def show_welcome(self, text: str) -> None:
         self._log.append(text)
@@ -639,6 +661,13 @@ class WorkbenchApp(App[int]):
         self.stopping.set()
         self.port.cancel.set()
         self.inbox.put(None)
+
+
+def _short_path(path: Path) -> str:
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _short(count: int) -> str:

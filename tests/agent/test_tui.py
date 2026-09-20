@@ -297,3 +297,12 @@ def test_clicking_transcript_does_not_steal_keyboard_focus(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_chinese_wraps_between_characters_not_after_the_number():
+    from textual._wrap import compute_wrap_offsets
+
+    text = "⏺ 1. 严格保留前两段原封不动，这一段很长，用来测试中文换行。"
+    breaks = compute_wrap_offsets(text, 20, 8)
+    assert breaks and breaks[0] > len("⏺ 1. ")  # 不在编号后面整体挪行
+    assert all(text[b] not in "，。" for b in breaks)  # 行首不出现收尾标点
