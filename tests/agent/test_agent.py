@@ -316,3 +316,4 @@ def test_notes_and_preferences_appear_in_the_system_prompt(workspace):
     prompt = agent.system_prompt()
     assert "作者拒绝过整章重写" in prompt and "代理笔记.md 是你的笔记" in prompt
     assert "作者的偏好与禁忌" in prompt
+    assert "不超过十行" in prompt and "写进 草稿/ 里的文件" in prompt
