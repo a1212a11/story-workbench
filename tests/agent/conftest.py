@@ -68,6 +68,7 @@ class Reply:
     truncated: bool = False
     error: str | None = None
     hook: object = None  # 首个片段后调用 hook(cancel)
+    thinking: str = ""  # 正文之前的思考增量
 
 
 def use(name: str, uid: str = "t1", **args) -> ToolUseBlock:
@@ -86,6 +87,12 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
         if reply.error and not reply.text:
             yield StreamEvent(EventKind.ERROR, error=reply.error)
             return
+        for piece in (
+            reply.thinking[: len(reply.thinking) // 2],
+            reply.thinking[len(reply.thinking) // 2 :],
+        ):
+            if piece:
+                yield StreamEvent(EventKind.THINKING, text=piece)
         half = len(reply.text) // 2
         pieces = [p for p in (reply.text[:half], reply.text[half:]) if p]
         for index, piece in enumerate(pieces):

@@ -489,6 +489,8 @@ class Agent:
                     if event.kind is EventKind.TEXT:
                         parts.append(event.text)
                         self.port.emit(event.text)
+                    elif event.kind is EventKind.THINKING:
+                        self._notify("thinking", event.text)
                     elif event.kind is EventKind.TOOL_USE and event.tool_use is not None:
                         uses.append(event.tool_use)
                     elif event.kind is EventKind.USAGE:

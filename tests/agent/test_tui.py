@@ -1064,3 +1064,39 @@ def test_first_escape_says_what_the_second_one_does_and_typing_cancels_it(tmp_pa
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_thinking_streams_dim_then_collapses_to_one_line(tmp_path):
+    from story_agent.tui import ThinkingBlock
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients(
+        [Reply("开场。"), Reply("答案在这里。", thinking="先想一想这个世界靠什么活着。")]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _send(pilot, "聊聊产业")
+            await _wait(app, pilot, lambda: "答案在这里。" in app.transcript_text())
+            await pilot.pause(0.3)
+            blocks = list(app.query(ThinkingBlock))
+            assert len(blocks) == 1
+            block = blocks[0]
+            assert block.text == "先想一想这个世界靠什么活着。"  # 思考内容留着，能展开看
+            assert block.collapsed  # 回答开始后收起
+            assert "✻ 思考了" in str(block.query_one(".thinking-header", Static).content)
+            # 思考排在回复之前，且不算进回复正文
+            body = app.transcript_text()
+            assert body.index("✻ 思考了") < body.index("答案在这里。")
+            assert "先想一想" not in [t for _, t in Workspace(path).all_transcript()][-1]
+            await pilot.press("ctrl+o")
+            await pilot.pause(0.1)
+            assert not block.collapsed  # Ctrl-O 展开
+            block.on_click()
+            assert block.collapsed  # 点一下收起
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

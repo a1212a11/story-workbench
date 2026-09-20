@@ -25,6 +25,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
@@ -309,6 +310,55 @@ def clean_markdown(text: str) -> str:
     return "\n".join(lines)
 
 
+class ThinkingBlock(Vertical):
+    """模型回答前的思考：实时暗色显示，回答开始后收起成一行，点击或 Ctrl-O 展开。"""
+
+    def __init__(self) -> None:
+        super().__init__(classes="thinking")
+        self.text = ""
+        self.collapsed = False
+        self.started = time.monotonic()
+        self.done_seconds: int | None = None
+
+    @property
+    def seconds(self) -> int:
+        return max(int(time.monotonic() - self.started), 1)
+
+    def compose(self) -> ComposeResult:
+        yield Static("✻ 思考中……", classes="thinking-header", markup=False)
+        yield Static("", classes="thinking-body", markup=False)
+
+    def on_mount(self) -> None:
+        self._repaint()  # 挂载之前收到的片段在这里补上
+
+    def _repaint(self) -> None:  # 不能叫 _render，那是界面库的内部方法
+        try:
+            header = self.query_one(".thinking-header", Static)
+            body = self.query_one(".thinking-body", Static)
+        except NoMatches:  # 还没 compose，等 on_mount
+            return
+        done = self.done_seconds
+        header.update("✻ 思考中……" if done is None else f"✻ 思考了 {done} 秒")
+        body.update(self.text)
+        body.display = not self.collapsed
+
+    def add_chunk(self, chunk: str) -> None:
+        self.text += chunk
+        self._repaint()
+
+    def finish(self, collapsed: bool) -> None:
+        self.done_seconds = self.seconds
+        self.collapsed = collapsed
+        self._repaint()
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self.collapsed = collapsed
+        self._repaint()
+
+    def on_click(self) -> None:
+        self.set_collapsed(not self.collapsed)
+
+
 def colorize_diff(text: str) -> Text:
     """把统一 diff 着色：删除行红、新增行绿、位置行暗；其他文字原样。"""
     result = Text()
@@ -379,7 +429,10 @@ class ThreadPort:
 
     # 代理观察者
     def reply_started(self) -> None:
-        self._ui(self.app.begin_reply)
+        self._ui(self.app.prepare_reply)
+
+    def thinking(self, chunk: str) -> None:
+        self._ui(self.app.show_thinking, chunk)
 
     def reply_finished(self, text: str) -> None:
         self._ui(self.app.end_reply, text)
@@ -424,6 +477,9 @@ class WorkbenchApp(App[int]):
     .reply > Markdown MarkdownListItem { margin: 0; margin-right: 1; }
     .reply > Markdown MarkdownListItem MarkdownBlock { margin: 0; }
     .reply > Markdown MarkdownBullet { color: $accent; }
+    .thinking { height: auto; margin-top: 1; }
+    .thinking-header { color: $text-muted; }
+    .thinking-body { color: $text-muted; padding-left: 2; }
     .tool { height: auto; margin-top: 1; }
     .tool-header { color: $accent; }
     .tool-header.ok { color: $success; }
@@ -500,6 +556,7 @@ class WorkbenchApp(App[int]):
         self._reply_stream: Static | None = None
         self._reply_text = ""
         self._notice: Static | None = None  # 正在做某事的那一行，做完就地改成结果
+        self._thinking: ThinkingBlock | None = None
         self._log: list[str] = []
         self.status_text = ""
         self.current_card: ApprovalCard | None = None
@@ -802,7 +859,32 @@ class WorkbenchApp(App[int]):
         self.follow = True  # 作者说了话，回到底部
         self._mount(Static(f"> {text}", classes="author", markup=False))
 
+    def prepare_reply(self) -> None:
+        """一次模型调用开始。先不挂回复行，等真有文字再挂，好让思考过程排在它前面。"""
+        self._flush_reply_stream()
+        self._reply_row = None
+        self._reply_text = ""
+        self.busy_verb = "思考中"
+
+    def show_thinking(self, chunk: str) -> None:
+        if self._current_tool is not None:
+            return
+        if self._thinking is None:
+            self._flush_reply_stream()
+            self._thinking = ThinkingBlock()
+            self.busy_verb = "思考中"
+            self._mount(self._thinking)
+        self._thinking.add_chunk(chunk)
+        self._scroll()
+
+    def _finish_thinking(self) -> None:
+        block, self._thinking = self._thinking, None
+        if block is not None:
+            self._log.append(f"✻ 思考了 {block.seconds} 秒")
+            block.finish(collapsed=not self.verbose)
+
     def begin_reply(self) -> None:
+        self._finish_thinking()
         self._flush_reply_stream()
         self._reply_text = ""
         self._reply_stream = Static("", markup=False)
@@ -813,14 +895,17 @@ class WorkbenchApp(App[int]):
         self._mount(self._reply_row)
 
     def end_reply(self, text: str) -> None:
+        self._finish_thinking()
         row = self._reply_row
         self._reply_row = self._reply_stream = None
         self._reply_text = ""
-        if row is None:
-            return
         if not text.strip():
-            row.remove()
+            if row is not None:
+                row.remove()
             return
+        if row is None:  # 没有流式片段就直接给了整段（脚本客户端、非流式回退）
+            row = Horizontal(Static("⏺", classes="dot", markup=False), classes="reply")
+            self._mount(row)
         self._log.append(text)
         for widget in row.query(Static):
             if not widget.has_class("dot"):
@@ -829,6 +914,7 @@ class WorkbenchApp(App[int]):
         self._scroll()
 
     def begin_tool(self, label: str, name: str = "", args: dict | None = None) -> None:
+        self._finish_thinking()
         self._flush_reply_stream()
         preface = None
         if self.dev and args:
@@ -864,6 +950,7 @@ class WorkbenchApp(App[int]):
         self._scroll()
 
     def end_turn(self, seconds: float = 0.0, calls: int = 0, cancelled: bool = False) -> None:
+        self._finish_thinking()
         self._flush_reply_stream()
         self._current_tool = None
         if calls:
@@ -1173,6 +1260,9 @@ class WorkbenchApp(App[int]):
         for block in self._transcript().query(ToolBlock):
             if block is not self._current_tool:
                 block.set_collapsed(self._default_collapsed(block))
+        for thinking in self._transcript().query(ThinkingBlock):
+            if thinking is not self._thinking:
+                thinking.set_collapsed(not self.verbose)
         self._scroll()
 
     def action_editor_cancel_or_quit(self) -> None:

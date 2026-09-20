@@ -16,6 +16,7 @@ from typing import Any, Protocol
 
 class EventKind(StrEnum):
     TEXT = "text"
+    THINKING = "thinking"  # 推理型号回答前的思考增量；不是回复正文
     TOOL_USE = "tool_use"
     USAGE = "usage"
     COMPLETED = "completed"
@@ -127,6 +128,21 @@ class AsyncCompleteCall(Protocol):
 
 class ProviderError(Exception):
     """协议或网络层错误；由用例转记为 MODEL_FAILED。不含密钥或请求头。"""
+
+
+def _delta_of(event) -> StreamEvent | None:
+    """流事件里的正文或思考增量；其他事件返回 None。"""
+    if getattr(event, "type", "") != "content_block_delta":
+        return None
+    delta = getattr(event, "delta", None)
+    kind = getattr(delta, "type", "")
+    if kind == "text_delta":
+        text = getattr(delta, "text", "")
+        return StreamEvent(EventKind.TEXT, text=text) if text else None
+    if kind == "thinking_delta":
+        text = getattr(delta, "thinking", "")
+        return StreamEvent(EventKind.THINKING, text=text) if text else None
+    return None
 
 
 def describe_api_error(exc: Exception) -> str:
@@ -248,13 +264,14 @@ def make_anthropic_clients(
         kwargs = _request_kwargs(messages, options, disable_thinking)
         try:
             with _client(options).messages.stream(**kwargs) as response:
-                for text in response.text_stream:
+                for event in response:
                     if cancel.is_set():
                         response.close()
                         yield StreamEvent(EventKind.ERROR, error="cancelled")
                         return
-                    if text:
-                        yield StreamEvent(EventKind.TEXT, text=text)
+                    piece = _delta_of(event)
+                    if piece is not None:
+                        yield piece
                 final = response.get_final_message()
         except APIError as exc:
             yield StreamEvent(EventKind.ERROR, error=describe_api_error(exc))
@@ -329,13 +346,14 @@ def make_async_anthropic_clients(
         kwargs = _request_kwargs(messages, options, disable_thinking)
         try:
             async with _client(options) as client, client.messages.stream(**kwargs) as response:
-                async for text in response.text_stream:
+                async for event in response:
                     if cancel.is_set():
                         await response.close()
                         yield StreamEvent(EventKind.ERROR, error="cancelled")
                         return
-                    if text:
-                        yield StreamEvent(EventKind.TEXT, text=text)
+                    piece = _delta_of(event)
+                    if piece is not None:
+                        yield piece
                 final = await response.get_final_message()
         except APIError as exc:
             yield StreamEvent(EventKind.ERROR, error=describe_api_error(exc))
