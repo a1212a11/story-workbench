@@ -711,8 +711,6 @@ class WorkbenchApp(App[int]):
                         classes="reply history",
                     )
                 )
-        self._log.append("── 现在 ──")
-        self._mount(Static("── 现在 ──", classes="divider", markup=False))
 
     def show_welcome(self, text: str) -> None:
         self._log.append(text)
