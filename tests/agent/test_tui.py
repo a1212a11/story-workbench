@@ -552,3 +552,47 @@ def test_dev_mode_shows_tool_args_and_call_stats(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_slash_opens_command_palette_with_filter_completion_and_execution(tmp_path):
+    from textual.containers import Vertical
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "模型尚未接入" in app.transcript_text())
+            area = app.query_one("#input", PromptArea)
+            panel = app.query_one("#palette", Vertical)
+            assert not panel.display
+            await pilot.press("slash")
+            await pilot.pause(0.1)
+            assert panel.display and [c for c, _ in app.palette_items] == ["/help", "/dev", "/exit"]
+            await pilot.press("e")
+            await pilot.pause(0.1)
+            assert [c for c, _ in app.palette_items] == ["/exit"]
+            await pilot.press("backspace")
+            await pilot.pause(0.1)
+            assert len(app.palette_items) == 3 and app.palette_index == 0
+            await pilot.press("down")
+            await pilot.pause(0.05)
+            assert app.palette_index == 1
+            await pilot.press("tab")
+            await pilot.pause(0.1)
+            assert area.text == "/dev" and app.palette_open
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+            assert not panel.display and area.text == "/dev"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert app.dev and area.text == ""
+            await pilot.press("slash")
+            await pilot.press("e")
+            await pilot.pause(0.1)
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert app.stopping.is_set()
+
+    _run(scenario())

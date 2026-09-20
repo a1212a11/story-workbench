@@ -64,13 +64,23 @@ CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见 · PgUp/
 # ---------------------------------------------------------------- 输入与编辑器
 
 
+COMMANDS: tuple[tuple[str, str], ...] = (
+    ("/help", "按键与命令说明"),
+    ("/dev", "开发者模式开关"),
+    ("/exit", "退出"),
+)
+
+
 class PromptArea(TextArea):
-    """多行输入：Enter 发送，Ctrl-J 换行。"""
+    """多行输入：Enter 发送，Ctrl-J 换行；输入 / 时上下键、Tab、Enter 操作命令列表。"""
 
     BINDINGS = [
         Binding("enter", "submit", "发送", priority=True),
         Binding("ctrl+j", "newline", "换行", priority=True, show=False),
         Binding("shift+enter", "newline", "换行", priority=True, show=False),
+        Binding("up", "palette_move(-1)", "上一个命令", priority=True, show=False),
+        Binding("down", "palette_move(1)", "下一个命令", priority=True, show=False),
+        Binding("tab", "palette_complete", "补全命令", priority=True, show=False),
     ]
 
     class Submitted(Message):
@@ -79,12 +89,30 @@ class PromptArea(TextArea):
             self.text = text
 
     def action_submit(self) -> None:
+        app = self.app
+        if isinstance(app, WorkbenchApp) and app.palette_open:
+            app.palette_execute()
+            return
         text = self.text
         self.clear()
         self.post_message(self.Submitted(text))
 
     def action_newline(self) -> None:
         self.insert("\n")
+
+    def action_palette_move(self, delta: int) -> None:
+        app = self.app
+        if isinstance(app, WorkbenchApp) and app.palette_open:
+            app.palette_move(delta)
+        elif delta < 0:
+            self.action_cursor_up()
+        else:
+            self.action_cursor_down()
+
+    def action_palette_complete(self) -> None:
+        app = self.app
+        if isinstance(app, WorkbenchApp) and app.palette_open:
+            app.palette_complete()
 
 
 class EditorScreen(ModalScreen[str | None]):
@@ -309,6 +337,9 @@ class WorkbenchApp(App[int]):
     #card-title { color: $warning; text-style: bold; }
     #card-diff { height: auto; max-height: 18; scrollbar-size-vertical: 1; }
     #card-hint { color: $text-muted; }
+    #palette { margin: 0 2; height: auto; border: round $surface; padding: 0 1; }
+    .palette-item { color: $text-muted; }
+    .palette-item.selected { color: $text; background: $accent 30%; }
     #inputbox { border: round $accent; height: auto; max-height: 8; margin: 0 1; }
     #inputbox > .prompt { width: 2; padding-left: 1; color: $accent; }
     #input { height: auto; max-height: 6; border: none; padding: 0; background: transparent; }
@@ -351,6 +382,8 @@ class WorkbenchApp(App[int]):
         self.busy_verb = "思考中"
         self.verbose = False  # Ctrl-O：展开全部工具输出
         self.dev = False  # /dev：工具参数、每次调用的用量与耗时
+        self.palette_items: list[tuple[str, str]] = []
+        self.palette_index = 0
         self._quit_armed_at = 0.0  # 空闲时第一次 Ctrl-C 的时刻；两秒内再按一次才退出
         self._current_tool: ToolBlock | None = None
         self._reply_row: Horizontal | None = None
@@ -370,6 +403,7 @@ class WorkbenchApp(App[int]):
             with VerticalScroll(id="card-diff", can_focus=False):
                 yield Static("", id="card-body")
             yield Static(CARD_HINT, id="card-hint", markup=False)
+        yield Vertical(id="palette")
         with Horizontal(id="inputbox"):
             yield Static(">", classes="prompt", markup=False)
             yield PromptArea(id="input", soft_wrap=True)
@@ -379,6 +413,7 @@ class WorkbenchApp(App[int]):
 
     def on_mount(self) -> None:
         self.query_one("#card", Vertical).display = False
+        self.query_one("#palette", Vertical).display = False
         self.query_one("#spinner", Static).display = False
         self.query_one("#input", PromptArea).focus()
         self.set_interval(0.1, self._tick)
@@ -684,6 +719,61 @@ class WorkbenchApp(App[int]):
         self.show_author(text)
         self.inbox.put(text)
 
+    # ------------------------------------------------------------ 命令列表
+
+    @property
+    def palette_open(self) -> bool:
+        return bool(self.palette_items) and self.query_one("#palette", Vertical).display
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id == "input":
+            self._update_palette(event.text_area.text)
+
+    def _update_palette(self, text: str) -> None:
+        panel = self.query_one("#palette", Vertical)
+        head = text.split("\n", 1)[0].strip().lower()
+        items: list[tuple[str, str]] = []
+        if text.startswith("/") and "\n" not in text and self.mode != "approve":
+            items = [c for c in COMMANDS if c[0].startswith(head)]
+        if items != self.palette_items:
+            self.palette_items = items
+            self.palette_index = 0
+        panel.display = bool(items)
+        if items:
+            self._render_palette()
+
+    def _render_palette(self) -> None:
+        panel = self.query_one("#palette", Vertical)
+        panel.remove_children()
+        for index, (name, description) in enumerate(self.palette_items):
+            classes = "palette-item selected" if index == self.palette_index else "palette-item"
+            panel.mount(Static(f"{name:<8} {description}", classes=classes, markup=False))
+
+    def palette_move(self, delta: int) -> None:
+        if not self.palette_items:
+            return
+        self.palette_index = (self.palette_index + delta) % len(self.palette_items)
+        self._render_palette()
+
+    def palette_complete(self) -> None:
+        if not self.palette_items:
+            return
+        area = self.query_one("#input", PromptArea)
+        area.clear()
+        area.insert(self.palette_items[self.palette_index][0])
+
+    def palette_execute(self) -> None:
+        if not self.palette_items:
+            return
+        command = self.palette_items[self.palette_index][0]
+        self.palette_close()
+        self.query_one("#input", PromptArea).clear()
+        self._meta_command(command)
+
+    def palette_close(self) -> None:
+        self.palette_items = []
+        self.query_one("#palette", Vertical).display = False
+
     def _meta_command(self, text: str) -> bool:
         """只处理几个元命令；别的一律交给代理。"""
         command = text.lower()
@@ -711,6 +801,9 @@ class WorkbenchApp(App[int]):
         return False
 
     def action_cancel_turn(self) -> None:
+        if self.palette_open:
+            self.palette_close()
+            return
         if self.mode == "approve":
             self.end_approval("n")
             self.port.answers.put("n")
