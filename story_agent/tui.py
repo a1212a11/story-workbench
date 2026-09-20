@@ -120,10 +120,10 @@ class ToolBlock(Vertical):
     def __init__(self, label: str, name: str = "") -> None:
         super().__init__(classes="tool")
         self.label = label
-        self.name = name
+        self.tool_name = name
         self.lines = 0
         self.collapsed = False
-        self.state = "…"
+        self.tool_state = "…"
         self.stream: Static | None = None
         self.stream_text = ""
 
@@ -162,12 +162,12 @@ class ToolBlock(Vertical):
         header = self.query_one(".tool-header", Static)
         header.remove_class("running")
         header.add_class("error" if is_error else "ok")
-        self.state = "出错" if is_error else "完成"
+        self.tool_state = "出错" if is_error else "完成"
         self._refresh_footer()
 
     def _refresh_footer(self) -> None:
         hint = " · Ctrl-O 或点击展开" if self.collapsed else ""
-        self.query_one(".tool-footer", Static).update(f"  ⎿  {self.state} · {self.lines} 行{hint}")
+        self.query_one(".tool-footer", Static).update(f"  ⎿  {self.tool_state} · {self.lines} 行{hint}")
 
     def set_collapsed(self, collapsed: bool) -> None:
         self.collapsed = collapsed
@@ -175,7 +175,7 @@ class ToolBlock(Vertical):
         self._refresh_footer()
 
     def on_click(self) -> None:
-        if self.state != "…":
+        if self.tool_state != "…":
             self.set_collapsed(not self.collapsed)
 
 
@@ -653,7 +653,7 @@ class WorkbenchApp(App[int]):
         self.action_quit_app()
 
     def _default_collapsed(self, block: ToolBlock) -> bool:
-        return not self.verbose and block.name in QUIET_TOOLS
+        return not self.verbose and block.tool_name in QUIET_TOOLS
 
     def action_toggle_tools(self) -> None:
         self.verbose = not self.verbose

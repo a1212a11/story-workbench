@@ -342,7 +342,7 @@ def test_quiet_tool_outputs_are_collapsed_by_default(tmp_path):
             await _send(pilot, "")
             await _wait(app, pilot, lambda: "好了。" in app.transcript_text())
             blocks = list(app.query(ToolBlock))
-            assert [b.name for b in blocks] == ["read", "edit"]
+            assert [b.tool_name for b in blocks] == ["read", "edit"]
             assert blocks[0].collapsed and not blocks[0].body().display
             assert not blocks[1].collapsed and blocks[1].body().display
             assert "点击展开" in str(blocks[0].query_one(".tool-footer", Static).content)
