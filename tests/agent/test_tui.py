@@ -660,3 +660,38 @@ def test_double_escape_rewinds_conversation_and_files(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_status_line_has_a_context_gauge_that_warns_when_nearly_full(tmp_path):
+    from dataclasses import replace
+
+    from story_agent.tui import context_gauge
+
+    assert context_gauge(42, 100) == ("▮▮▮▮▯▯▯▯▯▯ 42%", 0.42)
+    assert context_gauge(0, 0) == ("", 0.0)
+    assert context_gauge(300, 100)[0].startswith("▮" * 10)
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    tight = replace(
+        CONFIG,
+        context_tokens=2_600,
+        template_reserve=100,
+        options=replace(CONFIG.options, max_output_tokens=100),
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "%" in app.status_text)
+            assert "▯" in app.status_text or "▮" in app.status_text
+        app = WorkbenchApp(path, clients=scripted_clients([Reply("好。")]), config=tight)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(
+                app, pilot, lambda: "%" in app.status_text and "好。" in app.transcript_text()
+            )
+            ratio = int(app.status_text.rsplit(" ", 1)[-1].rstrip("%"))
+            assert ratio >= 85
+            assert "快满了" not in app.status_text  # 红色就是提示，不加字
+
+    _run(scenario())

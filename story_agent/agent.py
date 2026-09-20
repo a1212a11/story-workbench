@@ -253,6 +253,14 @@ class Agent:
             ),
         )
 
+    def context_usage(self) -> tuple[int, int]:
+        """(当前上下文估算 token, 预算)。预算用满时最早的对话会被压缩成摘要。"""
+        used = estimate_tokens(self.system_prompt()) + sum(
+            _message_tokens(m, estimate_tokens) for m in self.transcript
+        )
+        limit = self.config.budget if self.config else 20_000
+        return used, max(limit, 1)
+
     def _messages(self) -> list[ChatMessage]:
         system = self.system_prompt()
         budget = (self.config.budget if self.config else 20_000) - estimate_tokens(system)

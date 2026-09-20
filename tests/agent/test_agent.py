@@ -362,3 +362,12 @@ def test_log_file_records_calls_tools_and_failures(chapter_workspace):
 def test_persona_points_to_the_co_design_skill(workspace):
     agent, _, _ = make_agent(workspace, [])
     assert "技能/共创.md" in agent.system_prompt()
+
+
+def test_context_usage_counts_system_prompt_and_transcript(workspace):
+    agent, _, _ = make_agent(workspace, [])
+    used, limit = agent.context_usage()
+    assert limit == CONFIG.budget and used > 0
+    agent.transcript.append(ChatMessage("user", "一" * 1000))
+    used_after, _ = agent.context_usage()
+    assert used_after - used == 1200  # 中文按 1.2 估算

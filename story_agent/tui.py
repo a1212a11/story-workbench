@@ -52,7 +52,8 @@ REWIND_CHOICES = 10
 # 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
 QUIET_TOOLS = frozenset({"read", "search", "verify", "history"})
 HISTORY_ON_SCREEN = 12
-IDLE_HINT = "Enter 发送 · Ctrl-J 换行 · PgUp/PgDn 翻页 · Ctrl-O 展开/折叠工具输出 · Ctrl-D 退出"
+IDLE_HINT = "/help 查看按键与命令 · Enter 发送 · Ctrl-J 换行"
+GAUGE_CELLS = 10
 BUSY_HINT = "Esc 中断 · 已保存的改动都在"
 HELP_TEXT = (
     "直接说你要做什么；改正式文件前会先给你看改动，Enter 批准、n 不批准、打字是把意见交给它。\n"
@@ -549,7 +550,8 @@ class WorkbenchApp(App[int]):
         cost = agent.config.cost(used) if agent.config else None
         if cost is not None:
             text += f" · ≈${cost:.2f}"
-        self.port._ui(self.set_status, text)
+        context_used, context_limit = agent.context_usage()
+        self.port._ui(self.set_status, text, context_used, context_limit)
 
     # ------------------------------------------------------------ 界面更新（主线程）
 
@@ -740,9 +742,14 @@ class WorkbenchApp(App[int]):
             f"{frame} {self.busy_verb}… ({elapsed}s · esc 中断)"
         )
 
-    def set_status(self, text: str) -> None:
-        self.status_text = text
-        self.query_one("#hint-right", Static).update(text)
+    def set_status(self, text: str, context_used: int = 0, context_limit: int = 0) -> None:
+        gauge, ratio = context_gauge(context_used, context_limit)
+        self.status_text = f"{text} · {gauge}" if gauge else text
+        rendered = Text(text + " · ")
+        if gauge:
+            style = "green" if ratio < 0.7 else ("yellow" if ratio < 0.85 else "bold red")
+            rendered.append(gauge, style=style)
+        self.query_one("#hint-right", Static).update(rendered)
 
     def transcript_text(self) -> str:
         """已记录的对话文本，含正在流式显示的部分；供测试与调试。"""
@@ -976,6 +983,16 @@ class WorkbenchApp(App[int]):
         self.stopping.set()
         self.port.cancel.set()
         self.inbox.put(None)
+
+
+def context_gauge(used: int, limit: int) -> tuple[str, float]:
+    """上下文占用的十格小条与比例，例如「▮▮▮▮▯▯▯▯▯▯ 42%」。"""
+    if limit <= 0:
+        return "", 0.0
+    ratio = min(used / limit, 1.0)
+    filled = round(ratio * GAUGE_CELLS)
+    bar = "▮" * filled + "▯" * (GAUGE_CELLS - filled)
+    return f"{bar} {ratio * 100:.0f}%", ratio
 
 
 def _short_path(path: Path) -> str:
