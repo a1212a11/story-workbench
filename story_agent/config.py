@@ -32,6 +32,16 @@ PROVIDERS = {
         "OPENROUTER_API_KEY", "google/gemini-3.8-flash", "https://openrouter.ai/api"
     ),
 }
+# 已核对的价格（美元 / 百万 token），只填确认过的；配置文件可覆盖。2026-09-20 按 OpenRouter 列表。
+KNOWN_PRICES: dict[str, tuple[float, float]] = {
+    "google/gemini-3.8-flash": (0.75, 3.75),
+    "google/gemini-3.7-flash": (0.75, 3.75),
+    "google/gemini-3.6-flash": (0.75, 3.75),
+    "google/gemini-3.5-flash": (1.50, 9.00),
+    "google/gemini-3.5-flash-lite": (0.30, 2.50),
+    "google/gemini-2.5-flash": (0.30, 2.50),
+    "google/gemini-2.5-pro": (1.25, 10.00),
+}
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 CONFIG_ENV = "STORY_WORKBENCH_CONFIG"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "story-workbench" / "config.json"
@@ -45,6 +55,8 @@ class Settings:
     context_tokens: int = 100_000
     template_reserve: int = 2_000
     provider: str = "anthropic"
+    input_price: float | None = None  # 美元 / 百万输入 token
+    output_price: float | None = None  # 美元 / 百万输出 token
 
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS:
@@ -65,6 +77,20 @@ class Settings:
             raise ValueError("超时秒数须为有限正数。")
         if self.context_tokens <= self.template_reserve + self.max_output_tokens:
             raise ValueError("上下文限额必须大于模板预留与输出限额之和。")
+        for name in ("input_price", "output_price"):
+            value = getattr(self, name)
+            if value is not None and (
+                type(value) not in (int, float) or not math.isfinite(value) or value < 0
+            ):
+                raise ValueError("价格须为非负数（美元 / 百万 token）。")
+        if (self.input_price is None) != (self.output_price is None):
+            raise ValueError("input_price 与 output_price 要一起给。")
+
+    @property
+    def prices(self) -> tuple[float, float] | None:
+        if self.input_price is not None and self.output_price is not None:
+            return float(self.input_price), float(self.output_price)
+        return KNOWN_PRICES.get(self.model or "")
 
     @property
     def api_key_env(self) -> str:
@@ -105,6 +131,13 @@ class AgentConfig:
     context_tokens: int
     template_reserve: int
     provider: str
+    prices: tuple[float, float] | None = None  # 美元 / 百万 token（输入, 输出）
+
+    def cost(self, usage: dict[str, int]) -> float | None:
+        if self.prices is None:
+            return None
+        cin, cout = self.prices
+        return (usage.get("input_tokens", 0) * cin + usage.get("output_tokens", 0) * cout) / 1e6
 
     @property
     def budget(self) -> int:
@@ -127,6 +160,7 @@ def build_agent_config(settings: Settings) -> AgentConfig:
         context_tokens=settings.context_tokens,
         template_reserve=settings.template_reserve,
         provider=settings.provider,
+        prices=settings.prices,
     )
 
 

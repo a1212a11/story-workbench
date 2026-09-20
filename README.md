@@ -33,7 +33,7 @@ AI 小说创作与故事工程系统。作者决定故事，AI 帮助讨论、�
 
 例如仅写 `{"provider": "deepseek"}` 即使用 DeepSeek 默认配置；`model` 可改成供应商支持的其他模型。没有配置文件时沿用 Anthropic。密钥在启动前通过对应环境变量提供，缺少密钥时仍可编辑和保存。配置错误会在启动时提示，不会自动换用另一供应商。
 
-OpenRouter 同样走其 Anthropic 兼容端点，`model` 用 OpenRouter 的写法（如 `google/gemini-3.8-flash`），只对新包 `story_agent` 生效。DeepSeek 复用现有 SDK，通过[官方 Anthropic 兼容接口](https://api-docs.deepseek.com/guides/anthropic_api/)访问，显式关闭思考模式；[模型名称](https://api-docs.deepseek.com/quick_start/pricing/)与[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)按 2026-09-14 官方文档核对。付费请求不自动重试。
+状态行会按已知价格估算本次花费；模型不在内置价格表里时，可在配置里加 `"input_price"` 与 `"output_price"`（美元 / 百万 token）。OpenRouter 同样走其 Anthropic 兼容端点，`model` 用 OpenRouter 的写法（如 `google/gemini-3.8-flash`），只对新包 `story_agent` 生效。DeepSeek 复用现有 SDK，通过[官方 Anthropic 兼容接口](https://api-docs.deepseek.com/guides/anthropic_api/)访问，显式关闭思考模式；[模型名称](https://api-docs.deepseek.com/quick_start/pricing/)与[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)按 2026-09-14 官方文档核对。付费请求不自动重试。
 
 真实调用验证：配置供应商和密钥后执行 `STORY_WORKBENCH_LIVE=1 uv run pytest tests/test_provider_live.py -s`，会产生费用。普通测试默认跳过真实调用。
 

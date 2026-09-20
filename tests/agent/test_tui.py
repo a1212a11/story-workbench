@@ -470,3 +470,20 @@ def test_new_file_card_lets_page_keys_scroll_the_transcript(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_status_line_shows_estimated_cost_when_prices_are_known(tmp_path):
+    from dataclasses import replace
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients([Reply("好。")])
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=replace(CONFIG, prices=(1000.0, 1000.0)))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "≈$" in app.status_text)
+            assert "≈$0.01" in app.status_text  # 开场轮 7 tokens × $1000/M
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

@@ -442,6 +442,9 @@ class WorkbenchApp(App[int]):
             f"《{agent.workspace.title}》 · {model}"
             f" · ↑{_short(used['input_tokens'])} ↓{_short(used['output_tokens'])} tokens"
         )
+        cost = agent.config.cost(used) if agent.config else None
+        if cost is not None:
+            text += f" · ≈${cost:.2f}"
         self.port._ui(self.set_status, text)
 
     # ------------------------------------------------------------ 界面更新（主线程）
