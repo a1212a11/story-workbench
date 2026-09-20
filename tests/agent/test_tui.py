@@ -967,3 +967,26 @@ def test_ctrl_c_in_the_editor_copies_but_never_quits(tmp_path, monkeypatch):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_compacting_notice_turns_into_its_result(tmp_path):
+    path = tmp_path / "novel"
+    ws = _chapter_workspace(path)
+    for i in range(25):
+        ws.append_transcript("author", f"第 {i} 句")
+        ws.append_transcript("assistant", f"记下了 {i}。")
+    clients = scripted_clients([Reply("接着聊。")], "作者说了很多短句。")
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "旧对话已整理成摘要。" in app.transcript_text())
+            await pilot.pause(0.2)
+            shown = [str(w.content) for w in app.query(".system")]
+            assert "正在整理之前的对话……" not in shown  # 那一行已经变成结果，不会一直挂着
+            assert "旧对话已整理成摘要。" in shown
+            assert app.agent is not None and app.agent.summary == "作者说了很多短句。"
+            assert not app.busy
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

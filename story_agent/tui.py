@@ -497,6 +497,7 @@ class WorkbenchApp(App[int]):
         self._reply_row: Horizontal | None = None
         self._reply_stream: Static | None = None
         self._reply_text = ""
+        self._notice: Static | None = None  # 正在做某事的那一行，做完就地改成结果
         self._log: list[str] = []
         self.status_text = ""
         self.current_card: ApprovalCard | None = None
@@ -554,14 +555,16 @@ class WorkbenchApp(App[int]):
         if recent:
             port._ui(self.show_history, recent)
         if agent.needs_compacting:  # 压缩旧对话要调用模型，先把界面显示出来再做
-            port.say("正在整理之前的对话……")
-            self.busy_verb = "整理旧对话"
+            port._ui(self.begin_notice, "正在整理之前的对话……", "整理旧对话")
             port._ui(self.set_busy, True)
             try:
-                if not agent.compact_pending():
-                    port.say("这次没整理成，之前的对话照原样带着。")
+                done = agent.compact_pending()
             finally:
                 port._ui(self.set_busy, False)
+            port._ui(
+                self.end_notice,
+                "旧对话已整理成摘要。" if done else "这次没整理成，之前的对话照原样带着。",
+            )
         self._refresh_status(agent)
         try:
             self._run_turn(agent, None)
@@ -771,6 +774,24 @@ class WorkbenchApp(App[int]):
             self._reply_text += chunk
             assert self._reply_stream is not None
             self._reply_stream.update(self._reply_text)
+        self._scroll()
+
+    def begin_notice(self, text: str, verb: str = "") -> None:
+        """显示一行「正在……」，完成时用 end_notice 就地换成结果。"""
+        if verb:
+            self.busy_verb = verb
+        self._notice = Static(text, classes="system", markup=False)
+        self._mount(self._notice)
+
+    def end_notice(self, text: str | None) -> None:
+        notice, self._notice = self._notice, None
+        if notice is None:
+            return
+        if text:
+            self._log.append(text)
+            notice.update(text)
+        else:
+            notice.remove()
         self._scroll()
 
     def show_author(self, text: str) -> None:
