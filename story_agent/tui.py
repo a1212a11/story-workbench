@@ -52,6 +52,12 @@ QUIET_TOOLS = frozenset({"read", "search", "verify", "history"})
 HISTORY_ON_SCREEN = 12
 IDLE_HINT = "Enter 发送 · Ctrl-J 换行 · PgUp/PgDn 翻页 · Ctrl-O 展开/折叠工具输出 · Ctrl-D 退出"
 BUSY_HINT = "Esc 中断 · 已保存的改动都在"
+HELP_TEXT = (
+    "直接说你要做什么；改正式文件前会先给你看改动，Enter 批准、n 不批准、打字是把意见交给它。\n"
+    "按键：Enter 发送 · Ctrl-J 换行 · Esc 中断或不批准 · PgUp/PgDn 翻页 · Ctrl-O 展开/折叠工具输出"
+    " · Ctrl-C 连按两次或 Ctrl-D 退出\n"
+    "命令：/help 这段说明 · /exit 退出 · /dev 开发者模式开关"
+)
 CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见 · PgUp/PgDn 翻看改动"
 
 
@@ -647,8 +653,22 @@ class WorkbenchApp(App[int]):
             return
         if not text:
             return
+        if self._meta_command(text):
+            return
         self.show_author(text)
         self.inbox.put(text)
+
+    def _meta_command(self, text: str) -> bool:
+        """只处理几个元命令；别的一律交给代理。"""
+        command = text.lower()
+        if command in ("/exit", "/quit", "/退出"):
+            self.action_quit_app()
+            return True
+        if command in ("/help", "/?", "/帮助"):
+            self.show_author(text)
+            self.show_line(HELP_TEXT)
+            return True
+        return False
 
     def action_cancel_turn(self) -> None:
         if self.mode == "approve":
