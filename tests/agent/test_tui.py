@@ -253,25 +253,25 @@ def test_colorize_diff_and_entrypoint_help(capsys):
     assert entry.main(["somewhere"]) == 2  # 非交互终端
 
 
-def test_reopen_replays_recent_conversation_and_resumes(tmp_path):
+def test_reopen_replays_recent_conversation_without_a_model_call(tmp_path):
     path = tmp_path / "novel"
     ws = _chapter_workspace(path)
     ws.append_transcript("author", "给我看看第一章")
     ws.append_transcript("assistant", "以上是第一章全文。")
-    clients = scripted_clients([Reply("接着上次的话题：第一章要不要改开头？")])
+    clients = scripted_clients([Reply("接着改开头。")])
 
     async def scenario():
         app = WorkbenchApp(path, clients=clients, config=CONFIG)
         async with app.run_test(size=(100, 32)) as pilot:
-            await _wait(app, pilot, lambda: "接着上次的话题" in app.transcript_text())
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
             text = app.transcript_text()
             assert "── 上次的对话 ──" in text and "> 给我看看第一章" in text
-            assert "⏺ 以上是第一章全文。" in text and text.index("上次的对话") < text.index(
-                "接着上次"
-            )
+            assert "⏺ 以上是第一章全文。" in text
+            assert clients.calls == []  # 重新打开不叫模型
+            await _send(pilot, "改开头")
+            await _wait(app, pilot, lambda: "接着改开头。" in app.transcript_text())
             sent = clients.calls[0]
             assert [m.role for m in sent] == ["system", "user", "assistant", "user"]
-            assert "重新打开了作品" in sent[-1].content
             await pilot.press("ctrl+d")
 
     _run(scenario())

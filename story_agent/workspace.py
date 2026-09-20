@@ -356,6 +356,9 @@ class Workspace:
             handle.write(f"{now:%H:%M} {prefix}{text.rstrip()}\n\n")
 
     def recent_transcript(self, limit: int = 40) -> list[tuple[str, str]]:
+        return self.all_transcript()[-limit:]
+
+    def all_transcript(self) -> list[tuple[str, str]]:
         path = self._private("对话.jsonl")
         if not path.exists():
             return []
@@ -369,7 +372,24 @@ class Workspace:
                 continue
             if record.get("role") in ("author", "assistant"):
                 rows.append((record["role"], record.get("text", "")))
-        return rows[-limit:]
+        return rows
+
+    def read_summary(self) -> tuple[str, int]:
+        """对话摘要与它覆盖到的对话条数。"""
+        path = self._private("摘要.json")
+        if not path.exists():
+            return "", 0
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            return "", 0
+        return str(data.get("summary", "")), int(data.get("covered", 0))
+
+    def write_summary(self, summary: str, covered: int) -> None:
+        self._private("摘要.json").write_text(
+            json.dumps({"summary": summary, "covered": covered}, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
 
     def record_usage(self, usage: dict[str, int], model: str, purpose: str) -> None:
         record = {

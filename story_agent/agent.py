@@ -16,6 +16,7 @@ from story_agent.provider import (
     CancelSignal,
     ChatMessage,
     EventKind,
+    ProviderError,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -31,9 +32,18 @@ from story_agent.workspace import (
 
 MAX_CALLS_PER_TURN = 40
 HISTORY_MESSAGES = 40
-RESUME_PROMPT = (
-    "（作者重新打开了作品，上面是之前的对话。先读 故事状态.md 和 大纲.md 确认现在的进度，"
-    "用一两句话接上上次的话题，提议下一步。这条提示作者看不见，直接对作者说话。）"
+NOTES_FILE = "草稿/代理笔记.md"
+NOTES_LIMIT = 2_000
+SUMMARY_LIMIT = 600
+SUMMARY_SYSTEM = "\n".join(
+    (
+        "你在为一位小说作者和写作助手的长期对话做压缩记录。把给你的对话压缩成要点，只留以后还用得上的：",
+        "- 作者说过的偏好、要求、禁忌，保留关键措辞；",
+        "- 作者做过的决定、拒绝过的提议和原因；",
+        "- 讨论中定下但可能还没写进文件的事；",
+        "- 没做完的事。",
+        f"合并进已有摘要，去重，不超过 {SUMMARY_LIMIT} 字。只输出摘要正文，不加标题。",
+    )
 )
 OPENING_PROMPT = (
     "（作者刚打开作品。先读 作品.md、大纲.md、故事状态.md，如果章节/ 里有正文也看一眼最新一章的"
@@ -60,6 +70,10 @@ PERSONA = "\n".join(
         "- 正式文件是 作品.md、大纲.md、决定.md、设定/、人物/、章节/。改它们要经作者批准；",
         "  作者不批准时你会拿到作者的意见，按意见调整再提议，不要原样重来。",
         "- 故事状态.md、草稿/ 是你的工作文件，直接写，不用问。",
+        "- 作者说出对文字、节奏、题材的偏好或禁忌时，整理成一句写进 作品.md 的「作者的偏好与禁忌」",
+        "  （要审批），以后每次动笔都照着它。",
+        "- 草稿/代理笔记.md 是你的笔记：作者拒绝过什么、为什么，什么样的提议作者会接受，哪些做法",
+        "  行不通。一轮里有新心得就追加进去，不用问；下面会自动给你看。",
         "- 作品.md 里还有占位提示（括号里的话）时，先和作者把题材、基调、篇幅、偏好补上，",
         "  再写新章；",
         "  作者说不清就按已有正文归纳后提议。",
@@ -81,6 +95,12 @@ PERSONA = "\n".join(
         "",
         "作品.md：",
         "{work}",
+        "",
+        "之前对话的摘要：",
+        "{summary}",
+        "",
+        "你的笔记（草稿/代理笔记.md）：",
+        "{notes}",
         "",
         "写作模型：{model_state}",
     )
@@ -161,10 +181,16 @@ class Agent:
         self.config = config
         self.max_calls = max_calls
         self.observer = observer
-        self.transcript: list[ChatMessage] = history_to_transcript(
-            workspace.recent_transcript(HISTORY_MESSAGES)
-        )
         self.session_usage = {"input_tokens": 0, "output_tokens": 0}
+        rows = workspace.all_transcript()
+        self.summary, self._covered = workspace.read_summary()
+        self.returning = bool(rows)
+        keep_from = max(self._covered, len(rows) - HISTORY_MESSAGES, 0)
+        if keep_from > self._covered and self.model_ready:
+            self.summary = self._compact(rows[self._covered : keep_from])
+            self._covered = keep_from
+            workspace.write_summary(self.summary, self._covered)
+        self.transcript: list[ChatMessage] = history_to_transcript(rows[keep_from:])
 
     # ------------------------------------------------------------ 消息装配
 
@@ -188,10 +214,15 @@ class Agent:
     def system_prompt(self) -> str:
         ws = self.workspace
         work = ws.read_text(WORK_FILE).strip() if ws.file_exists(WORK_FILE) else "（还没有）"
+        notes = ws.read_text(NOTES_FILE).strip() if ws.file_exists(NOTES_FILE) else ""
+        if len(notes) > NOTES_LIMIT:
+            notes = notes[-NOTES_LIMIT:]
         return PERSONA.format(
             title=ws.title,
             tree=self._tree(),
             work=work,
+            summary=self.summary or "（还没有）",
+            notes=notes or "（还没有）",
             model_state=(
                 f"{self.config.provider} / {self.config.options.model}"
                 if self.model_ready and self.config
@@ -202,8 +233,40 @@ class Agent:
     def _messages(self) -> list[ChatMessage]:
         system = self.system_prompt()
         budget = (self.config.budget if self.config else 20_000) - estimate_tokens(system)
-        self.transcript = fit_transcript(self.transcript, max(budget, 1_000), estimate_tokens)
+        kept = fit_transcript(self.transcript, max(budget, 1_000), estimate_tokens)
+        dropped = self.transcript[: len(self.transcript) - len(kept)]
+        self.transcript = kept
+        if dropped and self.model_ready:
+            rows = _rows_of(dropped)
+            if rows:
+                self.summary = self._compact(rows)
+                self.workspace.write_summary(self.summary, self._covered)
+                system = self.system_prompt()
         return [ChatMessage("system", system), *self.transcript]
+
+    def _compact(self, rows: Sequence[tuple[str, str]]) -> str:
+        """把要丢掉的对话压缩进摘要；失败就保留旧摘要，不打断作者。"""
+        assert self.clients is not None and self.config is not None
+        from dataclasses import replace
+
+        body = "\n\n".join(
+            f"{'作者' if role == 'author' else '助手'}：{text.strip()}" for role, text in rows
+        )
+        user = f"已有摘要：\n{self.summary or '（无）'}\n\n要压缩的对话：\n{body}"
+        options = replace(
+            self.config.options, max_output_tokens=min(1_500, self.config.options.max_output_tokens)
+        )
+        try:
+            result = self.clients.complete(
+                [ChatMessage("system", SUMMARY_SYSTEM), ChatMessage("user", user)],
+                options,
+                CancelSignal(),
+            )
+        except ProviderError:
+            return self.summary
+        self.workspace.record_usage(result.usage, options.model, "摘要")
+        text = result.text.strip()
+        return text or self.summary
 
     def _notify(self, event: str, *args) -> None:
         hook = getattr(self.observer, event, None)
@@ -224,18 +287,20 @@ class Agent:
         recent = ws.history(limit=1)
         if recent:
             parts.append(f"最近改动：{describe_time(recent[0].when)} {recent[0].message}")
-        return " · ".join(parts) + "。模型尚未接入，设置密钥后重新打开就能继续。"
+        text = " · ".join(parts) + "。"
+        if not self.model_ready:
+            text += "模型尚未接入，设置密钥后重新打开就能继续。"
+        return text
 
     # ------------------------------------------------------------ 轮
 
     def opening(self, cancel: CancelSignal | None = None) -> TurnResult:
-        """打开作品时的第一轮：隐藏提示不落库，回复落库。"""
-        if not self.model_ready:
+        """打开作品：第一次打开由模型开场（隐藏提示不落库）；再次打开只报一句现状，不叫模型。"""
+        if not self.model_ready or self.returning:
             text = self.local_status()
             self.port.say(text)
             return TurnResult(text, 0, ())
-        prompt = RESUME_PROMPT if self.transcript else OPENING_PROMPT
-        return self._turn(prompt, cancel or CancelSignal(), persist_author=False)
+        return self._turn(OPENING_PROMPT, cancel or CancelSignal(), persist_author=False)
 
     def handle(self, author_text: str, cancel: CancelSignal | None = None) -> TurnResult:
         text = author_text.strip()
@@ -349,6 +414,20 @@ class Agent:
             self.port.say(f"助手没有完成回复：{reason}。你说一声我再试。")
             return text, (), False
         return text, tuple(uses), True
+
+
+def _rows_of(messages: Sequence[ChatMessage]) -> list[tuple[str, str]]:
+    """对话消息里作者与助手说的话；工具调用与结果不进摘要。"""
+    rows: list[tuple[str, str]] = []
+    for message in messages:
+        if isinstance(message.content, str):
+            if message.role == "user":
+                rows.append(("author", message.content))
+            continue
+        text = "\n".join(b.text for b in message.content if isinstance(b, TextBlock)).strip()
+        if text and message.role == "assistant":
+            rows.append(("assistant", text))
+    return rows
 
 
 def _with_tools(options):

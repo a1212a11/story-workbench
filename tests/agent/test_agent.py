@@ -259,3 +259,60 @@ def test_history_and_transcript_fitting():
     kept = fit_transcript(transcript, 150, len)
     assert [m.role for m in kept] == ["user"] and kept[0].content == "四" * 10
     assert fit_transcript(transcript, 10_000, len) == transcript
+
+
+# ---------------------------------------------------------------- 记忆：重开不叫模型、摘要、笔记
+
+
+def test_reopen_reports_status_locally_without_calling_the_model(chapter_workspace):
+    chapter_workspace.append_transcript("author", "写第一章")
+    chapter_workspace.append_transcript("assistant", "写完了。")
+    agent, port, clients = make_agent(chapter_workspace, [Reply("不该被调用")])
+    result = agent.opening()
+    assert result.calls == 0 and clients.calls == [] and "已有 1 章正文" in port.output
+    assert "模型尚未接入" not in port.output
+    assert [m.role for m in agent.transcript] == ["user", "assistant"]
+
+
+def test_old_conversation_is_compacted_into_a_summary_on_reopen(workspace):
+    for i in range(25):
+        workspace.append_transcript("author", f"第 {i} 句：我喜欢短句。")
+        workspace.append_transcript("assistant", f"记下了 {i}。")
+    clients = scripted_clients([], "作者喜欢短句。")
+    agent = Agent(workspace, FakePort(), clients=clients, config=CONFIG)
+    assert agent.summary == "作者喜欢短句。" and len(clients.completes) == 1
+    sent = clients.completes[0][1].content
+    assert "第 0 句" in sent and "第 4 句" in sent and "第 5 句" not in sent
+    assert workspace.read_summary() == ("作者喜欢短句。", 10)
+    assert len(agent.transcript) == 40
+    assert "之前对话的摘要：\n作者喜欢短句。" in agent.system_prompt()
+    usage = (workspace.root / ".story" / "用量.jsonl").read_text()
+    assert '"purpose": "摘要"' in usage
+    # 再次打开：已覆盖的部分不再压缩；没有模型时也不出错
+    again = Agent(workspace, FakePort(), clients=scripted_clients([], "x"), config=CONFIG)
+    assert again.summary == "作者喜欢短句。" and len(again.clients.completes) == 0
+    offline = Agent(workspace, FakePort(), clients=None, config=None)
+    assert offline.summary == "作者喜欢短句。"
+
+
+def test_overflow_within_a_session_is_compacted_not_dropped(workspace):
+    for i in range(6):
+        workspace.append_transcript("author", f"第 {i} 段。" + "很长的话" * 4000)
+        workspace.append_transcript("assistant", f"回应 {i}。")
+    clients = scripted_clients([Reply("好。")], "作者说了六段长话。")
+    agent = Agent(workspace, FakePort(), clients=clients, config=CONFIG)
+    assert clients.completes == []  # 条数没超，打开时不压缩
+    agent.handle("继续")
+    assert len(clients.completes) == 1 and agent.summary == "作者说了六段长话。"
+    assert "第 0 段" in clients.completes[0][1].content
+    assert workspace.read_summary()[0] == "作者说了六段长话。"
+    system = clients.calls[0][0].content
+    assert "作者说了六段长话。" in system
+
+
+def test_notes_and_preferences_appear_in_the_system_prompt(workspace):
+    workspace.write_text("草稿/代理笔记.md", "作者拒绝过整章重写，只接受定点改。")
+    agent, _, _ = make_agent(workspace, [])
+    prompt = agent.system_prompt()
+    assert "作者拒绝过整章重写" in prompt and "代理笔记.md 是你的笔记" in prompt
+    assert "作者的偏好与禁忌" in prompt
