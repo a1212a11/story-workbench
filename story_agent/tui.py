@@ -47,6 +47,8 @@ install_cjk_wrapping()
 
 SPINNER = "·✢✳✶✻✽"
 QUIT_CONFIRM_SECONDS = 2.0
+REWIND_CONFIRM_SECONDS = 1.5  # 空闲时两次 Esc 的间隔上限
+REWIND_CHOICES = 10
 # 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
 QUIET_TOOLS = frozenset({"read", "search", "verify", "history"})
 HISTORY_ON_SCREEN = 12
@@ -56,7 +58,8 @@ HELP_TEXT = (
     "直接说你要做什么；改正式文件前会先给你看改动，Enter 批准、n 不批准、打字是把意见交给它。\n"
     "按键：Enter 发送 · Ctrl-J 换行 · Esc 中断或不批准 · PgUp/PgDn 翻页 · Ctrl-O 展开/折叠工具输出"
     " · Ctrl-C 连按两次或 Ctrl-D 退出\n"
-    "命令：/help 这段说明 · /exit 退出 · /dev 开发者模式开关"
+    "命令：/help 这段说明 · /exit 退出 · /dev 开发者模式开关\n"
+    "撤回：空闲时连按两次 Esc，选一句话，对话（可选连同文件）退回到它之前"
 )
 CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见 · PgUp/PgDn 翻看改动"
 
@@ -338,6 +341,7 @@ class WorkbenchApp(App[int]):
     #card-diff { height: auto; max-height: 18; scrollbar-size-vertical: 1; }
     #card-hint { color: $text-muted; }
     #palette { margin: 0 2; height: auto; border: round $surface; padding: 0 1; }
+    .palette-title { color: $warning; }
     .palette-item { color: $text-muted; }
     .palette-item.selected { color: $text; background: $accent 30%; }
     #inputbox { border: round $accent; height: auto; max-height: 8; margin: 0 1; }
@@ -374,7 +378,8 @@ class WorkbenchApp(App[int]):
         self.clients = clients
         self.config = config
         self.port = ThreadPort(self)
-        self.inbox: queue.Queue[str | None] = queue.Queue()
+        self.inbox: queue.Queue[str | tuple | None] = queue.Queue()
+        self.agent: Agent | None = None
         self.stopping = threading.Event()
         self.mode = "chat"  # chat / approve
         self.busy = False
@@ -384,6 +389,10 @@ class WorkbenchApp(App[int]):
         self.dev = False  # /dev：工具参数、每次调用的用量与耗时
         self.palette_items: list[tuple[str, str]] = []
         self.palette_index = 0
+        self.palette_mode = "commands"  # commands / rewind / rewind-scope
+        self.palette_payload: list = []
+        self._rewind_choice: dict | None = None
+        self._esc_armed_at = 0.0
         self._quit_armed_at = 0.0  # 空闲时第一次 Ctrl-C 的时刻；两秒内再按一次才退出
         self._current_tool: ToolBlock | None = None
         self._reply_row: Horizontal | None = None
@@ -429,6 +438,7 @@ class WorkbenchApp(App[int]):
             port.say(f"无法打开作品：{exc}")
             return
         agent = Agent(workspace, port, clients=self.clients, config=self.config, observer=port)
+        self.agent = agent
         model = (
             f"{self.config.provider} / {self.config.options.model}"
             if self.config and self.clients
@@ -454,6 +464,9 @@ class WorkbenchApp(App[int]):
                     continue
                 if item is None:
                     break
+                if isinstance(item, tuple):
+                    self._do_rewind(agent, item)
+                    continue
                 self._run_turn(agent, item)
         finally:
             port._ui(self.set_busy, False)
@@ -484,6 +497,47 @@ class WorkbenchApp(App[int]):
             port._ui(self.set_busy, False)
             self._refresh_status(agent)
             port._ui(self.end_turn)
+
+    def _do_rewind(self, agent: Agent, item: tuple) -> None:
+        """在代理线程里执行撤回：截断对话记录，按需把文件退回，然后重载代理与界面。"""
+        _, choice, with_files = item
+        ws = self.workspace_of(agent)
+        try:
+            removed = ws.rewind_transcript(choice["index"])
+            note = f"已撤回 {removed} 条记录，回到「{choice['text'][:30]}」之前。"
+            if with_files:
+                head = choice.get("head")
+                ref = (
+                    ws.git.restore_tree(head, f"撤回到「{choice['text'][:20]}」之前的文件状态")
+                    if head
+                    else None
+                )
+                if head is None:
+                    note += " 这句话没有记录当时的文件状态，文件没有动。"
+                elif ref is None:
+                    note += " 文件和那时一样，没有变化。"
+                else:
+                    note += f" 文件已退回到那时，记为一次改动（{ref}）。"
+            agent.reload()
+            ws.append_log(note)
+        except WorkspaceError as exc:
+            note = f"没有撤回：{exc}"
+        self.port._ui(self.reset_transcript_view, ws.recent_transcript(HISTORY_ON_SCREEN), note)
+        self._refresh_status(agent)
+
+    @staticmethod
+    def workspace_of(agent: Agent) -> Workspace:
+        return agent.workspace
+
+    def reset_transcript_view(self, rows: list[tuple[str, str]], note: str) -> None:
+        self._transcript().remove_children()
+        self._log.append(note)
+        self._current_tool = None
+        self._reply_row = self._reply_stream = None
+        if rows:
+            self.show_history(rows)
+        self._mount(Static(note, classes="system", markup=False))
+        self._scroll()
 
     def _refresh_status(self, agent: Agent) -> None:
         model = agent.config.options.model if agent.model_ready and agent.config else "模型未接入"
@@ -730,6 +784,8 @@ class WorkbenchApp(App[int]):
             self._update_palette(event.text_area.text)
 
     def _update_palette(self, text: str) -> None:
+        if self.palette_mode != "commands":
+            return
         panel = self.query_one("#palette", Vertical)
         head = text.split("\n", 1)[0].strip().lower()
         items: list[tuple[str, str]] = []
@@ -745,6 +801,12 @@ class WorkbenchApp(App[int]):
     def _render_palette(self) -> None:
         panel = self.query_one("#palette", Vertical)
         panel.remove_children()
+        if self.palette_mode == "rewind":
+            panel.mount(
+                Static("撤回到哪一句之前？上下选，Enter 确认，Esc 取消", classes="palette-title")
+            )
+        elif self.palette_mode == "rewind-scope":
+            panel.mount(Static("撤回什么？", classes="palette-title"))
         for index, (name, description) in enumerate(self.palette_items):
             classes = "palette-item selected" if index == self.palette_index else "palette-item"
             panel.mount(Static(f"{name:<8} {description}", classes=classes, markup=False))
@@ -756,7 +818,7 @@ class WorkbenchApp(App[int]):
         self._render_palette()
 
     def palette_complete(self) -> None:
-        if not self.palette_items:
+        if not self.palette_items or self.palette_mode != "commands":
             return
         area = self.query_one("#input", PromptArea)
         area.clear()
@@ -765,13 +827,51 @@ class WorkbenchApp(App[int]):
     def palette_execute(self) -> None:
         if not self.palette_items:
             return
+        if self.palette_mode == "rewind":
+            self._rewind_choice = self.palette_payload[self.palette_index]
+            self._open_palette(
+                "rewind-scope",
+                [("对话", "只撤回对话，文件不动"), ("全部", "对话和文件都退回到那时")],
+                [False, True],
+            )
+            return
+        if self.palette_mode == "rewind-scope":
+            choice, with_files = self._rewind_choice, self.palette_payload[self.palette_index]
+            self.palette_close()
+            if choice is not None:
+                self.inbox.put(("rewind", choice, with_files))
+            return
         command = self.palette_items[self.palette_index][0]
         self.palette_close()
         self.query_one("#input", PromptArea).clear()
         self._meta_command(command)
 
+    def _open_palette(self, mode: str, items: list[tuple[str, str]], payload: list) -> None:
+        self.palette_mode = mode
+        self.palette_items = items
+        self.palette_payload = payload
+        self.palette_index = 0
+        self.query_one("#palette", Vertical).display = True
+        self._render_palette()
+        self.query_one("#input", PromptArea).focus()
+
+    def open_rewind(self) -> None:
+        """两次 Esc：列出最近说过的话，选一句撤回到它之前。"""
+        if self.agent is None or self.busy or self.mode != "chat":
+            return
+        messages = self.agent.workspace.author_messages()[-REWIND_CHOICES:]
+        if not messages:
+            self.show_line("还没有可以撤回的话。")
+            return
+        messages.reverse()
+        items = [(m["time"][11:16] or "--:--", m["text"].split("\n", 1)[0][:60]) for m in messages]
+        self._open_palette("rewind", items, messages)
+
     def palette_close(self) -> None:
         self.palette_items = []
+        self.palette_payload = []
+        self.palette_mode = "commands"
+        self._rewind_choice = None
         self.query_one("#palette", Vertical).display = False
 
     def _meta_command(self, text: str) -> bool:
@@ -811,6 +911,13 @@ class WorkbenchApp(App[int]):
         if self.busy:
             self.port.cancel.set()
             self.query_one("#hint-left", Static).update("正在中断……")
+            return
+        now = time.monotonic()
+        if now - self._esc_armed_at < REWIND_CONFIRM_SECONDS:
+            self._esc_armed_at = 0.0
+            self.open_rewind()
+            return
+        self._esc_armed_at = now
 
     def action_interrupt(self) -> None:
         """ctrl+c：工作中则中断；输入框有字则清空；否则退出。"""

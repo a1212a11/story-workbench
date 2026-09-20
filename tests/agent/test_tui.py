@@ -619,3 +619,44 @@ def test_palette_only_when_slash_is_the_first_character(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_double_escape_rewinds_conversation_and_files(tmp_path):
+    from textual.containers import Vertical
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients([*OPENING, _edit_reply(), Reply("改好了。"), Reply("不该调用")])
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 34)) as pilot:
+            await _wait(app, pilot, lambda: "我们接着改？" in app.transcript_text())
+            await _send(pilot, "结尾让他下去")
+            await _wait(app, pilot, lambda: app.mode == "approve")
+            await _send(pilot, "")
+            await _wait(app, pilot, lambda: "改好了。" in app.transcript_text())
+            assert "他下去了。" in Workspace(path).read_text("章节/第01章.md")
+            await pilot.press("escape")
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            panel = app.query_one("#palette", Vertical)
+            assert panel.display and app.palette_mode == "rewind"
+            assert app.palette_items[0][1] == "结尾让他下去"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert app.palette_mode == "rewind-scope"
+            await pilot.press("down")
+            await pilot.press("enter")
+            await _wait(app, pilot, lambda: "已撤回" in app.transcript_text())
+            await pilot.pause(0.3)
+            ws = Workspace(path)
+            assert ws.read_text("章节/第01章.md") == CHAPTER
+            assert ws.history(limit=1)[0].message.startswith("撤回到「结尾让他下去」")
+            assert [r for r, _ in ws.all_transcript()] == ["assistant"]  # 只剩开场回复
+            assert app.agent is not None and len(app.agent.transcript) == 0
+            assert "文件已退回到那时" in app.transcript_text()
+            assert not panel.display and app.palette_mode == "commands"
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

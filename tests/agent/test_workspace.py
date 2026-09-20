@@ -140,3 +140,30 @@ def test_transcript_and_usage_records(workspace: Workspace):
     workspace.record_usage({"input_tokens": 3, "output_tokens": 4}, "fixed", "对话")
     assert '"input_tokens": 3' in (workspace.root / ".story" / "用量.jsonl").read_text()
     assert ".story" not in workspace.list_dir()
+
+
+def test_author_messages_record_head_and_rewind_truncates_and_restores(workspace: Workspace):
+    workspace.write_text("章节/第01章.md", "# 第一章\n\n初稿。\n")
+    workspace.commit("初稿", "章节/第01章.md")
+    workspace.append_transcript("author", "写第一章")
+    workspace.append_transcript("assistant", "写完了。")
+    workspace.write_text("章节/第01章.md", "# 第一章\n\n改过的稿。\n")
+    workspace.commit("改稿", "章节/第01章.md")
+    workspace.append_transcript("author", "改结尾")
+    workspace.append_transcript("system", "审批 → 批准")
+    workspace.append_transcript("assistant", "改好了。")
+    messages = workspace.author_messages()
+    assert [m["text"] for m in messages] == ["写第一章", "改结尾"]
+    assert messages[0]["head"] == workspace.history(limit=5)[1].ref  # 说话时的提交
+    removed = workspace.rewind_transcript(messages[1]["index"])
+    assert removed == 3
+    assert workspace.all_transcript() == [("author", "写第一章"), ("assistant", "写完了。")]
+    backups = list((workspace.root / ".story").glob("撤回-*.jsonl"))
+    assert len(backups) == 1 and "改好了。" in backups[0].read_text()
+    assert "撤回了 3 条记录" in workspace.all_records()[-1]["text"]
+    ref = workspace.git.restore_tree(messages[1]["head"], "撤回文件")
+    assert ref and workspace.read_text("章节/第01章.md") == "# 第一章\n\n改过的稿。\n"
+    ref2 = workspace.git.restore_tree(messages[0]["head"], "再撤")
+    assert ref2 and workspace.read_text("章节/第01章.md") == "# 第一章\n\n初稿。\n"
+    assert workspace.history(limit=1)[0].message == "再撤"
+    assert workspace.git.restore_tree("0000000", "x") is None

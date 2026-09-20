@@ -196,6 +196,15 @@ class Agent:
         self.observer = observer
         self.session_usage = {"input_tokens": 0, "output_tokens": 0}
         self.last_usage: dict[str, int] = {}
+        self.transcript: list[ChatMessage] = []
+        self.summary = ""
+        self._covered = 0
+        self.returning = False
+        self.reload()
+
+    def reload(self) -> None:
+        """从作品目录重新装入对话与摘要；撤回之后也用它。"""
+        workspace = self.workspace
         rows = workspace.all_transcript()
         self.summary, self._covered = workspace.read_summary()
         self.returning = bool(rows)
@@ -204,7 +213,7 @@ class Agent:
             self.summary = self._compact(rows[self._covered : keep_from])
             self._covered = keep_from
             workspace.write_summary(self.summary, self._covered)
-        self.transcript: list[ChatMessage] = history_to_transcript(rows[keep_from:])
+        self.transcript = history_to_transcript(rows[keep_from:])
 
     # ------------------------------------------------------------ 消息装配
 

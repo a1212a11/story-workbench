@@ -182,6 +182,21 @@ class Git:
         result = self._run("show", f"{ref}:{path}", check=False)
         return result.stdout if result.returncode == 0 else None
 
+    def head(self) -> str | None:
+        if not self.initialized:
+            return None
+        result = self._run("rev-parse", "--short", "HEAD", check=False)
+        return result.stdout.strip() or None if result.returncode == 0 else None
+
+    def restore_tree(self, ref: str, message: str) -> str | None:
+        """把受管文件整体退回到某次提交时的样子，作为一次新提交；历史不丢。没有变化返回 None。"""
+        if not self.initialized:
+            return None
+        if self._run("cat-file", "-e", f"{ref}^{{commit}}", check=False).returncode != 0:
+            return None
+        self._run("read-tree", "--reset", "-u", ref)
+        return self.commit(message)
+
 
 class Workspace:
     """一个作品目录。所有路径都是相对于目录的 POSIX 字符串。"""
@@ -346,7 +361,11 @@ class Workspace:
     def append_transcript(self, role: str, text: str, now: datetime | None = None) -> None:
         """对话记录：机器可读的 .story/对话.jsonl，加上给作者看的 对话/日期.md。"""
         now = now or datetime.now(UTC).astimezone()
-        record = {"time": now.isoformat(timespec="seconds"), "role": role, "text": text}
+        record: dict = {"time": now.isoformat(timespec="seconds"), "role": role, "text": text}
+        if role == "author":
+            head = self.git.head()
+            if head:
+                record["head"] = head  # 说这句话时文件的状态，撤回时用
         with self._private("对话.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         prefix = {"author": "> ", "assistant": "⏺ ", "system": "· "}.get(role, "")
@@ -358,21 +377,63 @@ class Workspace:
     def recent_transcript(self, limit: int = 40) -> list[tuple[str, str]]:
         return self.all_transcript()[-limit:]
 
-    def all_transcript(self) -> list[tuple[str, str]]:
+    def all_records(self) -> list[dict]:
+        """对话记录的原始条目（含审批等系统条目），按时间顺序。"""
         path = self._private("对话.jsonl")
         if not path.exists():
             return []
-        rows = []
+        records = []
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             try:
-                record = json.loads(line)
+                records.append(json.loads(line))
             except ValueError:
                 continue
-            if record.get("role") in ("author", "assistant"):
-                rows.append((record["role"], record.get("text", "")))
-        return rows
+        return records
+
+    def all_transcript(self) -> list[tuple[str, str]]:
+        return [
+            (r["role"], r.get("text", ""))
+            for r in self.all_records()
+            if r.get("role") in ("author", "assistant")
+        ]
+
+    def author_messages(self) -> list[dict]:
+        """作者说过的话，带在原始记录里的序号与当时的文件状态；撤回列表用。"""
+        return [
+            {
+                "index": i,
+                "text": r.get("text", ""),
+                "time": r.get("time", ""),
+                "head": r.get("head"),
+            }
+            for i, r in enumerate(self.all_records())
+            if r.get("role") == "author"
+        ]
+
+    def rewind_transcript(self, index: int) -> int:
+        """删掉第 index 条起的全部对话记录；删掉的另存为 .story/撤回-时间.jsonl。返回删掉的条数。"""
+        records = self.all_records()
+        if not 0 <= index < len(records):
+            raise WorkspaceError("没有这条记录。")
+        removed = records[index:]
+        stamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
+        self._private(f"撤回-{stamp}.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in removed), encoding="utf-8"
+        )
+        self._private("对话.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records[:index]),
+            encoding="utf-8",
+        )
+        summary, covered = self.read_summary()
+        if covered > index:
+            self.write_summary(summary, index)
+        first = removed[0].get("text", "")
+        self.append_transcript(
+            "system", f"撤回了 {len(removed)} 条记录，回到「{first[:30]}」之前。"
+        )
+        return len(removed)
 
     def read_summary(self) -> tuple[str, int]:
         """对话摘要与它覆盖到的对话条数。"""
