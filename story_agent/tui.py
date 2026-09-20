@@ -100,6 +100,7 @@ STORY_THEME = Theme(
 SPINNER = "·✢✳✶✻✽"
 QUIT_CONFIRM_SECONDS = 2.0
 REWIND_CONFIRM_SECONDS = 1.5  # 空闲时两次 Esc 的间隔上限
+REWIND_COOLDOWN_SECONDS = 3.0  # 刚中断过的这几秒里，Esc 只当中断，不进入撤回
 REWIND_CHOICES = 10
 # 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
 QUIET_TOOLS = frozenset({"read", "search", "verify", "history"})
@@ -492,6 +493,7 @@ class WorkbenchApp(App[int]):
         self.palette_payload: list = []
         self._rewind_choice: dict | None = None
         self._esc_armed_at = 0.0
+        self._interrupted_at = 0.0
         self._quit_armed_at = 0.0  # 空闲时第一次 Ctrl-C 的时刻；两秒内再按一次才退出
         self._current_tool: ToolBlock | None = None
         self._reply_row: Horizontal | None = None
@@ -985,6 +987,8 @@ class WorkbenchApp(App[int]):
 
     def _update_palette(self, text: str) -> None:
         if self.palette_mode != "commands":
+            if text.strip():  # 撤回列表开着时打字，说明作者要正常发言，收起列表
+                self.palette_close()
             return
         panel = self.query_one("#palette", Vertical)
         head = text.split("\n", 1)[0].strip().lower()
@@ -1110,16 +1114,21 @@ class WorkbenchApp(App[int]):
             self.end_approval("n")
             self.port.answers.put("n")
             return
+        now = time.monotonic()
         if self.busy:
             self.port.cancel.set()
+            self._esc_armed_at = 0.0
+            self._interrupted_at = now  # 连着按 Esc 想停下来，不该变成撤回
             self.query_one("#hint-left", Static).update("正在中断……")
             return
-        now = time.monotonic()
+        if now - self._interrupted_at < REWIND_COOLDOWN_SECONDS:
+            return
         if now - self._esc_armed_at < REWIND_CONFIRM_SECONDS:
             self._esc_armed_at = 0.0
             self.open_rewind()
             return
         self._esc_armed_at = now
+        self._flash_hint("再按一次 Esc 撤回到之前说过的某句话", REWIND_CONFIRM_SECONDS)
 
     def _copy_selection(self) -> bool:
         """有划选的文字就复制到剪贴板；返回是否复制了。"""

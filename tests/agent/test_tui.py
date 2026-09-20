@@ -990,3 +990,77 @@ def test_compacting_notice_turns_into_its_result(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_escape_while_thinking_never_opens_the_rewind_list(tmp_path):
+    from textual.containers import Vertical
+
+    path = tmp_path / "novel"
+    ws = _chapter_workspace(path)
+    ws.append_transcript("author", "之前说过的一句")
+    ws.append_transcript("assistant", "好。")
+    started: list[bool] = []
+
+    def slow(cancel):
+        started.append(True)
+        deadline = time.monotonic() + 5
+        while not cancel.is_set() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    clients = scripted_clients([Reply("想想……", hook=slow), Reply("不该出现。")])
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
+            await _send(pilot, "写点什么")
+            await _wait(app, pilot, lambda: bool(started))
+            for _ in range(4):  # 连按四次想让它停下来
+                await pilot.press("escape")
+                await pilot.pause(0.05)
+            await _wait(app, pilot, lambda: "已中断" in app.transcript_text())
+            await pilot.pause(0.3)
+            assert not app.query_one("#palette", Vertical).display
+            await pilot.press("escape")  # 冷却期内再按也不进入撤回
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert app.palette_mode == "commands"
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
+
+
+def test_first_escape_says_what_the_second_one_does_and_typing_cancels_it(tmp_path):
+    from textual.containers import Vertical
+
+    path = tmp_path / "novel"
+    ws = _chapter_workspace(path)
+    ws.append_transcript("author", "之前说过的一句")
+    ws.append_transcript("assistant", "好。")
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
+            await _wait(app, pilot, lambda: not app.busy)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert "再按一次 Esc 撤回" in str(app.query_one("#hint-left", Static).content)
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert app.palette_mode == "rewind"
+            app.query_one("#input", PromptArea).insert("我要说的话")  # 打字就收起列表
+            await pilot.pause(0.1)
+            assert app.palette_mode == "commands"
+            assert not app.query_one("#palette", Vertical).display
+            await pilot.press("enter")  # Enter 正常发言，不会误触撤回
+            await pilot.pause(0.2)
+            assert "> 我要说的话" in app.transcript_text()
+            assert [r for r, _ in Workspace(path).all_transcript()] == [
+                "author",
+                "assistant",
+                "author",
+            ]
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
