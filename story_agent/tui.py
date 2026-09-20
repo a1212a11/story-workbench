@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import queue
 import re
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -88,10 +90,10 @@ STORY_THEME = Theme(
         "input-cursor-background": PALETTE["orange"],
         "input-cursor-foreground": "ansi_black",
         "input-cursor-text-style": "none",
-        "input-selection-background": PALETTE["surface"],
+        "input-selection-background": "ansi_bright_blue",
         "input-selection-foreground": "ansi_default",
-        "screen-selection-background": PALETTE["surface"],
-        "screen-selection-foreground": "ansi_default",
+        "screen-selection-background": "ansi_bright_blue",
+        "screen-selection-foreground": "ansi_black",
     },
 )
 
@@ -110,6 +112,7 @@ HELP_TEXT = (
     "按键：Enter 发送 · Ctrl-J 换行 · Esc 中断或不批准 · PgUp/PgDn 翻页 · Ctrl-O 展开/折叠工具输出"
     " · Ctrl-C 连按两次或 Ctrl-D 退出\n"
     "命令：/help 这段说明 · /exit 退出 · /dev 开发者模式开关\n"
+    "复制：鼠标划选要的文字，按 Ctrl-C 复制；也可以按住 Option 划选，用终端自己的复制\n"
     "撤回：空闲时连按两次 Esc，选一句话，对话（可选连同文件）退回到它之前"
 )
 CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见 · PgUp/PgDn 翻看改动"
@@ -482,6 +485,7 @@ class WorkbenchApp(App[int]):
         self.verbose = False  # Ctrl-O：展开全部工具输出
         self.dev = False  # /dev：工具参数、每次调用的用量与耗时
         self.follow = True  # 对话区是否跟着新内容滚到底
+        self._hint_until = 0.0  # 提示行临时文字的到期时刻
         self.palette_items: list[tuple[str, str]] = []
         self.palette_index = 0
         self.palette_mode = "commands"  # commands / rewind / rewind-scope
@@ -872,7 +876,15 @@ class WorkbenchApp(App[int]):
         if self.mode != "approve":
             self.query_one("#hint-left", Static).update(BUSY_HINT if busy else IDLE_HINT)
 
+    def _flash_hint(self, text: str, seconds: float = 2.0) -> None:
+        """提示行临时显示一句话，到点自动恢复。"""
+        self.query_one("#hint-left", Static).update(text)
+        self._hint_until = time.monotonic() + seconds
+
     def _tick(self) -> None:
+        if self._hint_until and time.monotonic() >= self._hint_until:
+            self._hint_until = 0.0
+            self.query_one("#hint-left", Static).update(BUSY_HINT if self.busy else IDLE_HINT)
         if (
             self._quit_armed_at
             and time.monotonic() - self._quit_armed_at >= QUIT_CONFIRM_SECONDS
@@ -1079,8 +1091,27 @@ class WorkbenchApp(App[int]):
             return
         self._esc_armed_at = now
 
+    def _copy_selection(self) -> bool:
+        """有划选的文字就复制到剪贴板；返回是否复制了。"""
+        screen = self.screen
+        if isinstance(screen, EditorScreen):
+            text = screen.query_one("#editor", TextArea).selected_text or None
+        else:
+            text = screen.get_selected_text()
+        if not text:
+            return False
+        copy_text(self, text)
+        if not isinstance(screen, EditorScreen):
+            screen.clear_selection()
+            self._flash_hint(f"已复制 {len(text)} 个字")
+        return True
+
     def action_interrupt(self) -> None:
-        """ctrl+c：工作中则中断；输入框有字则清空；否则退出。"""
+        """ctrl+c：划选了文字就复制；编辑器里不退出；工作中则中断；输入框有字则清空；否则退出。"""
+        if self._copy_selection():
+            return
+        if isinstance(self.screen, EditorScreen):
+            return
         if self.busy or self.mode == "approve":
             self.action_cancel_turn()
             return
@@ -1132,6 +1163,19 @@ def context_gauge(used: int, limit: int) -> tuple[str, float]:
     filled = round(ratio * GAUGE_CELLS)
     bar = "▮" * filled + "▯" * (GAUGE_CELLS - filled)
     return f"{bar} {ratio * 100:.0f}%", ratio
+
+
+def copy_text(app: App, text: str) -> None:
+    """复制到系统剪贴板：优先用本机命令，拿不到就退回终端的 OSC 52。"""
+    for command in (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        if shutil.which(command[0]) is None:
+            continue
+        try:
+            subprocess.run(command, input=text, text=True, check=True, timeout=5)
+            return
+        except (OSError, subprocess.SubprocessError):
+            break
+    app.copy_to_clipboard(text)
 
 
 def _duration(seconds: float) -> str:

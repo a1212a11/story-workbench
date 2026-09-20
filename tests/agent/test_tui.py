@@ -892,3 +892,78 @@ def test_turn_ends_with_duration_and_finish_time(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_selection_colors_are_high_contrast_and_ctrl_c_copies(tmp_path, monkeypatch):
+    from textual.screen import Screen
+
+    from story_agent import tui
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    copied: list[str] = []
+    monkeypatch.setattr(tui, "copy_text", lambda app, text: copied.append(text))
+    cleared: list[bool] = []
+    monkeypatch.setattr(Screen, "clear_selection", lambda self: cleared.append(True))
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
+            variables = app.current_theme.variables
+            assert variables["screen-selection-background"] == "ansi_bright_blue"
+            assert variables["screen-selection-foreground"] == "ansi_black"
+            monkeypatch.setattr(Screen, "get_selected_text", lambda self: "井底有一具尸体")
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.1)
+            assert copied == ["井底有一具尸体"] and cleared  # 复制并清掉选中
+            assert "已复制 7 个字" in str(app.query_one("#hint-left", Static).content)
+            assert not app.stopping.is_set()
+            monkeypatch.setattr(Screen, "get_selected_text", lambda self: None)
+            await pilot.press("ctrl+c")  # 没有选中时照旧：第一次提示，第二次才退出
+            await pilot.pause(0.1)
+            assert "再按一次 Ctrl-C" in str(app.query_one("#hint-left", Static).content)
+            assert not app.stopping.is_set()
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.1)
+            assert app.stopping.is_set()
+
+    _run(scenario())
+
+
+def test_ctrl_c_in_the_editor_copies_but_never_quits(tmp_path, monkeypatch):
+    from story_agent import tui
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    copied: list[str] = []
+    monkeypatch.setattr(tui, "copy_text", lambda app, text: copied.append(text))
+    clients = scripted_clients(
+        [
+            *OPENING,
+            Reply("你来改。", (use("open_editor", "o", path="章节/第01章.md"),)),
+            Reply("好。"),
+        ]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "我们接着改？" in app.transcript_text())
+            await _send(pilot, "我自己改")
+            await _wait(app, pilot, lambda: isinstance(app.screen, EditorScreen))
+            editor = app.screen.query_one("#editor", TextArea)
+            editor.select_all()
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.1)
+            assert copied and CHAPTER.strip() in copied[0]
+            assert not app.stopping.is_set() and isinstance(app.screen, EditorScreen)
+            editor.selection = editor.selection.__class__((0, 0), (0, 0))
+            await pilot.press("ctrl+c")  # 没有选中也不退出，编辑中的文字不会丢
+            await pilot.pause(0.1)
+            assert not app.stopping.is_set() and isinstance(app.screen, EditorScreen)
+            await pilot.press("ctrl+q")
+            await _wait(app, pilot, lambda: "好。" in app.transcript_text())
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
