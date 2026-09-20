@@ -553,6 +553,15 @@ class WorkbenchApp(App[int]):
         recent = workspace.recent_transcript(HISTORY_ON_SCREEN)
         if recent:
             port._ui(self.show_history, recent)
+        if agent.needs_compacting:  # 压缩旧对话要调用模型，先把界面显示出来再做
+            port.say("正在整理之前的对话……")
+            self.busy_verb = "整理旧对话"
+            port._ui(self.set_busy, True)
+            try:
+                if not agent.compact_pending():
+                    port.say("这次没整理成，之前的对话照原样带着。")
+            finally:
+                port._ui(self.set_busy, False)
         self._refresh_status(agent)
         try:
             self._run_turn(agent, None)

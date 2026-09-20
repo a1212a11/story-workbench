@@ -274,25 +274,53 @@ def test_reopen_reports_status_locally_without_calling_the_model(chapter_workspa
     assert [m.role for m in agent.transcript] == ["user", "assistant"]
 
 
-def test_old_conversation_is_compacted_into_a_summary_on_reopen(workspace):
+def test_opening_does_not_compact_and_compacting_is_explicit(workspace):
     for i in range(25):
         workspace.append_transcript("author", f"第 {i} 句：我喜欢短句。")
         workspace.append_transcript("assistant", f"记下了 {i}。")
     clients = scripted_clients([], "作者喜欢短句。")
     agent = Agent(workspace, FakePort(), clients=clients, config=CONFIG)
+    # 打开作品不调用模型，界面不会白屏卡住
+    assert clients.completes == [] and len(agent.transcript) == 50 and agent.summary == ""
+    assert agent.needs_compacting
+
+    assert agent.compact_pending() is True
     assert agent.summary == "作者喜欢短句。" and len(clients.completes) == 1
     sent = clients.completes[0][1].content
     assert "第 0 句" in sent and "第 4 句" in sent and "第 5 句" not in sent
     assert workspace.read_summary() == ("作者喜欢短句。", 10)
     assert len(agent.transcript) == 40
     assert "之前对话的摘要：\n作者喜欢短句。" in agent.system_prompt()
-    usage = (workspace.root / ".story" / "用量.jsonl").read_text()
-    assert '"purpose": "摘要"' in usage
-    # 再次打开：已覆盖的部分不再压缩；没有模型时也不出错
+    assert '"purpose": "摘要"' in (workspace.root / ".story" / "用量.jsonl").read_text()
+
     again = Agent(workspace, FakePort(), clients=scripted_clients([], "x"), config=CONFIG)
-    assert again.summary == "作者喜欢短句。" and len(again.clients.completes) == 0
+    assert again.summary == "作者喜欢短句。" and not again.needs_compacting
     offline = Agent(workspace, FakePort(), clients=None, config=None)
-    assert offline.summary == "作者喜欢短句。"
+    assert offline.summary == "作者喜欢短句。" and not offline.needs_compacting
+
+
+def test_failed_compaction_keeps_the_old_conversation_instead_of_dropping_it(workspace):
+    for i in range(25):
+        workspace.append_transcript("author", f"第 {i} 句")
+        workspace.append_transcript("assistant", f"记下了 {i}。")
+    # 推理型号可能把输出预算全用在思考上，正文为空
+    clients = scripted_clients([], "")
+    agent = Agent(workspace, FakePort(), clients=clients, config=CONFIG)
+    assert agent.compact_pending() is False
+    assert workspace.read_summary() == ("", 0)  # 覆盖范围没有推进
+    assert len(agent.transcript) == 50  # 旧对话照常带着，不会凭空消失
+    assert "摘要没有正文" in (workspace.root / ".story" / "日志.txt").read_text()
+
+
+def test_empty_summary_on_disk_never_swallows_records(workspace):
+    for i in range(6):
+        workspace.append_transcript("author", f"第 {i} 句")
+    workspace.write_summary("", 4)  # 旧版本留下的坏状态
+    agent = Agent(workspace, FakePort(), clients=None, config=None)
+    assert agent._covered == 0
+    assert "第 0 句" in str(agent.transcript[0].content)  # 连续发言会并成一条，六句都在
+    workspace.write_summary("有内容的摘要", 99)  # 撤回之后覆盖范围超过了记录数
+    assert Agent(workspace, FakePort(), clients=None, config=None)._covered == 0
 
 
 def test_overflow_within_a_session_is_compacted_not_dropped(workspace):

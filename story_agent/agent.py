@@ -206,17 +206,36 @@ class Agent:
         self.reload()
 
     def reload(self) -> None:
-        """从作品目录重新装入对话与摘要；撤回之后也用它。"""
+        """从作品目录重新装入对话与摘要；撤回之后也用它。这里不调用模型，打开作品要快。"""
         workspace = self.workspace
         rows = workspace.all_transcript()
         self.summary, self._covered = workspace.read_summary()
+        if not self.summary or self._covered > len(rows):
+            self._covered = 0  # 摘要是空的或记录被撤回过，覆盖范围作废，旧对话照常带着
         self.returning = bool(rows)
+        self.transcript = history_to_transcript(rows[self._covered :])
+
+    @property
+    def needs_compacting(self) -> bool:
+        """待压缩的旧对话超过了最近 N 条。"""
+        if not self.model_ready:
+            return False
+        return len(self.workspace.all_transcript()) - self._covered > HISTORY_MESSAGES
+
+    def compact_pending(self) -> bool:
+        """把超出最近 N 条的旧对话压缩进摘要。失败就什么都不动，旧对话仍在上下文里。"""
+        rows = self.workspace.all_transcript()
         keep_from = max(self._covered, len(rows) - HISTORY_MESSAGES, 0)
-        if keep_from > self._covered and self.model_ready:
-            self.summary = self._compact(rows[self._covered : keep_from])
-            self._covered = keep_from
-            workspace.write_summary(self.summary, self._covered)
-        self.transcript = history_to_transcript(rows[keep_from:])
+        if keep_from <= self._covered or not self.model_ready:
+            return False
+        summary = self._compact(rows[self._covered : keep_from])
+        if summary is None:
+            return False
+        self.summary = summary
+        self._covered = keep_from
+        self.workspace.write_summary(self.summary, self._covered)
+        self.transcript = history_to_transcript(rows[self._covered :])
+        return True
 
     # ------------------------------------------------------------ 消息装配
 
@@ -273,34 +292,44 @@ class Agent:
         if dropped and self.model_ready:
             rows = _rows_of(dropped)
             if rows:
-                self.summary = self._compact(rows)
-                self.workspace.write_summary(self.summary, self._covered)
-                system = self.system_prompt()
+                summary = self._compact(rows)
+                if summary is None:
+                    self.port.say(
+                        "旧对话没能整理成摘要，这部分不再进入上下文；对话文件里仍然保留。"
+                    )
+                else:
+                    self.summary = summary
+                    self.workspace.write_summary(self.summary, self._covered)
+                    system = self.system_prompt()
         return [ChatMessage("system", system), *self.transcript]
 
-    def _compact(self, rows: Sequence[tuple[str, str]]) -> str:
-        """把要丢掉的对话压缩进摘要；失败就保留旧摘要，不打断作者。"""
-        assert self.clients is not None and self.config is not None
-        from dataclasses import replace
+    def _compact(self, rows: Sequence[tuple[str, str]]) -> str | None:
+        """把要丢掉的对话压缩进摘要。返回 None 表示这次没压成，调用方不要推进覆盖范围。
 
+        输出预算用配置里的全额：有的模型（如 DeepSeek 的推理型号）会先输出一大段思考，
+        预算给小了会在思考里就被截断，正文为空。
+        """
+        assert self.clients is not None and self.config is not None
         body = "\n\n".join(
             f"{'作者' if role == 'author' else '助手'}：{text.strip()}" for role, text in rows
         )
         user = f"已有摘要：\n{self.summary or '（无）'}\n\n要压缩的对话：\n{body}"
-        options = replace(
-            self.config.options, max_output_tokens=min(1_500, self.config.options.max_output_tokens)
-        )
         try:
             result = self.clients.complete(
                 [ChatMessage("system", SUMMARY_SYSTEM), ChatMessage("user", user)],
-                options,
+                self.config.options,
                 CancelSignal(),
             )
-        except ProviderError:
-            return self.summary
-        self.workspace.record_usage(result.usage, options.model, "摘要")
+        except ProviderError as exc:
+            self.workspace.append_log(f"摘要失败：{exc}")
+            return None
+        self.workspace.record_usage(result.usage, self.config.options.model, "摘要")
         text = result.text.strip()
-        return text or self.summary
+        if result.truncated or not text:
+            out = result.usage.get("output_tokens", 0)
+            self.workspace.append_log(f"摘要没有正文（截断={result.truncated}，输出 {out}）")
+            return None
+        return text
 
     def _notify(self, event: str, *args) -> None:
         hook = getattr(self.observer, event, None)
