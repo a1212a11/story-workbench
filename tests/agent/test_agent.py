@@ -317,6 +317,16 @@ def test_notes_and_preferences_appear_in_the_system_prompt(workspace):
     assert "作者拒绝过整章重写" in prompt and "代理笔记.md 是你的笔记" in prompt
     assert "作者的偏好与禁忌" in prompt
     assert "不超过十行" in prompt and "写进 草稿/ 里的文件" in prompt
+    assert "技能/共创.md" in prompt
+
+
+def test_turn_reminder_is_sent_to_the_model_but_not_persisted(chapter_workspace):
+    agent, _, clients = make_agent(chapter_workspace, [Reply("好。")])
+    agent.handle("一起完善世界观")
+    sent = clients.calls[0][-1].content
+    assert sent.startswith("一起完善世界观") and "一次只谈一件事" in sent
+    rows = transcript_rows(chapter_workspace)
+    assert rows[0]["text"] == "一起完善世界观"
 
 
 def test_api_error_description_has_status_and_message_but_no_secrets():
@@ -347,3 +357,8 @@ def test_log_file_records_calls_tools_and_failures(chapter_workspace):
     assert any("结果 read 完成 ── 章节/第01章.md ──" in line for line in lines)
     assert any("模型 失败" in line and "HTTP 500" in line for line in lines)
     assert all(line[:4].isdigit() for line in lines)  # 每行带时间戳
+
+
+def test_persona_points_to_the_co_design_skill(workspace):
+    agent, _, _ = make_agent(workspace, [])
+    assert "技能/共创.md" in agent.system_prompt()

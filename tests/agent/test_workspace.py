@@ -29,6 +29,7 @@ def test_create_lays_out_directory_skills_and_first_commit(workspace: Workspace)
     skills = {p.name for p in (root / "技能").glob("*.md")}
     assert skills == {
         "修订.md",
+        "共创.md",
         "写章.md",
         "审读.md",
         "回改.md",

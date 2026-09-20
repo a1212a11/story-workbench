@@ -224,7 +224,7 @@ def test_new_directory_creates_work_and_slash_text_goes_to_agent(tmp_path):
             assert "命令：/help" in app.transcript_text() and len(clients.calls) == 1
             await _send(pilot, "/random")
             await _wait(app, pilot, lambda: "没有斜杠命令" in app.transcript_text())
-            assert clients.calls[-1][-1].content == "/random"
+            assert clients.calls[-1][-1].content.startswith("/random")
             await _send(pilot, "/exit")
             await pilot.pause(0.2)
             assert app.stopping.is_set()
