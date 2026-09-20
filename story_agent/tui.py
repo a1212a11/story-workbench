@@ -678,11 +678,11 @@ class WorkbenchApp(App[int]):
         """PageUp/PageDown 翻看对话；审批卡打开时翻卡片里的 diff。"""
         if isinstance(self.screen, EditorScreen):
             return
-        target = (
-            self.query_one("#card-diff", VerticalScroll)
-            if self.mode == "approve"
-            else self._transcript()
-        )
+        target = self._transcript()
+        if self.mode == "approve":
+            card = self.query_one("#card-diff", VerticalScroll)
+            if card.max_scroll_y > 0:  # 新建文件的卡片没有可翻的内容，翻的是上方的全文
+                target = card
         if direction == "up":
             target.scroll_page_up(animate=False)
         else:

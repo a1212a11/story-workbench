@@ -69,7 +69,7 @@ def test_new_formal_file_and_free_file_paths(workspace: Workspace):
         {"path": "人物/沈砚.md", "reason": "立人物", "content": "# 沈砚\n\n矿工。\n"},
     )
     assert port.cards[0].title == "新建 人物/沈砚.md · 立人物"
-    assert port.cards[0].summary == "新建文件" and "已显示在上方" in port.cards[0].diff
+    assert port.cards[0].summary == "新建文件" and "PageUp 上翻阅读" in port.cards[0].diff
     assert "── 人物/沈砚.md（新建）──" in port.output and "矿工。" in port.output
     assert workspace.read_text("人物/沈砚.md") == "# 沈砚\n\n矿工。\n" and not outcome.is_error
 

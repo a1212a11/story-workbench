@@ -228,7 +228,7 @@ def _apply_edit(
         # 新文件：全文显示在对话里，卡片只提示，作者不必在卡片里读长文
         ctx.port.say(f"── {rel}（新建）──")
         ctx.port.say(new.rstrip("\n"))
-        diff = f"全文 {len(new)} 字已显示在上方对话里。"
+        diff = f"全文 {len(new)} 字已显示在上方对话里，PageUp 上翻阅读。"
     if is_formal(rel):
         card = ApprovalCard(title=title, diff=diff, summary=summary, kind=kind)
         approval: Approval = ctx.port.approve(card)

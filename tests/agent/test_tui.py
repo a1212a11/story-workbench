@@ -432,3 +432,41 @@ def test_ctrl_c_needs_a_second_press_to_quit(tmp_path, monkeypatch):
             assert app.stopping.is_set()
 
     _run(scenario())
+
+
+def test_new_file_card_lets_page_keys_scroll_the_transcript(tmp_path):
+    from textual.containers import VerticalScroll
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    long_new = "# 第二章\n\n" + "\n\n".join(f"第 {i} 段，新章节的段落。" for i in range(80))
+    clients = scripted_clients(
+        [
+            *OPENING,
+            Reply(
+                "写。",
+                (use("edit", "e", path="章节/第02章.md", reason="写第二章", content=long_new),),
+            ),
+            Reply("好了。"),
+        ]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "我们接着改？" in app.transcript_text())
+            await _send(pilot, "写第二章")
+            await _wait(app, pilot, lambda: app.mode == "approve")
+            await pilot.pause(0.3)
+            assert "PageUp 上翻阅读" in app.current_card.diff
+            transcript = app.query_one("#transcript", VerticalScroll)
+            before = transcript.scroll_y
+            assert before > 0
+            await pilot.press("pageup")
+            await pilot.pause(0.1)
+            assert transcript.scroll_y < before
+            await _send(pilot, "")
+            await _wait(app, pilot, lambda: "好了。" in app.transcript_text())
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
