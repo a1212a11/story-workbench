@@ -342,8 +342,8 @@ class WorkbenchApp(App[int]):
     #card-diff { height: auto; max-height: 18; scrollbar-size-vertical: 1; }
     #card-hint { color: $text-muted; }
     #palette { margin: 0 2; height: auto; border: round $surface; padding: 0 1; }
-    .palette-title { color: $warning; }
-    .palette-item { color: $text-muted; }
+    .palette-title { color: $warning; text-wrap: nowrap; text-overflow: ellipsis; }
+    .palette-item { color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; height: 1; }
     .palette-item.selected { color: $text; background: $accent 30%; }
     #inputbox { border: round $accent; height: auto; max-height: 8; margin: 0 1; }
     #inputbox > .prompt { width: 2; padding-left: 1; color: $accent; }
@@ -816,7 +816,9 @@ class WorkbenchApp(App[int]):
             panel.mount(Static("撤回什么？", classes="palette-title"))
         for index, (name, description) in enumerate(self.palette_items):
             classes = "palette-item selected" if index == self.palette_index else "palette-item"
-            panel.mount(Static(f"{name:<8} {description}", classes=classes, markup=False))
+            marker = "❯" if index == self.palette_index else " "
+            line = f"{marker} {name:<7} {description}".replace("\n", " ")
+            panel.mount(Static(line, classes=classes, markup=False))
 
     def palette_move(self, delta: int) -> None:
         if not self.palette_items:

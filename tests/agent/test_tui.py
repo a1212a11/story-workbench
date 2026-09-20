@@ -695,3 +695,34 @@ def test_status_line_has_a_context_gauge_that_warns_when_nearly_full(tmp_path):
             assert "快满了" not in app.status_text  # 红色就是提示，不加字
 
     _run(scenario())
+
+
+def test_rewind_list_items_stay_on_one_line(tmp_path):
+    path = tmp_path / "novel"
+    ws = _chapter_workspace(path)
+    ws.append_transcript(
+        "author",
+        "一个一个来吧，需要设计修炼的方式，以及前三章的剧情设计，还至少要加入真善美的主题，" * 3,
+    )
+    ws.append_transcript("assistant", "好。")
+    ws.append_transcript("author", "短的一句")
+    ws.append_transcript("assistant", "好。")
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(90, 30)) as pilot:
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
+            await pilot.press("escape")
+            await pilot.press("escape")
+            await pilot.pause(0.3)
+            assert app.palette_mode == "rewind"
+            items = list(app.query(".palette-item"))
+            assert len(items) == 2
+            assert all(item.region.height == 1 for item in items)
+            assert str(items[0].content).startswith("❯ ") and "短的一句" in str(items[0].content)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert app.palette_mode == "commands"
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
