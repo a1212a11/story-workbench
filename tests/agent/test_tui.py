@@ -780,3 +780,24 @@ def test_reply_markdown_hides_rules_and_flattens_headings(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_nested_lists_render_without_blank_lines(tmp_path):
+    from textual.widgets import Markdown
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    body = "标题\n\n1. 甲\n   - 乙\n   - 丙\n2. 丁\n\n结尾一句。"
+    clients = scripted_clients([Reply(body)])
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "结尾一句" in app.transcript_text())
+            await pilot.pause(0.3)
+            markdown = list(app.query(Markdown))[-1]
+            # 标题、空行、四个列表项、空行、结尾：一共 8 行，列表内部没有空行
+            assert markdown.region.height == 8
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

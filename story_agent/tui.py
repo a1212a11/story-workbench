@@ -404,16 +404,17 @@ class WorkbenchApp(App[int]):
     .reply > .dot { width: 2; color: $accent; }
     .reply > Static, .reply > Markdown { width: 1fr; }
     .reply > Markdown { margin: 0; padding: 0; background: ansi_default; }
-    .reply > Markdown MarkdownBlock { background: ansi_default; margin: 0 0 1 0; }
+    .reply > Markdown MarkdownBlock { background: ansi_default; margin: 0; padding: 0; }
+    .reply > Markdown > MarkdownBlock { margin: 0 0 1 0; }
+    .reply > Markdown > MarkdownBlock:last-child { margin: 0; }
     .reply > Markdown MarkdownHorizontalRule { display: none; }
-    .reply > Markdown MarkdownH1, .reply > Markdown MarkdownH2, .reply > Markdown MarkdownH3,
-    .reply > Markdown MarkdownH4, .reply > Markdown MarkdownH5, .reply > Markdown MarkdownH6 {
-        color: ansi_default; background: ansi_default; text-style: bold; text-align: left;
-        border: none; padding: 0; margin: 0 0 1 0;
+    .reply > Markdown MarkdownHeader {
+        color: ansi_default; text-style: bold; text-align: left; border: none;
     }
-    .reply > Markdown MarkdownBulletList, .reply > Markdown MarkdownOrderedList { margin: 0 0 1 0; }
-    .reply > Markdown MarkdownListItem { margin: 0; }
-    .reply > Markdown MarkdownListItem > MarkdownParagraph { margin: 0; }
+    .reply > Markdown > MarkdownHeader { margin: 0; }
+    .reply > Markdown MarkdownListItem { margin: 0; margin-right: 1; }
+    .reply > Markdown MarkdownListItem MarkdownBlock { margin: 0; }
+    .reply > Markdown MarkdownBullet { color: $accent; }
     .tool { height: auto; margin-top: 1; }
     .tool-header { color: $accent; }
     .tool-header.ok { color: $success; }
