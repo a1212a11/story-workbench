@@ -13,6 +13,25 @@ from pathlib import Path
 
 from story_agent.provider import CallOptions, CompleteCall, StreamCall, make_anthropic_clients
 
+
+@dataclass(frozen=True, slots=True)
+class Provider:
+    key_env: str
+    default_model: str
+    base_url: str | None = None
+    disable_thinking: bool = False
+
+
+# 三家都走 Anthropic 消息协议：DeepSeek 与 OpenRouter 提供兼容端点。
+PROVIDERS = {
+    "anthropic": Provider("ANTHROPIC_API_KEY", "claude-sonnet-5"),
+    "deepseek": Provider(
+        "DEEPSEEK_API_KEY", "deepseek-flash", "https://api.deepseek.com/anthropic", True
+    ),
+    "openrouter": Provider(
+        "OPENROUTER_API_KEY", "google/gemini-3.8-flash", "https://openrouter.ai/api"
+    ),
+}
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 CONFIG_ENV = "STORY_WORKBENCH_CONFIG"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "story-workbench" / "config.json"
@@ -28,14 +47,10 @@ class Settings:
     provider: str = "anthropic"
 
     def __post_init__(self) -> None:
-        if self.provider not in ("anthropic", "deepseek"):
-            raise ValueError("模型供应商请选择 anthropic 或 deepseek。")
+        if self.provider not in PROVIDERS:
+            raise ValueError("模型供应商请选择 anthropic、deepseek 或 openrouter。")
         if self.model is None:
-            object.__setattr__(
-                self,
-                "model",
-                ("deepseek-flash" if self.provider == "deepseek" else "claude-sonnet-5"),
-            )
+            object.__setattr__(self, "model", PROVIDERS[self.provider].default_model)
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("模型名称不能为空。")
         for name in ("max_output_tokens", "context_tokens", "template_reserve"):
@@ -53,7 +68,7 @@ class Settings:
 
     @property
     def api_key_env(self) -> str:
-        return "DEEPSEEK_API_KEY" if self.provider == "deepseek" else API_KEY_ENV
+        return PROVIDERS[self.provider].key_env
 
 
 def load_settings(path: Path | None = None) -> Settings:
@@ -69,7 +84,7 @@ def load_settings(path: Path | None = None) -> Settings:
         raise ValueError("无法读取模型配置，请检查文件权限与 JSON 格式。") from None
     if not isinstance(raw, dict):
         raise ValueError("模型配置必须是 JSON 对象。")
-    if any(k in raw for k in ("api_key", API_KEY_ENV, "DEEPSEEK_API_KEY")):
+    if any(k in raw for k in ("api_key", *(p.key_env for p in PROVIDERS.values()))):
         raise ValueError("配置文件不能包含密钥；请使用对应供应商的环境变量。")
     if raw.keys() - Settings.__dataclass_fields__.keys():
         raise ValueError("模型配置含未知字段，请核对配置说明。")
@@ -120,10 +135,8 @@ def build_clients(settings: Settings) -> Clients | None:
     api_key = os.environ.get(settings.api_key_env, "").strip()
     if not api_key:
         return None
-    kwargs = (
-        {"base_url": "https://api.deepseek.com/anthropic", "disable_thinking": True}
-        if settings.provider == "deepseek"
-        else {}
+    provider = PROVIDERS[settings.provider]
+    stream, complete = make_anthropic_clients(
+        api_key, base_url=provider.base_url, disable_thinking=provider.disable_thinking
     )
-    stream, complete = make_anthropic_clients(api_key, **kwargs)
     return Clients(stream, complete)

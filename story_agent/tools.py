@@ -57,7 +57,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "或 content（整个文件的新内容，用于新建或重写）。正式文件（作品.md、大纲.md、决定.md、"
         "设定/、人物/、章节/）会先弹审批卡给作者看 diff，作者不批准则文件不变，你会拿到作者的意见。"
         "自由文件（故事状态.md、草稿/、技能/）直接保存。"
-        "reason 用一句人话说明这次改动，会写进历史。",
+        "reason 用一句人话说明这次改动，会写进历史。"
+        "要在末尾追加内容，把最后一段原文作为 old、原文加新内容作为 new；old 不能为空。",
         {
             "path": _PATH,
             "reason": {
@@ -223,6 +224,11 @@ def _apply_edit(
     if old == new:
         return ToolOutcome(f"{rel} 没有变化。")
     diff = _diff(rel, old, new)
+    if old is None:
+        # 新文件：全文显示在对话里，卡片只提示，作者不必在卡片里读长文
+        ctx.port.say(f"── {rel}（新建）──")
+        ctx.port.say(new.rstrip("\n"))
+        diff = f"全文 {len(new)} 字已显示在上方对话里。"
     if is_formal(rel):
         card = ApprovalCard(title=title, diff=diff, summary=summary, kind=kind)
         approval: Approval = ctx.port.approve(card)
@@ -238,7 +244,7 @@ def _apply_edit(
         if not approval.approved:
             note = f"作者说：{approval.note}" if approval.note else "作者没有说明原因。"
             return ToolOutcome(f"作者没有批准这次改动，{rel} 没有变化。{note}")
-    else:
+    elif old is not None:
         ctx.port.say(diff.rstrip("\n"))
     ws.write_text(rel, new)
     ref = ws.commit(reason or title, rel)
@@ -247,6 +253,19 @@ def _apply_edit(
         line += f" 历史编号 {ref}。"
     ctx.port.say(line)
     return ToolOutcome(line)
+
+
+def _closest_line(text: str, wanted: str) -> str | None:
+    """找出与 wanted 最相似的一行（按首行比），帮模型看出是哪几个字对不上。"""
+    first = wanted.strip().splitlines()[0] if wanted.strip() else ""
+    if not first:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    matches = difflib.get_close_matches(first, lines, n=1, cutoff=0.5)
+    if not matches:
+        return None
+    line = matches[0]
+    return line if len(line) <= 80 else line[:80] + "…"
 
 
 def _apply_changes(text: str, changes: list[Any]) -> tuple[str, int]:
@@ -262,7 +281,11 @@ def _apply_changes(text: str, changes: list[Any]) -> tuple[str, int]:
             raise WorkspaceError(f"第 {index} 处改动的 old 不能为空。")
         count = text.count(old)
         if count == 0:
-            raise WorkspaceError(f"第 {index} 处改动的原文在文件里没有找到：「{old[:40]}」")
+            hint = _closest_line(text, old)
+            raise WorkspaceError(
+                f"第 {index} 处改动的原文在文件里没有找到：「{old[:40]}」"
+                + (f" 最接近的一行是：「{hint}」" if hint else "")
+            )
         if count > 1:
             raise WorkspaceError(
                 f"第 {index} 处改动的原文在文件里出现了 {count} 次，请给更长的原文。"
