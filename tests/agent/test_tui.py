@@ -306,3 +306,54 @@ def test_chinese_wraps_between_characters_not_after_the_number():
     breaks = compute_wrap_offsets(text, 20, 8)
     assert breaks and breaks[0] > len("⏺ 1. ")  # 不在编号后面整体挪行
     assert all(text[b] not in "，。" for b in breaks)  # 行首不出现收尾标点
+
+
+def test_quiet_tool_outputs_are_collapsed_by_default(tmp_path):
+    from story_agent.tui import ToolBlock
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients(
+        [
+            *OPENING,
+            Reply("看看。", (use("read", "r", path="章节/第01章.md"),)),
+            Reply(
+                "改。",
+                (
+                    use(
+                        "edit",
+                        "e",
+                        path="章节/第01章.md",
+                        reason="改",
+                        changes=[{"old": "他没有下去。", "new": "他下去了。"}],
+                    ),
+                ),
+            ),
+            Reply("好了。"),
+        ]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _wait(app, pilot, lambda: "我们接着改？" in app.transcript_text())
+            await _send(pilot, "改结尾")
+            await _wait(app, pilot, lambda: app.mode == "approve")
+            await _send(pilot, "")
+            await _wait(app, pilot, lambda: "好了。" in app.transcript_text())
+            blocks = list(app.query(ToolBlock))
+            assert [b.name for b in blocks] == ["read", "edit"]
+            assert blocks[0].collapsed and not blocks[0].body().display
+            assert not blocks[1].collapsed and blocks[1].body().display
+            assert "点击展开" in str(blocks[0].query_one(".tool-footer", Static).content)
+            await pilot.press("ctrl+o")
+            await pilot.pause(0.1)
+            assert app.verbose and not blocks[0].collapsed
+            await pilot.press("ctrl+o")
+            await pilot.pause(0.1)
+            assert blocks[0].collapsed and not blocks[1].collapsed
+            blocks[0].on_click()
+            assert not blocks[0].collapsed
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

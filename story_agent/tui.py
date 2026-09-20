@@ -46,8 +46,10 @@ def install_cjk_wrapping() -> None:
 install_cjk_wrapping()
 
 SPINNER = "·✢✳✶✻✽"
+# 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
+QUIET_TOOLS = frozenset({"read", "search", "verify", "history"})
 HISTORY_ON_SCREEN = 12
-IDLE_HINT = "Enter 发送 · Ctrl-J 换行 · Ctrl-O 折叠工具输出 · Ctrl-D 退出"
+IDLE_HINT = "Enter 发送 · Ctrl-J 换行 · Ctrl-O 展开/折叠工具输出 · Ctrl-D 退出"
 BUSY_HINT = "Esc 中断 · 已保存的改动都在"
 CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见"
 
@@ -115,10 +117,13 @@ class EditorScreen(ModalScreen[str | None]):
 class ToolBlock(Vertical):
     """一次工具调用：标题、缩进的输出、结束行；可折叠。"""
 
-    def __init__(self, label: str) -> None:
+    def __init__(self, label: str, name: str = "") -> None:
         super().__init__(classes="tool")
         self.label = label
+        self.name = name
         self.lines = 0
+        self.collapsed = False
+        self.state = "…"
         self.stream: Static | None = None
         self.stream_text = ""
 
@@ -157,11 +162,21 @@ class ToolBlock(Vertical):
         header = self.query_one(".tool-header", Static)
         header.remove_class("running")
         header.add_class("error" if is_error else "ok")
-        state = "出错" if is_error else "完成"
-        self.query_one(".tool-footer", Static).update(f"  ⎿  {state} · {self.lines} 行")
+        self.state = "出错" if is_error else "完成"
+        self._refresh_footer()
+
+    def _refresh_footer(self) -> None:
+        hint = " · Ctrl-O 或点击展开" if self.collapsed else ""
+        self.query_one(".tool-footer", Static).update(f"  ⎿  {self.state} · {self.lines} 行{hint}")
 
     def set_collapsed(self, collapsed: bool) -> None:
+        self.collapsed = collapsed
         self.body().display = not collapsed
+        self._refresh_footer()
+
+    def on_click(self) -> None:
+        if self.state != "…":
+            self.set_collapsed(not self.collapsed)
 
 
 def colorize_diff(text: str) -> Text:
@@ -240,7 +255,7 @@ class ThreadPort:
         self._ui(self.app.end_reply, text)
 
     def tool_started(self, name: str, label: str) -> None:
-        self._ui(self.app.begin_tool, label)
+        self._ui(self.app.begin_tool, label, name)
 
     def tool_finished(self, name: str, text: str, is_error: bool) -> None:
         self._ui(self.app.end_tool, is_error)
@@ -315,7 +330,7 @@ class WorkbenchApp(App[int]):
         self.busy = False
         self.busy_since = 0.0
         self.busy_verb = "思考中"
-        self.tools_collapsed = False
+        self.verbose = False  # Ctrl-O：展开全部工具输出
         self._current_tool: ToolBlock | None = None
         self._reply_row: Horizontal | None = None
         self._reply_stream: Static | None = None
@@ -522,9 +537,9 @@ class WorkbenchApp(App[int]):
         row.mount(Markdown(text))
         self._scroll()
 
-    def begin_tool(self, label: str) -> None:
+    def begin_tool(self, label: str, name: str = "") -> None:
         self._flush_reply_stream()
-        block = ToolBlock(label)
+        block = ToolBlock(label, name)
         self._current_tool = block
         self.busy_verb = label.split("(", 1)[0] + "中"
         self._log.append(f"⏺ {label}")
@@ -536,7 +551,7 @@ class WorkbenchApp(App[int]):
         self._current_tool = None
         if block is not None:
             block.finish(is_error)
-            block.set_collapsed(self.tools_collapsed)
+            block.set_collapsed(self._default_collapsed(block))
             self._log.append(f"  ⎿  {'出错' if is_error else '完成'}")
         self._scroll()
 
@@ -637,11 +652,14 @@ class WorkbenchApp(App[int]):
             return
         self.action_quit_app()
 
+    def _default_collapsed(self, block: ToolBlock) -> bool:
+        return not self.verbose and block.name in QUIET_TOOLS
+
     def action_toggle_tools(self) -> None:
-        self.tools_collapsed = not self.tools_collapsed
+        self.verbose = not self.verbose
         for block in self._transcript().query(ToolBlock):
             if block is not self._current_tool:
-                block.set_collapsed(self.tools_collapsed)
+                block.set_collapsed(self._default_collapsed(block))
         self._scroll()
 
     def action_editor_cancel_or_quit(self) -> None:
