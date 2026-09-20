@@ -312,6 +312,34 @@ def test_chinese_wraps_between_characters_not_after_the_number():
     breaks = compute_wrap_offsets(text, 20, 8)
     assert breaks and breaks[0] > len("⏺ 1. ")  # 不在编号后面整体挪行
     assert all(text[b] not in "，。" for b in breaks)  # 行首不出现收尾标点
+    from rich._wrap import divide_line
+
+    status = "《寒灯协定》 · 已有 4 章正文 · 最近改动：今天 10:35 更新故事状态至第四章定稿状态。"
+    breaks = divide_line(status, 70)
+    assert (
+        breaks
+        and status[: breaks[0]].rstrip() != "《寒灯协定》 · 已有 4 章正文 · 最近改动：今天 10:35"
+    )
+    assert all(status[b] not in "，。" for b in breaks)
+
+
+def test_static_status_line_uses_the_full_width(tmp_path):
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(140, 30)) as pilot:
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
+            await pilot.pause(0.2)
+            from rich.cells import cell_len
+
+            line = [w for w in app.query(".system") if "已有 1 章正文" in str(w.content)][-1]
+            cells, width = cell_len(str(line.content)), line.region.width
+            assert line.region.height == -(-cells // width)  # 行数正好是填满宽度所需的行数
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
 
 
 def test_quiet_tool_outputs_are_collapsed_by_default(tmp_path):

@@ -17,6 +17,7 @@ import threading
 import time
 from pathlib import Path
 
+import rich._wrap as rich_wrap
 import textual._wrap as textual_wrap
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -38,10 +39,14 @@ from story_agent.workspace import Workspace, WorkspaceError
 _CJK = "\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef"
 _CLOSING = "，。、；：！？）」』》〉】…—"
 CJK_CHUNK = re.compile(rf"[{_CJK}][{_CLOSING}]*\s*|\S+?(?=[{_CJK}])\s*|\S+\s*|\s+")
+# Static 的纯文本走的是 Rich 的切词（textual.content 用 rich._wrap.divide_line），
+# 形状是「前导空白 + 词 + 尾随空白」。
+CJK_WORD = re.compile(rf"\s*(?:[{_CJK}][{_CLOSING}]*|\S+?(?=[{_CJK}])|\S+)\s*")
 
 
 def install_cjk_wrapping() -> None:
     textual_wrap.re_chunk = CJK_CHUNK
+    rich_wrap.re_word = CJK_WORD
 
 
 install_cjk_wrapping()
