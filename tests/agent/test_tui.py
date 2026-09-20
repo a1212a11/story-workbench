@@ -741,7 +741,8 @@ def test_app_uses_the_story_theme_with_claude_orange(tmp_path):
             await pilot.pause(0.1)
             assert app.theme == "story"
             assert app.current_theme.accent.lower() == PALETTE["orange"].lower()
-            assert app.current_theme.background.lower() == PALETTE["crust"].lower()
+            assert app.current_theme.ansi and app.current_theme.background == "ansi_default"
+            assert app.native_ansi_color
             await pilot.press("ctrl+d")
 
     _run(scenario())

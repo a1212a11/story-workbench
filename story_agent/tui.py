@@ -46,34 +46,48 @@ def install_cjk_wrapping() -> None:
 
 install_cjk_wrapping()
 
-# 配色：Claude 的品牌橙 #D97757 做强调色，其余取 Catppuccin Mocha（多数终端工具的默认深色板）。
+# 配色：背景与正文跟着终端走（和 Claude Code 一样），只用少数几个颜色分辨状态：
+# Claude 橙 #D97757 做强调，绿黄红取 Catppuccin Mocha。
 PALETTE = {
-    "orange": "#D97757",  # Claude 橙：助手圆点、输入框边框、旋转指示
+    "orange": "#D97757",  # 助手圆点、输入框边框、旋转指示、选中项
     "green": "#A6E3A1",  # 完成、新增行
     "yellow": "#F9E2AF",  # 审批卡、列表标题、七成以上的上下文
     "red": "#F38BA8",  # 出错、删除行、八成五以上的上下文
     "blue": "#89B4FA",
-    "text": "#CDD6F4",
-    "subtext": "#A6ADC8",  # 作者的话、系统提示
-    "muted": "#6C7086",  # 分隔线、折叠提示
-    "crust": "#11111B",  # 背景，接近纯黑的终端
-    "base": "#1E1E2E",  # 面板
-    "surface": "#313244",  # 选中项、卡片边框
+    "subtext": "#A6ADC8",  # diff 文件名行
+    "muted": "#6C7086",  # diff 位置行
+    "surface": "#313244",  # 选中项与列表边框，在深浅终端里都看得见
 }
 STORY_THEME = Theme(
     name="story",
+    ansi=True,  # 背景、正文、面板都用终端自己的颜色
     primary=PALETTE["orange"],
     secondary=PALETTE["blue"],
     accent=PALETTE["orange"],
     success=PALETTE["green"],
     warning=PALETTE["yellow"],
     error=PALETTE["red"],
-    foreground=PALETTE["text"],
-    background=PALETTE["crust"],
-    surface=PALETTE["base"],
-    panel=PALETTE["surface"],
+    foreground="ansi_default",
+    background="ansi_default",
+    surface="ansi_default",
+    panel="ansi_default",
+    boost="ansi_default",
     dark=True,
-    variables={"text-muted": PALETTE["muted"], "input-cursor-background": PALETTE["orange"]},
+    variables={
+        "text-muted": "ansi_bright_black",
+        "ansi-background": "ansi_black",
+        "ansi-foreground": "ansi_white",
+        "border-blurred": "ansi_black",
+        "block-cursor-foreground": "ansi_black",
+        "block-cursor-background": PALETTE["orange"],
+        "input-cursor-background": PALETTE["orange"],
+        "input-cursor-foreground": "ansi_black",
+        "input-cursor-text-style": "none",
+        "input-selection-background": PALETTE["surface"],
+        "input-selection-foreground": "ansi_default",
+        "screen-selection-background": PALETTE["surface"],
+        "screen-selection-foreground": "ansi_default",
+    },
 )
 
 SPINNER = "·✢✳✶✻✽"
@@ -346,20 +360,21 @@ class ThreadPort:
 
 class WorkbenchApp(App[int]):
     CSS = """
-    Screen { layout: vertical; background: $background; }
+    Screen { layout: vertical; }
     #transcript {
         height: 1fr; padding: 0 2;
-        scrollbar-size-vertical: 1; scrollbar-color: $surface; scrollbar-background: $background;
+        scrollbar-size-vertical: 1; scrollbar-color: #313244; scrollbar-background: ansi_default;
     }
     .welcome { color: $text-muted; margin-bottom: 1; }
     .divider { color: $text-muted; margin: 1 0; }
-    .author { color: #A6ADC8; margin-top: 1; }
-    .system { color: #A6ADC8; }
+    .author { color: ansi_bright_black; margin-top: 1; }
+    .system { color: ansi_bright_black; }
     .history { opacity: 70%; }
     .reply { height: auto; margin-top: 1; }
     .reply > .dot { width: 2; color: $accent; }
     .reply > Static, .reply > Markdown { width: 1fr; }
-    .reply > Markdown { margin: 0; padding: 0; background: transparent; }
+    .reply > Markdown { margin: 0; padding: 0; background: ansi_default; }
+    .reply > Markdown MarkdownBlock { background: ansi_default; }
     .tool { height: auto; margin-top: 1; }
     .tool-header { color: $accent; }
     .tool-header.ok { color: $success; }
@@ -372,18 +387,18 @@ class WorkbenchApp(App[int]):
     #card-title { color: $warning; text-style: bold; }
     #card-diff { height: auto; max-height: 18; scrollbar-size-vertical: 1; }
     #card-hint { color: $text-muted; }
-    #palette { margin: 0 2; height: auto; border: round $panel; padding: 0 1; }
+    #palette { margin: 0 2; height: auto; border: round #45475A; padding: 0 1; }
     .palette-title { color: $warning; text-wrap: nowrap; text-overflow: ellipsis; }
     .palette-item { color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; height: 1; }
-    .palette-item.selected { color: $accent; background: $panel; text-style: bold; }
+    .palette-item.selected { color: $accent; background: #313244; text-style: bold; }
     #inputbox { border: round $accent; height: auto; max-height: 8; margin: 0 1; }
     #inputbox > .prompt { width: 2; padding-left: 1; color: $accent; }
-    #input { height: auto; max-height: 6; border: none; padding: 0; background: transparent; }
+    #input { height: auto; max-height: 6; border: none; padding: 0; background: ansi_default; }
     #input:focus { border: none; }
     #hint { height: 1; margin: 0 2; color: $text-muted; }
     #hint-left { width: 1fr; }
     #hint-right { width: auto; text-align: right; }
-    #editor-title { height: 1; background: $accent; color: $text; padding: 0 1; }
+    #editor-title { height: 1; background: $accent; color: ansi_black; padding: 0 1; }
     #editor { height: 1fr; }
     """
 
