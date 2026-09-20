@@ -274,35 +274,50 @@ def test_reopen_reports_status_locally_without_calling_the_model(chapter_workspa
     assert [m.role for m in agent.transcript] == ["user", "assistant"]
 
 
-def test_opening_does_not_compact_and_compacting_is_explicit(workspace):
-    for i in range(25):
-        workspace.append_transcript("author", f"第 {i} 句：我喜欢短句。")
+def _long_conversation(workspace, rounds: int = 25) -> None:
+    """撑满上下文预算的对话：作者每句都很长。"""
+    for i in range(rounds):
+        workspace.append_transcript("author", f"第 {i} 句：" + "很长的话" * 500)
         workspace.append_transcript("assistant", f"记下了 {i}。")
-    clients = scripted_clients([], "作者喜欢短句。")
+
+
+def test_compacting_triggers_on_budget_not_on_message_count(workspace):
+    # 条数很多但内容短：远没用满预算，不该压缩
+    for i in range(40):
+        workspace.append_transcript("author", f"第 {i} 句")
+        workspace.append_transcript("assistant", f"好 {i}。")
+    quiet = Agent(workspace, FakePort(), clients=scripted_clients([], "x"), config=CONFIG)
+    assert len(quiet.transcript) == 80 and not quiet.needs_compacting
+
+
+def test_opening_does_not_compact_and_compacting_is_explicit(workspace):
+    _long_conversation(workspace)
+    clients = scripted_clients([], "作者喜欢长篇大论。")
     agent = Agent(workspace, FakePort(), clients=clients, config=CONFIG)
     # 打开作品不调用模型，界面不会白屏卡住
     assert clients.completes == [] and len(agent.transcript) == 50 and agent.summary == ""
     assert agent.needs_compacting
 
     assert agent.compact_pending() is True
-    assert agent.summary == "作者喜欢短句。" and len(clients.completes) == 1
+    assert agent.summary == "作者喜欢长篇大论。" and len(clients.completes) == 1
     sent = clients.completes[0][1].content
-    assert "第 0 句" in sent and "第 4 句" in sent and "第 5 句" not in sent
-    assert workspace.read_summary() == ("作者喜欢短句。", 10)
-    assert len(agent.transcript) == 40
-    assert "之前对话的摘要：\n作者喜欢短句。" in agent.system_prompt()
+    assert "第 0 句" in sent and "第 14 句" in sent and "第 24 句" not in sent
+    covered = workspace.read_summary()[1]
+    assert workspace.read_summary()[0] == "作者喜欢长篇大论。" and covered == 30
+    assert len(agent.transcript) == 20  # 最近 20 条原样留着
+    used, limit = agent.context_usage()
+    assert used < limit * 0.7  # 压完之后离预算还远
+    assert "之前对话的摘要：\n作者喜欢长篇大论。" in agent.system_prompt()
     assert '"purpose": "摘要"' in (workspace.root / ".story" / "用量.jsonl").read_text()
 
     again = Agent(workspace, FakePort(), clients=scripted_clients([], "x"), config=CONFIG)
-    assert again.summary == "作者喜欢短句。" and not again.needs_compacting
+    assert again.summary == "作者喜欢长篇大论。" and not again.needs_compacting
     offline = Agent(workspace, FakePort(), clients=None, config=None)
-    assert offline.summary == "作者喜欢短句。" and not offline.needs_compacting
+    assert offline.summary == "作者喜欢长篇大论。" and not offline.needs_compacting
 
 
 def test_failed_compaction_keeps_the_old_conversation_instead_of_dropping_it(workspace):
-    for i in range(25):
-        workspace.append_transcript("author", f"第 {i} 句")
-        workspace.append_transcript("assistant", f"记下了 {i}。")
+    _long_conversation(workspace)
     # 推理型号可能把输出预算全用在思考上，正文为空
     clients = scripted_clients([], "")
     agent = Agent(workspace, FakePort(), clients=clients, config=CONFIG)
@@ -391,7 +406,7 @@ def test_persona_points_to_the_co_design_skill(workspace):
     agent, _, _ = make_agent(workspace, [])
     prompt = agent.system_prompt()
     assert "技能/共创.md" in prompt
-    assert "草稿/<主题>讨论.md" in prompt and "不要一个微决定问一轮" in prompt
+    assert "同一主题始终用同一个文件" in prompt and "不要一个微决定问一轮" in prompt
 
 
 def test_context_usage_counts_system_prompt_and_transcript(workspace):

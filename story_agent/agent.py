@@ -35,10 +35,14 @@ from story_agent.workspace import (
 MAX_CALLS_PER_TURN = 40
 # 附在每轮作者发言末尾、只发给模型不落库的提醒；对不太听系统提示的模型有用。
 TURN_REMINDER = (
-    "\n\n（提醒：回复不超过十行，用说话的方式，不附和也不复述我的话。设计类的话题先给你的建议和理由，"
-    "再问一个问题；每轮把新确认的点追加进 草稿/ 里的讨论文件，别只留在对话里。）"
+    "\n\n（提醒：回复不超过十行，用说话的方式；别用「记下了」开头复述我的话。设计类的话题先给你的"
+    "建议和理由，再问一个问题；新确认的点追加进 草稿/ 里同一个讨论文件，一个子题谈定了就提议"
+    "整理进 设定/。）"
 )
-HISTORY_MESSAGES = 40
+# 压缩旧对话按上下文预算触发，不按条数：条数触发会在远没用满时白等一次模型调用。
+COMPACT_AT = 0.7  # 估算超过预算的七成才压缩
+COMPACT_TARGET = 0.4  # 压到预算的四成，留出往后聊的余地
+KEEP_RECENT = 20  # 压缩时最近这么多条原样保留
 NOTES_FILE = "草稿/代理笔记.md"
 NOTES_LIMIT = 2_000
 SUMMARY_LIMIT = 600
@@ -78,8 +82,10 @@ PERSONA = "\n".join(
         "  按 技能/共创.md：",
         "  每轮先给你的建议和理由，再问一个问题；一次只谈一个主题，但主题里可以一次推进几步，",
         "  作者给了方向就直接拿草案让他砍，不要一个微决定问一轮；",
-        "  每轮把新确认的点追加到 草稿/<主题>讨论.md（自由文件，直接写，不用问），",
-        "  聊完整了再整理成 设定/ 或 人物/ 的正式文件请他批准。不附和，不复述他的话。",
+        "  每轮把新确认的点追加到 草稿/ 里这个主题的讨论文件（自由文件，直接写，不用问），",
+        "  同一主题始终用同一个文件，动笔前先看目录里有没有相近的，不要新建第二个；",
+        "  一个子题谈定了就整理成 设定/ 或 人物/ 的正式文件请他批准。",
+        "  不附和，也不要每轮用「记下了」开头复述他的话。",
         "- 正式文件是 作品.md、大纲.md、决定.md、设定/、人物/、章节/。改它们要经作者批准；",
         "  作者不批准时你会拿到作者的意见，按意见调整再提议，不要原样重来。",
         "- 故事状态.md、草稿/ 是你的工作文件，直接写，不用问。",
@@ -217,16 +223,31 @@ class Agent:
 
     @property
     def needs_compacting(self) -> bool:
-        """待压缩的旧对话超过了最近 N 条。"""
-        if not self.model_ready:
+        """上下文快装不下了才需要压缩；条数多但内容短时不动。"""
+        if not self.model_ready or len(self.transcript) <= KEEP_RECENT:
             return False
-        return len(self.workspace.all_transcript()) - self._covered > HISTORY_MESSAGES
+        used, limit = self.context_usage()
+        return used > limit * COMPACT_AT
+
+    def _compact_boundary(self, rows: Sequence[tuple[str, str]]) -> int:
+        """从最早的往后丢到哪一条，才能把估算压到目标以下；最近 KEEP_RECENT 条永远保留。"""
+        costs = [estimate_tokens(text) for _, text in rows]
+        total = estimate_tokens(self.system_prompt()) + sum(costs[self._covered :])
+        target = (self.config.budget if self.config else 20_000) * COMPACT_TARGET
+        keep_from = self._covered
+        last = max(len(rows) - KEEP_RECENT, self._covered)
+        while keep_from < last and total > target:
+            total -= costs[keep_from]
+            keep_from += 1
+        return keep_from
 
     def compact_pending(self) -> bool:
-        """把超出最近 N 条的旧对话压缩进摘要。失败就什么都不动，旧对话仍在上下文里。"""
+        """把最早的旧对话压缩进摘要。失败就什么都不动，旧对话仍在上下文里。"""
+        if not self.model_ready:
+            return False
         rows = self.workspace.all_transcript()
-        keep_from = max(self._covered, len(rows) - HISTORY_MESSAGES, 0)
-        if keep_from <= self._covered or not self.model_ready:
+        keep_from = self._compact_boundary(rows)
+        if keep_from <= self._covered:
             return False
         summary = self._compact(rows[self._covered : keep_from])
         if summary is None:
