@@ -31,6 +31,7 @@ from story_agent.provider import CancelSignal
 from story_agent.workspace import Workspace, WorkspaceError
 
 SPINNER = "·✢✳✶✻✽"
+HISTORY_ON_SCREEN = 12
 IDLE_HINT = "Enter 发送 · Ctrl-J 换行 · Ctrl-O 折叠工具输出 · Ctrl-D 退出"
 BUSY_HINT = "Esc 中断 · 已保存的改动都在"
 CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见"
@@ -244,6 +245,7 @@ class WorkbenchApp(App[int]):
     .welcome { border: round $accent; padding: 0 1; width: auto; }
     .author { color: $text-muted; }
     .system { color: $text-muted; }
+    .history { color: $text-muted; }
     .reply { height: auto; }
     .reply > .dot { width: 2; color: $accent; }
     .reply > Static, .reply > Markdown { width: 1fr; }
@@ -355,6 +357,9 @@ class WorkbenchApp(App[int]):
         )
         if self.clients is None:
             port.say("未检测到模型密钥：可以记录想法；写作与审读需要设置密钥后重新打开。")
+        recent = workspace.recent_transcript(HISTORY_ON_SCREEN)
+        if recent:
+            port._ui(self.show_history, recent)
         self._refresh_status(agent)
         try:
             self._run_turn(agent, None)
@@ -422,6 +427,17 @@ class WorkbenchApp(App[int]):
         if self._reply_stream is not None and not self._reply_text.strip():
             self._reply_stream.remove()
         self._reply_stream = None
+
+    def show_history(self, rows: list[tuple[str, str]]) -> None:
+        """重新打开时回放最近的对话，淡色显示；代理的上下文里也有这些。"""
+        self._log.append("── 上次的对话 ──")
+        self._mount(Static("── 上次的对话 ──", classes="system", markup=False))
+        for role, text in rows:
+            line = f"> {text}" if role == "author" else f"⏺ {text}"
+            self._log.append(line)
+            self._mount(Static(line, classes="history", markup=False))
+        self._log.append("── 现在 ──")
+        self._mount(Static("── 现在 ──", classes="system", markup=False))
 
     def show_welcome(self, text: str) -> None:
         self._log.append(text)

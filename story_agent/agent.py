@@ -31,6 +31,10 @@ from story_agent.workspace import (
 
 MAX_CALLS_PER_TURN = 40
 HISTORY_MESSAGES = 40
+RESUME_PROMPT = (
+    "（作者重新打开了作品，上面是之前的对话。先读 故事状态.md 和 大纲.md 确认现在的进度，"
+    "用一两句话接上上次的话题，提议下一步。这条提示作者看不见，直接对作者说话。）"
+)
 OPENING_PROMPT = (
     "（作者刚打开作品。先读 作品.md、大纲.md、故事状态.md，如果章节/ 里有正文也看一眼最新一章的"
     "开头。然后用两三句话说明现在写到哪、有什么没处理完，提议下一步。"
@@ -230,7 +234,8 @@ class Agent:
             text = self.local_status()
             self.port.say(text)
             return TurnResult(text, 0, ())
-        return self._turn(OPENING_PROMPT, cancel or CancelSignal(), persist_author=False)
+        prompt = RESUME_PROMPT if self.transcript else OPENING_PROMPT
+        return self._turn(prompt, cancel or CancelSignal(), persist_author=False)
 
     def handle(self, author_text: str, cancel: CancelSignal | None = None) -> TurnResult:
         text = author_text.strip()
