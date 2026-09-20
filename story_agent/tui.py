@@ -24,6 +24,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import Markdown, Static, TextArea
 
 from story_agent.agent import Agent
@@ -44,6 +45,36 @@ def install_cjk_wrapping() -> None:
 
 
 install_cjk_wrapping()
+
+# 配色：Claude 的品牌橙 #D97757 做强调色，其余取 Catppuccin Mocha（多数终端工具的默认深色板）。
+PALETTE = {
+    "orange": "#D97757",  # Claude 橙：助手圆点、输入框边框、旋转指示
+    "green": "#A6E3A1",  # 完成、新增行
+    "yellow": "#F9E2AF",  # 审批卡、列表标题、七成以上的上下文
+    "red": "#F38BA8",  # 出错、删除行、八成五以上的上下文
+    "blue": "#89B4FA",
+    "text": "#CDD6F4",
+    "subtext": "#A6ADC8",  # 作者的话、系统提示
+    "muted": "#6C7086",  # 分隔线、折叠提示
+    "crust": "#11111B",  # 背景，接近纯黑的终端
+    "base": "#1E1E2E",  # 面板
+    "surface": "#313244",  # 选中项、卡片边框
+}
+STORY_THEME = Theme(
+    name="story",
+    primary=PALETTE["orange"],
+    secondary=PALETTE["blue"],
+    accent=PALETTE["orange"],
+    success=PALETTE["green"],
+    warning=PALETTE["yellow"],
+    error=PALETTE["red"],
+    foreground=PALETTE["text"],
+    background=PALETTE["crust"],
+    surface=PALETTE["base"],
+    panel=PALETTE["surface"],
+    dark=True,
+    variables={"text-muted": PALETTE["muted"], "input-cursor-background": PALETTE["orange"]},
+)
 
 SPINNER = "·✢✳✶✻✽"
 QUIT_CONFIRM_SECONDS = 2.0
@@ -232,13 +263,13 @@ def colorize_diff(text: str) -> Text:
         if index:
             result.append("\n")
         if line.startswith("+++") or line.startswith("---"):
-            result.append(line, style="bold")
+            result.append(line, style=f"bold {PALETTE['subtext']}")
         elif line.startswith("+"):
-            result.append(line, style="green")
+            result.append(line, style=PALETTE["green"])
         elif line.startswith("-"):
-            result.append(line, style="red")
+            result.append(line, style=PALETTE["red"])
         elif line.startswith("@@"):
-            result.append(line, style="dim")
+            result.append(line, style=PALETTE["muted"])
         else:
             result.append(line)
     return result
@@ -322,8 +353,8 @@ class WorkbenchApp(App[int]):
     }
     .welcome { color: $text-muted; margin-bottom: 1; }
     .divider { color: $text-muted; margin: 1 0; }
-    .author { color: $text-muted; margin-top: 1; }
-    .system { color: $text-muted; }
+    .author { color: #A6ADC8; margin-top: 1; }
+    .system { color: #A6ADC8; }
     .history { opacity: 70%; }
     .reply { height: auto; margin-top: 1; }
     .reply > .dot { width: 2; color: $accent; }
@@ -341,10 +372,10 @@ class WorkbenchApp(App[int]):
     #card-title { color: $warning; text-style: bold; }
     #card-diff { height: auto; max-height: 18; scrollbar-size-vertical: 1; }
     #card-hint { color: $text-muted; }
-    #palette { margin: 0 2; height: auto; border: round $surface; padding: 0 1; }
+    #palette { margin: 0 2; height: auto; border: round $panel; padding: 0 1; }
     .palette-title { color: $warning; text-wrap: nowrap; text-overflow: ellipsis; }
     .palette-item { color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; height: 1; }
-    .palette-item.selected { color: $text; background: $accent 30%; }
+    .palette-item.selected { color: $accent; background: $panel; text-style: bold; }
     #inputbox { border: round $accent; height: auto; max-height: 8; margin: 0 1; }
     #inputbox > .prompt { width: 2; padding-left: 1; color: $accent; }
     #input { height: auto; max-height: 6; border: none; padding: 0; background: transparent; }
@@ -375,6 +406,8 @@ class WorkbenchApp(App[int]):
         config: AgentConfig | None = None,
     ) -> None:
         super().__init__()
+        self.register_theme(STORY_THEME)
+        self.theme = "story"
         self.path = Path(path)
         self.clients = clients
         self.config = config
@@ -747,7 +780,11 @@ class WorkbenchApp(App[int]):
         self.status_text = f"{text} · {gauge}" if gauge else text
         rendered = Text(text + " · ")
         if gauge:
-            style = "green" if ratio < 0.7 else ("yellow" if ratio < 0.85 else "bold red")
+            style = (
+                PALETTE["green"]
+                if ratio < 0.7
+                else (PALETTE["yellow"] if ratio < 0.85 else f"bold {PALETTE['red']}")
+            )
             rendered.append(gauge, style=style)
         self.query_one("#hint-right", Static).update(rendered)
 

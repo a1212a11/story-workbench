@@ -249,11 +249,12 @@ def test_without_model_opening_is_local(tmp_path):
 
 
 def test_colorize_diff_and_entrypoint_help(capsys):
+    from story_agent.tui import PALETTE
+
     text = colorize_diff("--- a\n+++ b\n@@ -1 +1 @@\n-旧\n+新\n 同")
     styles = [(span.style, text.plain[span.start : span.end]) for span in text.spans]
-    assert (
-        ("red", "-旧") in styles and ("green", "+新") in styles and ("dim", "@@ -1 +1 @@") in styles
-    )
+    assert (PALETTE["red"], "-旧") in styles and (PALETTE["green"], "+新") in styles
+    assert (PALETTE["muted"], "@@ -1 +1 @@") in styles
     assert entry.main([]) == 0 and "作品目录" in capsys.readouterr().out
     assert entry.main(["somewhere"]) == 2  # 非交互终端
 
@@ -723,6 +724,24 @@ def test_rewind_list_items_stay_on_one_line(tmp_path):
             await pilot.press("escape")
             await pilot.pause(0.1)
             assert app.palette_mode == "commands"
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
+
+
+def test_app_uses_the_story_theme_with_claude_orange(tmp_path):
+    from story_agent.tui import PALETTE
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause(0.1)
+            assert app.theme == "story"
+            assert app.current_theme.accent.lower() == PALETTE["orange"].lower()
+            assert app.current_theme.background.lower() == PALETTE["crust"].lower()
             await pilot.press("ctrl+d")
 
     _run(scenario())
