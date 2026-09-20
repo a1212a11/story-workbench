@@ -275,3 +275,25 @@ def test_reopen_replays_recent_conversation_and_resumes(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_clicking_transcript_does_not_steal_keyboard_focus(tmp_path):
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _wait(app, pilot, lambda: "模型尚未接入" in app.transcript_text())
+            await pilot.click("#transcript", offset=(10, 5))
+            await pilot.pause(0.1)
+            await pilot.press("a")
+            await pilot.pause(0.1)
+            assert app.query_one("#input", PromptArea).text == "a"
+            app.set_focus(None)  # 极端情况：焦点被清空
+            await pilot.press("b")
+            await pilot.pause(0.1)
+            assert isinstance(app.focused, PromptArea)
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

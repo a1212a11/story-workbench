@@ -312,11 +312,11 @@ class WorkbenchApp(App[int]):
     # ------------------------------------------------------------ 布局
 
     def compose(self) -> ComposeResult:
-        yield VerticalScroll(id="transcript")
+        yield VerticalScroll(id="transcript", can_focus=False)
         yield Static("", id="spinner", markup=False)
         with Vertical(id="card"):
             yield Static("", id="card-title", markup=False)
-            with VerticalScroll(id="card-diff"):
+            with VerticalScroll(id="card-diff", can_focus=False):
                 yield Static("", id="card-body")
             yield Static(CARD_HINT, id="card-hint", markup=False)
         with Horizontal(id="inputbox"):
@@ -576,6 +576,13 @@ class WorkbenchApp(App[int]):
         return "\n".join([*self._log, *(part for part in live if part)])
 
     # ------------------------------------------------------------ 作者输入与按键
+
+    def on_key(self, event) -> None:
+        """保险：鼠标点到对话区之类的地方后，按键时把焦点还给输入框。"""
+        if isinstance(self.screen, EditorScreen):
+            return
+        if not isinstance(self.focused, PromptArea):
+            self.query_one("#input", PromptArea).focus()
 
     def on_prompt_area_submitted(self, message: PromptArea.Submitted) -> None:
         text = message.text.strip()
