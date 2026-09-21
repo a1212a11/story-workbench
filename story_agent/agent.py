@@ -113,6 +113,7 @@ class TurnResult:
     tools: tuple[str, ...]
     stopped_early: bool = False
     cancelled: bool = False
+    failed: bool = False  # 模型调用出错，作者这句话没被回应
 
 
 def history_to_transcript(rows: Sequence[tuple[str, str]]) -> list[ChatMessage]:
@@ -388,7 +389,7 @@ class Agent:
         ctx = toolbox.ToolContext(ws, self.port, self.clients, self.config, session, cancel)
         calls = 0
         reply_parts: list[str] = []
-        stopped_early = cancelled = False
+        stopped_early = cancelled = failed = False
         while True:
             if cancel.is_set():
                 cancelled = True
@@ -417,7 +418,7 @@ class Agent:
                 if cancel.is_set():
                     cancelled = True
                 else:
-                    stopped_early = True
+                    stopped_early = failed = True
                 break
             blocks = ((TextBlock(text),) if text else ()) + uses
             self.transcript.append(ChatMessage("assistant", blocks))
@@ -446,9 +447,11 @@ class Agent:
         final = "\n\n".join(part for part in reply_parts if part.strip())
         if final:
             ws.append_transcript("assistant", final)
-        return TurnResult(final, calls, tuple(session.executed), stopped_early)
+        return TurnResult(final, calls, tuple(session.executed), stopped_early, failed=failed)
 
-    def _call(self, cancel: CancelSignal) -> tuple[str, tuple[ToolUseBlock, ...], bool, str | None]:
+    def _call(
+        self, cancel: CancelSignal, attempt: int = 0
+    ) -> tuple[str, tuple[ToolUseBlock, ...], bool, str | None]:
         """一次模型调用：流式显示文本，收集工具调用。
 
         返回 (文本, 工具调用, 是否正常结束, 失败说明)。
@@ -460,6 +463,7 @@ class Agent:
         usage: dict[str, int] = {}
         final = EventKind.ERROR
         error = ""
+        retryable = False
         try:
             events = self.clients.stream(self._messages(), _with_tools(options), cancel)
             try:
@@ -478,6 +482,7 @@ class Agent:
                     else:
                         final = event.kind
                         error = event.error or ""
+                        retryable = event.retryable
                         break
             finally:
                 close = getattr(events, "close", None)
@@ -493,6 +498,11 @@ class Agent:
         text = "".join(parts)
         if cancel.is_set():
             return text, (), False, None
+        if final is EventKind.ERROR and retryable and not parts and not uses and attempt == 0:
+            # 连接层出错且一个字都没收到：请求没到模型，没有费用，重试一次
+            self.workspace.append_log(f"连接出错，自动重试一次：{error}")
+            self.port.say("网络没连上，正在重试……")
+            return self._call(cancel, attempt + 1)
         if final is not EventKind.COMPLETED:
             reason = {
                 EventKind.TRUNCATED: "输出被截断",

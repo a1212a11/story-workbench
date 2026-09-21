@@ -69,6 +69,7 @@ class StreamEvent:
     usage: dict[str, int] = field(default_factory=dict)
     error: str | None = None
     tool_use: ToolUseBlock | None = None
+    retryable: bool = False  # 连接层错误：请求多半没到模型，重试一次是安全的
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +145,28 @@ def _delta_of(event) -> StreamEvent | None:
         text = getattr(delta, "thinking", "")
         return StreamEvent(EventKind.THINKING, text=text) if text else None
     return None
+
+
+# 连接、超时、上游 5xx：没产生费用，重试一次安全。鉴权、参数、限额错误不在此列。
+_RETRYABLE_ERRORS = (
+    "APIConnectionError",
+    "APITimeoutError",
+    "APIConnectionTimeoutError",
+    "InternalServerError",
+    "ServiceUnavailableError",
+    "OverloadedError",
+    "ConnectError",
+    "ReadTimeout",
+    "RemoteProtocolError",
+)
+
+
+def is_retryable(exc: Exception) -> bool:
+    name = type(exc).__name__
+    if name in _RETRYABLE_ERRORS:
+        return True
+    status = getattr(exc, "status_code", None)
+    return bool(status and 500 <= int(status) < 600)
 
 
 def describe_api_error(exc: Exception) -> str:
@@ -275,10 +298,14 @@ def make_anthropic_clients(
                         yield piece
                 final = response.get_final_message()
         except APIError as exc:
-            yield StreamEvent(EventKind.ERROR, error=describe_api_error(exc))
+            yield StreamEvent(
+                EventKind.ERROR, error=describe_api_error(exc), retryable=is_retryable(exc)
+            )
             return
         except Exception as exc:  # 超时、网络中断等
-            yield StreamEvent(EventKind.ERROR, error=type(exc).__name__)
+            yield StreamEvent(
+                EventKind.ERROR, error=describe_api_error(exc), retryable=is_retryable(exc)
+            )
             return
         if cancel.is_set():
             yield StreamEvent(EventKind.ERROR, error="cancelled")
@@ -357,10 +384,14 @@ def make_async_anthropic_clients(
                         yield piece
                 final = await response.get_final_message()
         except APIError as exc:
-            yield StreamEvent(EventKind.ERROR, error=describe_api_error(exc))
+            yield StreamEvent(
+                EventKind.ERROR, error=describe_api_error(exc), retryable=is_retryable(exc)
+            )
             return
         except Exception as exc:  # 超时、网络中断等
-            yield StreamEvent(EventKind.ERROR, error=type(exc).__name__)
+            yield StreamEvent(
+                EventKind.ERROR, error=describe_api_error(exc), retryable=is_retryable(exc)
+            )
             return
         if cancel.is_set():
             yield StreamEvent(EventKind.ERROR, error="cancelled")

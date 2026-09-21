@@ -1329,3 +1329,27 @@ def test_waiting_for_the_author_stops_the_spinner_and_the_tool_line(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_failed_turn_puts_the_message_back_in_the_input_box(tmp_path):
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients(
+        [Reply("开场。"), Reply(error="APIConnectionError · x"), Reply("这次成了。")]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _send(pilot, "是不是可以完全丢弃管网的设计")
+            await _wait(app, pilot, lambda: "请求失败" in app.transcript_text())
+            await pilot.pause(0.3)
+            area = app.query_one("#input", PromptArea)
+            assert area.text == "是不是可以完全丢弃管网的设计"  # 不用重打
+            assert "按 Enter 重发" in str(app.query_one("#hint-left", Static).content)
+            await pilot.press("enter")
+            await _wait(app, pilot, lambda: "这次成了。" in app.transcript_text())
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

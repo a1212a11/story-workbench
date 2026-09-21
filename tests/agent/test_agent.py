@@ -448,3 +448,47 @@ def test_compaction_disables_thinking_and_review_gets_longer_time(chapter_worksp
     assert _request_kwargs([], replace(plain, no_thinking=True), False)["thinking"] == {
         "type": "disabled"
     }
+
+
+def test_connection_error_retries_once_before_giving_up(chapter_workspace):
+    from story_agent.provider import is_retryable
+
+    # 连接层错误可以安全重试；鉴权、参数错误不行
+    class Boom(Exception):
+        pass
+
+    Boom.__name__ = "APIConnectionError"
+    assert is_retryable(Boom())
+    bad = type("AuthenticationError", (Exception,), {})()
+    assert not is_retryable(bad)
+    server = type("APIStatusError", (Exception,), {"status_code": 503})()
+    assert is_retryable(server)
+
+    # 第一次连不上，自动重试一次就成了；作者不用重打
+    script = [
+        Reply(error="APIConnectionError · Connection error.", retryable=True),
+        Reply("好的。"),
+    ]
+    agent, port, clients = make_agent(chapter_workspace, script)
+    result = agent.handle("是不是可以完全丢弃管网的设计")
+    assert result.reply == "好的。" and not result.failed
+    assert "网络没连上，正在重试……" in port.output and len(clients.calls) == 2
+    assert "连接出错，自动重试一次" in (chapter_workspace.root / ".story" / "日志.txt").read_text()
+
+
+def test_two_connection_errors_in_a_row_give_up_and_mark_the_turn_failed(chapter_workspace):
+    script = [Reply(error="APIConnectionError · x", retryable=True)] * 2
+    agent, port, _ = make_agent(chapter_workspace, script)
+    result = agent.handle("那句话")
+    assert result.failed and "请求失败（APIConnectionError · x）" in port.output
+
+
+def test_a_billed_failure_is_never_retried(chapter_workspace):
+    # 已经吐了字再断：可能已经计费，不自动重试
+    script = [Reply("说到一半", error="APIConnectionError · x", retryable=True), Reply("不该调用")]
+    agent, port, clients = make_agent(chapter_workspace, script)
+    result = agent.handle("写点什么")
+    assert result.failed and len(clients.calls) == 1
+    # 鉴权之类的错误也不重试
+    agent, port, clients = make_agent(chapter_workspace, [Reply(error="AuthenticationError")])
+    assert agent.handle("再来").failed and len(clients.calls) == 1

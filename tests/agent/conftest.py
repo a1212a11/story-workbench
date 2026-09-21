@@ -72,6 +72,7 @@ class Reply:
     uses: tuple[ToolUseBlock, ...] = ()
     truncated: bool = False
     error: str | None = None
+    retryable: bool = False
     hook: object = None  # 首个片段后调用 hook(cancel)
     thinking: str = ""  # 正文之前的思考增量
 
@@ -91,7 +92,7 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
         calls.append(list(messages))
         reply = replies.pop(0) if replies else Reply()
         if reply.error and not reply.text:
-            yield StreamEvent(EventKind.ERROR, error=reply.error)
+            yield StreamEvent(EventKind.ERROR, error=reply.error, retryable=reply.retryable)
             return
         fired = False
         for index, piece in enumerate(
@@ -113,7 +114,7 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
             if index == 0 and reply.hook is not None and not fired:
                 reply.hook(cancel)
         if reply.error:
-            yield StreamEvent(EventKind.ERROR, error=reply.error)
+            yield StreamEvent(EventKind.ERROR, error=reply.error, retryable=reply.retryable)
             return
         for block in reply.uses:
             yield StreamEvent(EventKind.TOOL_USE, tool_use=block)

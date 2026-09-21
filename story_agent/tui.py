@@ -713,6 +713,8 @@ class WorkbenchApp(App[int]):
         finally:
             port._ui(self.set_busy, False)
             self._refresh_status(agent)
+            if text and result is not None and result.failed:
+                port._ui(self.restore_input, text)  # 没回应成，把你的话放回输入框
             seconds = time.monotonic() - started
             calls = result.calls if result is not None else 0
             cancelled = bool(result is not None and result.cancelled)
@@ -789,24 +791,29 @@ class WorkbenchApp(App[int]):
     def _transcript(self) -> VerticalScroll:
         return self.query_one("#transcript", VerticalScroll)
 
-    def _mount(self, widget) -> None:
-        """挂上新条目；作者停在底部时跟着滚，作者往上翻了就不打扰。"""
+    def _following(self) -> bool:
+        """作者停在底部就跟着新内容滚；他往上翻了就不打扰，翻回底部自动恢复。"""
         transcript = self._transcript()
         if transcript.is_vertical_scroll_end:
             self.follow = True
+        return self.follow
+
+    def _mount(self, widget) -> None:
+        transcript = self._transcript()
+        following = self._following()
         transcript.mount(widget)
-        if self.follow:
+        if following:
             transcript.scroll_end(animate=False)
 
     def _scroll(self) -> None:
-        transcript = self._transcript()
-        if transcript.is_vertical_scroll_end:
-            self.follow = True
-        if self.follow:
-            transcript.scroll_end(animate=False)
+        if self._following():
+            self._transcript().scroll_end(animate=False)
 
     def on_mouse_scroll_up(self, event) -> None:
         self.follow = False  # 作者往上翻了；滚回底部或发一句话时恢复跟随
+
+    def on_mouse_scroll_down(self, event) -> None:
+        self._following()  # 滚回底部就恢复跟随
 
     def action_page(self, direction: str) -> None:
         """PageUp/PageDown 翻看对话；审批卡打开时翻卡片里的 diff。"""
@@ -897,6 +904,16 @@ class WorkbenchApp(App[int]):
         else:
             notice.remove()
         self._scroll()
+
+    def restore_input(self, text: str) -> None:
+        """一轮没成（比如网络断了）：把作者这句话放回输入框，按 Enter 就能重发。"""
+        area = self.query_one("#input", PromptArea)
+        if area.text.strip():
+            return  # 作者已经在打新的了，别覆盖
+        area.clear()
+        area.insert(text)
+        area.focus()
+        self._flash_hint("这句话放回输入框了，按 Enter 重发")
 
     def show_author(self, text: str) -> None:
         self._log.append(f"> {text}")
