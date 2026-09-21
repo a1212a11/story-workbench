@@ -39,6 +39,7 @@ class FakePort:
         self.lines: list[str] = []
         self.chunks: list[str] = []
         self.cards: list[ApprovalCard] = []
+        self.asked: list[tuple[str, tuple[str, ...]]] = []
 
     def say(self, text: str) -> None:
         self.lines.append(text)
@@ -50,6 +51,10 @@ class FakePort:
         self.cards.append(card)
         answer = self.answers.pop(0) if self.answers else "n"
         return parse_answer(answer)
+
+    def choose(self, question: str, options: tuple[str, ...]) -> str:
+        self.asked.append((question, options))
+        return self.answers.pop(0) if self.answers else ""
 
     def edit(self, initial: str, title: str) -> str | None:
         if self.edits:

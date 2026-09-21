@@ -48,5 +48,8 @@ class AuthorPort(Protocol):
     def approve(self, card: ApprovalCard) -> Approval:
         """显示审批卡并等待作者作答。"""
 
+    def choose(self, question: str, options: tuple[str, ...]) -> str:
+        """向作者提一个带选项的问题。返回他选的那一项，或他自己打的字；跳过返回空串。"""
+
     def edit(self, initial: str, title: str) -> str | None:
         """打开全屏编辑器让作者自己改；保存返回新文本，取消返回 None。"""

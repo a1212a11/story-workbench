@@ -106,6 +106,8 @@ REWIND_COOLDOWN_SECONDS = 3.0  # 刚中断过的这几秒里，Esc 只当中断�
 REWIND_CHOICES = 10
 # 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
 QUIET_TOOLS = frozenset({"read", "search", "verify", "history", "skill"})
+# 这些工具的界面另有其人（选项面板），对话里不用再占一行
+SILENT_TOOLS = frozenset({"ask"})
 HISTORY_ON_SCREEN = 12
 IDLE_HINT = "/help 查看按键与命令 · Enter 发送 · Ctrl-J 换行"
 GAUGE_CELLS = 10
@@ -115,9 +117,11 @@ HELP_TEXT = (
     "按键：Enter 发送 · Ctrl-J 换行 · Esc 中断或不批准 · PgUp/PgDn 翻页 · Ctrl-O 展开/折叠工具输出"
     " · Ctrl-C 连按两次或 Ctrl-D 退出\n"
     "命令：/help 这段说明 · /exit 退出 · /dev 开发者模式开关\n"
+    "它问你选哪个时：按数字或上下键选、Enter 确认，也可以直接打字说别的，Esc 跳过\n"
     "复制：鼠标划选要的文字，按 Ctrl-C 复制；也可以按住 Option 划选，用终端自己的复制\n"
     "撤回：空闲时连按两次 Esc，选一句话，对话（可选连同文件）退回到它之前"
 )
+CHOICE_HINT = "按数字或上下键选 · Enter 确认 · 或直接打字说别的 · Esc 跳过"
 CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见 · PgUp/PgDn 翻看改动"
 
 
@@ -168,6 +172,20 @@ class PromptArea(TextArea):
             self.action_cursor_up()
         else:
             self.action_cursor_down()
+
+    def on_key(self, event) -> None:
+        """选项面板开着且输入框是空的时候，按数字直接选那一项（和 Claude Code 一样）。"""
+        app = self.app
+        if not isinstance(app, WorkbenchApp) or app.palette_mode != "choice":
+            return
+        if self.text or not (event.character or "").isdigit():
+            return
+        index = int(event.character) - 1
+        if 0 <= index < len(app.palette_items):
+            event.prevent_default()
+            event.stop()
+            app.palette_index = index
+            app.palette_execute()
 
     def action_palette_complete(self) -> None:
         app = self.app
@@ -426,6 +444,18 @@ class ThreadPort:
                 continue
             return parse_answer(answer)
 
+    def choose(self, question: str, options: tuple[str, ...]) -> str:
+        while not self.answers.empty():  # 丢掉过期的作答
+            self.answers.get_nowait()
+        self._ui(self.app.begin_choice, question, options)
+        while True:
+            try:
+                return self.answers.get(timeout=0.2)
+            except queue.Empty:
+                if self.app.stopping.is_set() or self.cancel.is_set():
+                    self._ui(self.app.end_choice, None)
+                    return ""
+
     def edit(self, initial: str, title: str) -> str | None:
         self._ui(self.app.begin_edit, initial, title)
         while True:
@@ -562,6 +592,7 @@ class WorkbenchApp(App[int]):
         self.palette_mode = "commands"  # commands / rewind / rewind-scope
         self.palette_payload: list = []
         self._rewind_choice: dict | None = None
+        self.choice_question = ""
         self._esc_armed_at = 0.0
         self._interrupted_at = 0.0
         self._quit_armed_at = 0.0  # 空闲时第一次 Ctrl-C 的时刻；两秒内再按一次才退出
@@ -939,6 +970,8 @@ class WorkbenchApp(App[int]):
     def begin_tool(self, label: str, name: str = "", args: dict | None = None) -> None:
         self._finish_thinking()
         self._flush_reply_stream()
+        if name in SILENT_TOOLS and not self.dev:
+            return
         preface = None
         if self.dev and args:
             import json
@@ -1014,7 +1047,7 @@ class WorkbenchApp(App[int]):
         if busy:
             self.busy_since = time.monotonic()
         spinner = self.query_one("#spinner", Static)
-        spinner.display = busy
+        spinner.display = busy and self.mode == "chat"
         if self.mode != "approve":
             self.query_one("#hint-left", Static).update(BUSY_HINT if busy else IDLE_HINT)
 
@@ -1027,6 +1060,8 @@ class WorkbenchApp(App[int]):
         if self._hint_until and time.monotonic() >= self._hint_until:
             self._hint_until = 0.0
             self.query_one("#hint-left", Static).update(BUSY_HINT if self.busy else IDLE_HINT)
+        if self.mode != "chat":  # 等作者批准或选择时，别再转圈说自己在忙
+            self.query_one("#spinner", Static).display = False
         if (
             self._quit_armed_at
             and time.monotonic() - self._quit_armed_at >= QUIT_CONFIRM_SECONDS
@@ -1035,8 +1070,9 @@ class WorkbenchApp(App[int]):
         ):
             self._quit_armed_at = 0.0
             self.query_one("#hint-left", Static).update(IDLE_HINT)
-        if not self.busy or self.mode == "approve":
+        if not self.busy or self.mode != "chat":
             return
+        self.query_one("#spinner", Static).display = True
         elapsed = int(time.monotonic() - self.busy_since)
         frame = SPINNER[(elapsed * 10 + int(time.monotonic() * 10)) % len(SPINNER)]
         self.query_one("#spinner", Static).update(
@@ -1078,6 +1114,13 @@ class WorkbenchApp(App[int]):
             self.end_approval(text)
             self.port.answers.put(text)
             return
+        if self.mode == "choose":
+            if not text and self.palette_open:  # 空 Enter = 选中高亮那一项
+                self.palette_execute()
+                return
+            self.end_choice(text)
+            self.port.answers.put(text)
+            return
         if not text:
             return
         if self._meta_command(text):
@@ -1115,10 +1158,10 @@ class WorkbenchApp(App[int]):
     def _render_palette(self) -> None:
         panel = self.query_one("#palette", Vertical)
         panel.remove_children()
-        if self.palette_mode == "rewind":
-            panel.mount(
-                Static("撤回到哪一句之前？上下选，Enter 确认，Esc 取消", classes="palette-title")
-            )
+        if self.palette_mode == "choice":
+            panel.mount(Static(self.choice_question, classes="palette-title", markup=False))
+        elif self.palette_mode == "rewind":
+            panel.mount(Static("撤回到哪一句之前", classes="palette-title"))
         elif self.palette_mode == "rewind-scope":
             panel.mount(Static("撤回什么？", classes="palette-title"))
         for index, (name, description) in enumerate(self.palette_items):
@@ -1142,6 +1185,11 @@ class WorkbenchApp(App[int]):
 
     def palette_execute(self) -> None:
         if not self.palette_items:
+            return
+        if self.palette_mode == "choice":
+            answer = self.palette_payload[self.palette_index]
+            self.end_choice(answer)
+            self.port.answers.put(answer)
             return
         if self.palette_mode == "rewind":
             self._rewind_choice = self.palette_payload[self.palette_index]
@@ -1170,6 +1218,29 @@ class WorkbenchApp(App[int]):
         self.query_one("#palette", Vertical).display = True
         self._render_palette()
         self.query_one("#input", PromptArea).focus()
+
+    def begin_choice(self, question: str, options: tuple[str, ...]) -> None:
+        """代理问作者一个带选项的问题：上下选、Enter 确认，也可以直接打字说别的。"""
+        self.choice_question = question
+        self.mode = "choose"
+        self._log.append(f"？{question}")
+        self._open_palette(
+            "choice",
+            [(str(i), option) for i, option in enumerate(options, start=1)],
+            list(options),
+        )
+        self.query_one("#hint-left", Static).update(CHOICE_HINT)
+
+    def end_choice(self, shown: str | None) -> None:
+        self.choice_question = ""
+        self.mode = "chat"
+        self.palette_close()
+        self.query_one("#hint-left", Static).update(BUSY_HINT if self.busy else IDLE_HINT)
+        if shown is not None:
+            text = shown or "（跳过，我自己说）"
+            self._log.append(f"> {text}")
+            self._mount(Static(author_line(text), classes="author"))
+            self._scroll()
 
     def open_rewind(self) -> None:
         """两次 Esc：列出最近说过的话，选一句撤回到它之前。"""
@@ -1217,6 +1288,10 @@ class WorkbenchApp(App[int]):
         return False
 
     def action_cancel_turn(self) -> None:
+        if self.mode == "choose":
+            self.end_choice("")
+            self.port.answers.put("")
+            return
         if self.palette_open:
             self.palette_close()
             return

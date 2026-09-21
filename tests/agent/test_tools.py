@@ -288,6 +288,7 @@ def test_unknown_tool_specs_and_labels(workspace: Workspace):
         "review",
         "open_editor",
         "skill",
+        "ask",
     }
     for spec in tools.TOOL_SPECS:
         assert spec.input_schema["type"] == "object" and spec.description
@@ -318,3 +319,34 @@ def test_skill_tool_reads_a_method_file_and_lists_what_exists(workspace: Workspa
     bad = execute(ctx, "skill", {"name": "写小说"})
     assert bad.is_error and "可用的是：" in bad.text and "共创" in bad.text
     assert set(SKILLS) == {p.stem for p in (workspace.root / "技能").glob("*.md")}
+
+
+def test_ask_tool_puts_the_choice_back_to_the_model_and_into_the_record(workspace: Workspace):
+    port = FakePort(answers=["被管网老工收养：工造底子和市井人脉都从这儿来"])
+    ctx = ctx_for(workspace, port)
+    out = execute(
+        ctx,
+        "ask",
+        {
+            "question": "谁把他捡走？",
+            "options": [
+                "被管网老工收养：工造底子和市井人脉都从这儿来",
+                "被地下帮派捡走：学的是偷摸走私那套",
+            ],
+        },
+    )
+    assert not out.is_error and out.text == "作者答：被管网老工收养：工造底子和市井人脉都从这儿来"
+    assert port.asked[0][0] == "谁把他捡走？" and len(port.asked[0][1]) == 2
+    records = [r for r in workspace.all_records() if r["role"] == "system"]
+    assert "选择：谁把他捡走？ → 被管网老工收养" in records[-1]["text"]
+
+    # 作者跳过：不再追问
+    skipped = execute(
+        ctx_for(workspace, FakePort()), "ask", {"question": "那这个呢？", "options": ["甲", "乙"]}
+    )
+    assert "作者没有选" in skipped.text and not skipped.is_error
+    # 选项不够或问题为空：不打扰作者
+    bad = execute(
+        ctx_for(workspace, FakePort()), "ask", {"question": "只有一个", "options": ["甲"]}
+    )
+    assert bad.is_error and "2 到 5 个选项" in bad.text

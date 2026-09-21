@@ -1191,3 +1191,141 @@ def test_author_and_assistant_are_told_apart_by_background(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_agent_question_shows_a_selectable_list(tmp_path):
+    from textual.containers import Vertical
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    options = [
+        "被管网老工收养：工造底子从这儿来",
+        "被地下帮派捡走：路子野",
+        "被来路不明的人安置：埋一条线",
+    ]
+    clients = scripted_clients(
+        [
+            Reply("开场。"),
+            Reply("这里有个岔路。", (use("ask", "q1", question="谁把他捡走？", options=options),)),
+            Reply("那就老工。"),
+            Reply(
+                "再问一个。",
+                (use("ask", "q2", question="从哪入手？", options=["出身", "身边的人"]),),
+            ),
+            Reply("好。"),
+        ]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _send(pilot, "接着聊")
+            await _wait(app, pilot, lambda: app.mode == "choose")
+            await pilot.pause(0.2)
+            panel = app.query_one("#palette", Vertical)
+            assert panel.display and app.palette_mode == "choice"
+            assert "谁把他捡走？" in str(app.query_one(".palette-title", Static).content)
+            assert len(app.palette_items) == 3
+            await pilot.press("down")  # 上下键选
+            await pilot.pause(0.05)
+            assert app.palette_index == 1
+            await pilot.press("enter")  # 空 Enter 确认高亮那项
+            await _wait(app, pilot, lambda: "那就老工。" in app.transcript_text())
+            assert options[1] in app.transcript_text() and app.mode == "chat"
+            assert not panel.display
+
+            # 第二个问题：按数字直接选
+            await _send(pilot, "继续")
+            await _wait(app, pilot, lambda: app.mode == "choose")
+            await pilot.pause(0.2)
+            await pilot.press("2")
+            await _wait(app, pilot, lambda: "好。" in app.transcript_text())
+            assert "身边的人" in app.transcript_text()
+            results = [
+                b.content
+                for call in clients.calls
+                for m in call
+                if not isinstance(m.content, str)
+                for b in m.content
+                if hasattr(b, "tool_use_id")
+            ]
+            assert any("作者答：被地下帮派捡走" in r for r in results)
+            assert any("作者答：身边的人" in r for r in results)
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
+
+
+def test_author_can_type_instead_of_choosing_or_skip_with_escape(tmp_path):
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients(
+        [
+            Reply("开场。"),
+            Reply("问一下。", (use("ask", "q", question="选哪个？", options=["甲", "乙"]),)),
+            Reply("明白。"),
+            Reply("再问。", (use("ask", "q2", question="那这个呢？", options=["丙", "丁"]),)),
+            Reply("那我等你。"),
+        ]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _send(pilot, "开始")
+            await _wait(app, pilot, lambda: app.mode == "choose")
+            await _send(pilot, "都不要，我要第三种")  # 打字说别的
+            await _wait(app, pilot, lambda: "明白。" in app.transcript_text())
+            assert app.mode == "chat" and "> 都不要，我要第三种" in app.transcript_text()
+
+            await _send(pilot, "再来")
+            await _wait(app, pilot, lambda: app.mode == "choose")
+            await pilot.press("escape")  # 跳过
+            await _wait(app, pilot, lambda: "那我等你。" in app.transcript_text())
+            assert "（跳过，我自己说）" in app.transcript_text() and app.mode == "chat"
+            results = [
+                b.content
+                for call in clients.calls
+                for m in call
+                if not isinstance(m.content, str)
+                for b in m.content
+                if hasattr(b, "tool_use_id")
+            ]
+            assert any("作者答：都不要，我要第三种" in r for r in results)
+            assert any("作者没有选" in r for r in results)
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
+
+
+def test_waiting_for_the_author_stops_the_spinner_and_the_tool_line(tmp_path):
+    from story_agent.tui import ToolBlock
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients(
+        [
+            Reply("开场。"),
+            Reply(
+                "问一下。", (use("ask", "q", question="谁把他捡走？", options=["老工", "帮派"]),)
+            ),
+            Reply("好。"),
+        ]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _send(pilot, "开始")
+            await _wait(app, pilot, lambda: app.mode == "choose")
+            await pilot.pause(0.3)
+            assert not app.query_one("#spinner", Static).display  # 在等你，不是在忙
+            assert not [b for b in app.query(ToolBlock) if b.tool_name == "ask"]  # 面板就是界面
+            await pilot.press("1")
+            await _wait(app, pilot, lambda: "好。" in app.transcript_text())
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

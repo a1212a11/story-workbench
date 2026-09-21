@@ -132,6 +132,21 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         ["path"],
     ),
     _spec(
+        "ask",
+        "问作者一个需要他拍板的问题，带 2 到 5 个选项。作者可以按上下键选一个，"
+        "也可以直接打字说别的。只在真的有岔路时用；方向已经明确就直接做，别用它凑对话。",
+        {
+            "question": {"type": "string", "description": "一句话的问题"},
+            "options": {
+                "type": "array",
+                "items": {"type": "string", "description": "一个选项，一句话说清它的味道"},
+                "minItems": 2,
+                "maxItems": 5,
+            },
+        },
+        ["question", "options"],
+    ),
+    _spec(
         "skill",
         "查方法：读一份写作方法，照着做。"
         + "；".join(f"{k}（{v}）" for k, v in SKILLS.items())
@@ -158,6 +173,7 @@ _LABEL = {
     "review": "审读",
     "open_editor": "打开编辑器",
     "skill": "查方法",
+    "ask": "请作者定",
 }
 
 
@@ -171,7 +187,7 @@ def describe_call(name: str, args: dict[str, Any] | None) -> str:
     action = args.get("action")
     if isinstance(action, str):
         parts.append({"list": "列出", "show": "查看", "restore": "恢复"}.get(action, action))
-    for key in ("reason", "pattern", "focus"):
+    for key in ("reason", "pattern", "focus", "question", "name"):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
             short = value.strip().splitlines()[0]
@@ -479,6 +495,25 @@ def review(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     return ToolOutcome(text)
 
 
+def ask(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    question = (_text(args, "question", required=True) or "").strip()
+    raw = args.get("options")
+    options = (
+        [o.strip() for o in raw if isinstance(o, str) and o.strip()]
+        if isinstance(raw, list)
+        else []
+    )
+    if not question:
+        raise WorkspaceError("问题不能为空。")
+    if not 2 <= len(options) <= 5:
+        raise WorkspaceError("要给 2 到 5 个选项。")
+    answer = ctx.port.choose(question, tuple(options)).strip()
+    if not answer:
+        return ToolOutcome("作者没有选，等他自己说。别再追问同一件事。")
+    ctx.workspace.append_transcript("system", f"选择：{question} → {answer}")
+    return ToolOutcome(f"作者答：{answer}")
+
+
 def skill(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     name = (_text(args, "name", required=True) or "").strip().removesuffix(".md")
     rel = f"{SKILLS_DIR}/{name}.md"
@@ -519,6 +554,7 @@ HANDLERS = {
     "review": review,
     "open_editor": open_editor,
     "skill": skill,
+    "ask": ask,
 }
 assert set(HANDLERS) == set(TOOL_NAMES)
 
