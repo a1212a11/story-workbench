@@ -14,9 +14,26 @@ from typing import Any
 from story_agent.approval import Approval, ApprovalCard, AuthorPort
 from story_agent.config import AgentConfig, Clients
 from story_agent.provider import CancelSignal, ToolSpec
-from story_agent.workspace import Workspace, WorkspaceError, describe_time, is_formal, normalize
+from story_agent.workspace import (
+    SKILLS_DIR,
+    Workspace,
+    WorkspaceError,
+    describe_time,
+    is_formal,
+    normalize,
+)
 
 PAID_TOOLS = frozenset({"review"})
+SKILLS = {
+    "开书": "目录还空着，从一句想法起步",
+    "共创": "和作者一起设计世界观、人物、体系、大纲",
+    "定章": "定一章的剧情与结尾状态",
+    "写章": "写一章正文",
+    "审读": "审一章正文的清单",
+    "故事状态": "一章定稿后更新故事状态",
+    "回改": "改了前面的章节之后核对后文",
+    "修订": "按作者的反馈改稿",
+}
 MAX_DIFF_LINES = 400
 
 
@@ -115,6 +132,14 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         ["path"],
     ),
     _spec(
+        "skill",
+        "查方法：读一份写作方法，照着做。"
+        + "；".join(f"{k}（{v}）" for k, v in SKILLS.items())
+        + "。做这几类事之前先查一次。方法文件在作品目录的 技能/ 里，作者可能改过，以文件为准。",
+        {"name": {"type": "string", "description": "方法名，例如 写章"}},
+        ["name"],
+    ),
+    _spec(
         "open_editor",
         "打开全屏编辑器让作者自己改这个文件。只在作者说要亲自改时用。保存即视为作者批准。",
         {"path": _PATH},
@@ -132,6 +157,7 @@ _LABEL = {
     "verify": "核对引用",
     "review": "审读",
     "open_editor": "打开编辑器",
+    "skill": "查方法",
 }
 
 
@@ -453,6 +479,17 @@ def review(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     return ToolOutcome(text)
 
 
+def skill(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    name = (_text(args, "name", required=True) or "").strip().removesuffix(".md")
+    rel = f"{SKILLS_DIR}/{name}.md"
+    if name not in SKILLS or not ctx.workspace.file_exists(rel):
+        raise WorkspaceError("没有这份方法。可用的是：" + "、".join(SKILLS))
+    text = ctx.workspace.read_text(rel)
+    ctx.port.say(f"── {rel} ──")
+    ctx.port.say(text.rstrip("\n"))
+    return ToolOutcome(f"── {rel} ──\n{text}")
+
+
 def open_editor(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     ws = ctx.workspace
     rel = normalize(_text(args, "path", required=True) or "")
@@ -481,6 +518,7 @@ HANDLERS = {
     "verify": verify,
     "review": review,
     "open_editor": open_editor,
+    "skill": skill,
 }
 assert set(HANDLERS) == set(TOOL_NAMES)
 

@@ -358,17 +358,15 @@ def test_notes_and_preferences_appear_in_the_system_prompt(workspace):
     workspace.write_text("草稿/代理笔记.md", "作者拒绝过整章重写，只接受定点改。")
     agent, _, _ = make_agent(workspace, [])
     prompt = agent.system_prompt()
-    assert "作者拒绝过整章重写" in prompt and "代理笔记.md 是你的笔记" in prompt
-    assert "作者的偏好与禁忌" in prompt
-    assert "带一件作者没提过的东西" in prompt and "落到画面" in prompt
-    assert "技能/共创.md" in prompt
+    assert "作者拒绝过整章重写" in prompt and "草稿/代理笔记.md" in prompt
+    assert "作者的偏好与禁忌" in prompt  # 偏好与笔记都自动带在提示里
 
 
 def test_turn_reminder_is_sent_to_the_model_but_not_persisted(chapter_workspace):
     agent, _, clients = make_agent(chapter_workspace, [Reply("好。")])
     agent.handle("一起完善世界观")
     sent = clients.calls[0][-1].content
-    assert sent.startswith("一起完善世界观") and "带一件我没提过的东西" in sent
+    assert sent.startswith("一起完善世界观") and "先 skill 查对应的方法" in sent
     rows = transcript_rows(chapter_workspace)
     assert rows[0]["text"] == "一起完善世界观"
 
@@ -403,11 +401,17 @@ def test_log_file_records_calls_tools_and_failures(chapter_workspace):
     assert all(line[:4].isdigit() for line in lines)  # 每行带时间戳
 
 
-def test_persona_points_to_the_co_design_skill(workspace):
+def test_persona_stays_lean_and_sends_details_to_the_skill_files(workspace):
     agent, _, _ = make_agent(workspace, [])
     prompt = agent.system_prompt()
-    assert "技能/共创.md" in prompt
-    assert "同一主题始终用同一个文件" in prompt and "能演一段就别只讲道理" in prompt
+    # 留在提示里的只有不可违反的规矩和查方法的入口
+    assert "先用 skill 查一次方法" in prompt and "开书、共创" in prompt
+    assert "不要说你没做的事" in prompt and "没调用工具，就别说" in prompt
+    assert "改它们要经作者批准" in prompt
+    # 方法细节下放到技能文件，不再挤在提示里
+    for detail in ("落到画面", "带一件作者没提过的东西", "同一主题始终用同一个文件"):
+        assert detail not in prompt, detail
+    assert "带一件作者没提过的东西" in (workspace.root / "技能" / "共创.md").read_text()
 
 
 def test_context_usage_counts_system_prompt_and_transcript(workspace):

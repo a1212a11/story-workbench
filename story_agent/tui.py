@@ -104,7 +104,7 @@ REWIND_CONFIRM_SECONDS = 1.5  # 空闲时两次 Esc 的间隔上限
 REWIND_COOLDOWN_SECONDS = 3.0  # 刚中断过的这几秒里，Esc 只当中断，不进入撤回
 REWIND_CHOICES = 10
 # 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
-QUIET_TOOLS = frozenset({"read", "search", "verify", "history"})
+QUIET_TOOLS = frozenset({"read", "search", "verify", "history", "skill"})
 HISTORY_ON_SCREEN = 12
 IDLE_HINT = "/help 查看按键与命令 · Enter 发送 · Ctrl-J 换行"
 GAUGE_CELLS = 10
@@ -437,6 +437,9 @@ class ThreadPort:
     # 代理观察者
     def reply_started(self) -> None:
         self._ui(self.app.prepare_reply)
+
+    def turn_reminder(self, text: str) -> None:
+        self._ui(self.app.show_dev_note, text)
 
     def thinking(self, chunk: str) -> None:
         self._ui(self.app.show_thinking, chunk)
@@ -872,6 +875,15 @@ class WorkbenchApp(App[int]):
         self._reply_row = None
         self._reply_text = ""
         self.busy_verb = "思考中"
+
+    def show_dev_note(self, text: str) -> None:
+        """只在开发者模式显示：每轮附在作者发言后面、不落库的提醒。"""
+        if not self.dev:
+            return
+        line = f"（每轮提醒）{text}"
+        self._log.append(line)
+        self._mount(Static(line, classes="system", markup=False))
+        self._scroll()
 
     def show_thinking(self, chunk: str) -> None:
         if self._current_tool is not None:

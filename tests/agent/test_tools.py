@@ -279,7 +279,16 @@ def test_review_without_model_or_with_bad_json(chapter_workspace: Workspace):
 def test_unknown_tool_specs_and_labels(workspace: Workspace):
     assert execute(ctx_for(workspace, FakePort()), "delete_everything", {}).is_error
     names = {spec.name for spec in tools.TOOL_SPECS}
-    assert names == {"read", "search", "edit", "history", "verify", "review", "open_editor"}
+    assert names == {
+        "read",
+        "search",
+        "edit",
+        "history",
+        "verify",
+        "review",
+        "open_editor",
+        "skill",
+    }
     for spec in tools.TOOL_SPECS:
         assert spec.input_schema["type"] == "object" and spec.description
         assert set(spec.input_schema["required"]) <= set(spec.input_schema["properties"])
@@ -295,3 +304,17 @@ def test_unknown_tool_specs_and_labels(workspace: Workspace):
 def _system_lines(workspace: Workspace) -> list[str]:
     path = workspace.root / ".story" / "对话.jsonl"
     return [json.loads(line)["text"] for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_skill_tool_reads_a_method_file_and_lists_what_exists(workspace: Workspace):
+    from story_agent.tools import SKILLS
+
+    port = FakePort()
+    ctx = ctx_for(workspace, port)
+    out = execute(ctx, "skill", {"name": "写章"})
+    assert not out.is_error and "── 技能/写章.md ──" in out.text and "动笔前读什么" in out.text
+    assert "动笔前读什么" in port.output  # 作者也看得到，只是默认折叠
+    assert execute(ctx, "skill", {"name": "写章.md"}).text == out.text  # 带不带后缀都行
+    bad = execute(ctx, "skill", {"name": "写小说"})
+    assert bad.is_error and "可用的是：" in bad.text and "共创" in bad.text
+    assert set(SKILLS) == {p.stem for p in (workspace.root / "技能").glob("*.md")}
