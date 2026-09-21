@@ -360,7 +360,7 @@ def test_notes_and_preferences_appear_in_the_system_prompt(workspace):
     prompt = agent.system_prompt()
     assert "作者拒绝过整章重写" in prompt and "代理笔记.md 是你的笔记" in prompt
     assert "作者的偏好与禁忌" in prompt
-    assert "不超过十行" in prompt and "写进 草稿/ 里的文件" in prompt
+    assert "带一件作者没提过的东西" in prompt and "落到画面" in prompt
     assert "技能/共创.md" in prompt
 
 
@@ -368,7 +368,7 @@ def test_turn_reminder_is_sent_to_the_model_but_not_persisted(chapter_workspace)
     agent, _, clients = make_agent(chapter_workspace, [Reply("好。")])
     agent.handle("一起完善世界观")
     sent = clients.calls[0][-1].content
-    assert sent.startswith("一起完善世界观") and "先给你的建议和理由" in sent
+    assert sent.startswith("一起完善世界观") and "带一件我没提过的东西" in sent
     rows = transcript_rows(chapter_workspace)
     assert rows[0]["text"] == "一起完善世界观"
 
@@ -407,7 +407,7 @@ def test_persona_points_to_the_co_design_skill(workspace):
     agent, _, _ = make_agent(workspace, [])
     prompt = agent.system_prompt()
     assert "技能/共创.md" in prompt
-    assert "同一主题始终用同一个文件" in prompt and "不要一个微决定问一轮" in prompt
+    assert "同一主题始终用同一个文件" in prompt and "能演一段就别只讲道理" in prompt
 
 
 def test_context_usage_counts_system_prompt_and_transcript(workspace):
