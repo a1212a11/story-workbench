@@ -1100,3 +1100,46 @@ def test_thinking_streams_dim_then_collapses_to_one_line(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_only_one_thinking_indicator_at_a_time(tmp_path):
+    from story_agent.tui import ThinkingBlock
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    seen: dict = {}
+
+    def watch(cancel):  # 思考正在流的时候停一下，好让测试看一眼界面
+        time.sleep(0.5)
+
+    clients = scripted_clients(
+        [Reply("开场。"), Reply("答案。", hook=watch, thinking="想一想这件事该怎么办。")]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _send(pilot, "聊聊")
+            await _wait(app, pilot, lambda: app._thinking is not None)
+            await pilot.pause(0.15)
+            block = app._thinking
+            assert block is not None
+            spinner = app.query_one("#spinner", Static)
+            seen["spinner"] = (spinner.display, str(spinner.content))
+            seen["header_shown"] = block.query_one(".thinking-header", Static).display
+            seen["body"] = str(block.query_one(".thinking-body", Static).content)
+            await _wait(app, pilot, lambda: "答案。" in app.transcript_text())
+            await pilot.pause(0.2)
+            assert app._thinking is None
+            done = list(app.query(ThinkingBlock))[-1]
+            assert "✻ 思考了" in str(done.query_one(".thinking-header", Static).content)
+            assert done.query_one(".thinking-header", Static).display
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
+    # 思考时：正文暗色斜体流出来，自己不写标题；动的那一行只有输入框上方那条
+    assert not seen["header_shown"]
+    assert "想一想" in seen["body"]
+    shown, text = seen["spinner"]
+    assert shown and "思考中…" in text and "esc 中断" in text

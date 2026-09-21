@@ -88,12 +88,16 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
         if reply.error and not reply.text:
             yield StreamEvent(EventKind.ERROR, error=reply.error)
             return
-        for piece in (
-            reply.thinking[: len(reply.thinking) // 2],
-            reply.thinking[len(reply.thinking) // 2 :],
+        fired = False
+        for index, piece in enumerate(
+            (reply.thinking[: len(reply.thinking) // 2], reply.thinking[len(reply.thinking) // 2 :])
         ):
-            if piece:
-                yield StreamEvent(EventKind.THINKING, text=piece)
+            if not piece:
+                continue
+            yield StreamEvent(EventKind.THINKING, text=piece)
+            if index == 0 and reply.hook is not None:
+                reply.hook(cancel)
+                fired = True
         half = len(reply.text) // 2
         pieces = [p for p in (reply.text[:half], reply.text[half:]) if p]
         for index, piece in enumerate(pieces):
@@ -101,7 +105,7 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
                 yield StreamEvent(EventKind.ERROR, error="cancelled")
                 return
             yield StreamEvent(EventKind.TEXT, text=piece)
-            if index == 0 and reply.hook is not None:
+            if index == 0 and reply.hook is not None and not fired:
                 reply.hook(cancel)
         if reply.error:
             yield StreamEvent(EventKind.ERROR, error=reply.error)

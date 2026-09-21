@@ -338,7 +338,9 @@ class ThinkingBlock(Vertical):
         except NoMatches:  # 还没 compose，等 on_mount
             return
         done = self.done_seconds
-        header.update("✻ 思考中……" if done is None else f"✻ 思考了 {done} 秒")
+        header.display = done is not None  # 思考期间标题让位给下方的转圈，避免两处都写「思考中」
+        if done is not None:
+            header.update(f"✻ 思考了 {done} 秒")
         body.update(self.text)
         body.display = not self.collapsed
 
@@ -479,7 +481,7 @@ class WorkbenchApp(App[int]):
     .reply > Markdown MarkdownBullet { color: $accent; }
     .thinking { height: auto; margin-top: 1; }
     .thinking-header { color: $text-muted; }
-    .thinking-body { color: $text-muted; padding-left: 2; }
+    .thinking-body { color: $text-muted; text-style: italic; padding-left: 2; }
     .tool { height: auto; margin-top: 1; }
     .tool-header { color: $accent; }
     .tool-header.ok { color: $success; }
