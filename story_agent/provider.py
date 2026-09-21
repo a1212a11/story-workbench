@@ -86,6 +86,7 @@ class CallOptions:
     timeout_seconds: float
     temperature: float | None = None
     tools: tuple[ToolSpec, ...] = ()
+    no_thinking: bool = False  # 机械活（如压缩旧对话）关掉思考：更快更省，也不会被思考吃掉预算
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +237,7 @@ def _request_kwargs(messages, options, disable_thinking):
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
             for t in options.tools
         ]
-    if disable_thinking:
+    if disable_thinking or options.no_thinking:
         kwargs["thinking"] = {"type": "disabled"}
     return kwargs
 

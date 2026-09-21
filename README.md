@@ -19,7 +19,7 @@ AI 小说创作与故事工程系统。作者决定故事，AI 帮助讨论、�
   "provider": "deepseek",
   "model": "deepseek-flash",
   "max_output_tokens": 8000,
-  "timeout_seconds": 300,
+  "timeout_seconds": 120,
   "context_tokens": 100000,
   "template_reserve": 2000
 }

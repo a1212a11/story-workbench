@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from story_agent import tools as toolbox
 from story_agent.approval import AuthorPort
@@ -335,16 +335,17 @@ class Agent:
             f"{'作者' if role == 'author' else '助手'}：{text.strip()}" for role, text in rows
         )
         user = f"已有摘要：\n{self.summary or '（无）'}\n\n要压缩的对话：\n{body}"
+        options = replace(self.config.options, no_thinking=True)  # 缩写要点不需要推理
         try:
             result = self.clients.complete(
                 [ChatMessage("system", SUMMARY_SYSTEM), ChatMessage("user", user)],
-                self.config.options,
+                options,
                 CancelSignal(),
             )
         except ProviderError as exc:
             self.workspace.append_log(f"摘要失败：{exc}")
             return None
-        self.workspace.record_usage(result.usage, self.config.options.model, "摘要")
+        self.workspace.record_usage(result.usage, options.model, "摘要")
         text = result.text.strip()
         if result.truncated or not text:
             out = result.usage.get("output_tokens", 0)
@@ -546,6 +547,4 @@ def _rows_of(messages: Sequence[ChatMessage]) -> list[tuple[str, str]]:
 
 
 def _with_tools(options):
-    from dataclasses import replace
-
     return replace(options, tools=toolbox.TOOL_SPECS)

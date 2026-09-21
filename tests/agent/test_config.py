@@ -10,6 +10,7 @@ from story_agent import config
 
 
 def test_provider_defaults_and_key_envs():
+    assert config.Settings().timeout_seconds == 120.0  # 卡住时早点报错，不要干等五分钟
     assert config.Settings().model == "claude-sonnet-5"
     assert config.Settings(provider="deepseek").api_key_env == "DEEPSEEK_API_KEY"
     openrouter = config.Settings(provider="openrouter")

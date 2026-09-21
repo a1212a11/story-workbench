@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from story_agent.config import estimate_tokens
@@ -111,11 +112,13 @@ def run_review(ctx: ToolContext, chapter_rel: str, focus: str) -> str:
         )
     )
     messages = [ChatMessage("system", REVIEW_SYSTEM), ChatMessage("user", user)]
+    # 审读要读完整章再给结论，是一次性的长调用，给双倍时间
+    options = replace(ctx.config.options, timeout_seconds=ctx.config.options.timeout_seconds * 2)
     try:
-        result = ctx.clients.complete(messages, ctx.config.options, ctx.cancel)
+        result = ctx.clients.complete(messages, options, ctx.cancel)
     except ProviderError as exc:
         raise WorkspaceError(f"审读请求失败（{exc}）。") from None
-    ws.record_usage(result.usage, ctx.config.options.model, f"审读 {chapter_rel}")
+    ws.record_usage(result.usage, options.model, f"审读 {chapter_rel}")
     if result.truncated:
         raise WorkspaceError("审读输出被截断，结果不可用。")
     remarks, summary = _parse(result.text)

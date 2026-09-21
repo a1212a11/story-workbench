@@ -52,7 +52,7 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "story-workbench" / "config.json
 class Settings:
     model: str | None = None
     max_output_tokens: int = 8000
-    timeout_seconds: float = 300.0
+    timeout_seconds: float = 120.0  # 流式是「多久没动静算卡住」，一次性调用是总时限
     context_tokens: int = 100_000
     template_reserve: int = 2_000
     provider: str = "anthropic"

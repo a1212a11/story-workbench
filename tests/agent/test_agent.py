@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from story_agent.agent import Agent, fit_transcript, history_to_transcript
 from story_agent.provider import CancelSignal, ChatMessage, TextBlock, ToolResultBlock
@@ -416,3 +417,30 @@ def test_context_usage_counts_system_prompt_and_transcript(workspace):
     agent.transcript.append(ChatMessage("user", "一" * 1000))
     used_after, _ = agent.context_usage()
     assert used_after - used == 1200  # 中文按 1.2 估算
+
+
+def test_compaction_disables_thinking_and_review_gets_longer_time(chapter_workspace):
+    from story_agent.provider import CallOptions, _request_kwargs
+    from story_agent.tools import Session, ToolContext, execute
+
+    # 压缩是机械活：关掉思考
+    _long_conversation(chapter_workspace)
+    clients = scripted_clients([], "要点。")
+    agent = Agent(chapter_workspace, FakePort(), clients=clients, config=CONFIG)
+    assert agent.compact_pending() is True
+    assert clients.complete_options[-1].no_thinking is True
+
+    # 审读是判断活：保留思考，但一次性调用给双倍时间
+    review_clients = scripted_clients([], json.dumps({"remarks": [], "summary": "干净。"}))
+    ctx = ToolContext(chapter_workspace, FakePort(), review_clients, CONFIG, Session())
+    assert not execute(ctx, "review", {"path": "章节/第01章.md"}).is_error
+    used = review_clients.complete_options[-1]
+    assert used.no_thinking is False
+    assert used.timeout_seconds == CONFIG.options.timeout_seconds * 2
+
+    # 供应商层：no_thinking 才会带上关闭思考的参数
+    plain = CallOptions(model="m", max_output_tokens=10, timeout_seconds=5)
+    assert "thinking" not in _request_kwargs([], plain, False)
+    assert _request_kwargs([], replace(plain, no_thinking=True), False)["thinking"] == {
+        "type": "disabled"
+    }
