@@ -65,6 +65,7 @@ PALETTE = {
     "subtext": "#A6ADC8",  # diff 文件名行
     "muted": "#6C7086",  # diff 位置行
     "surface": "#313244",  # 选中项与列表边框，在深浅终端里都看得见
+    "band": "#252533",  # 作者发言的底色：比深色终端的底略浅一档
 }
 STORY_THEME = Theme(
     name="story",
@@ -464,15 +465,18 @@ class WorkbenchApp(App[int]):
     CSS = """
     Screen { layout: vertical; }
     #transcript {
-        height: 1fr; padding: 0 1;
+        height: 1fr; padding: 0 0;
         scrollbar-size: 0 0;
     }
-    .welcome { color: $text-muted; margin-bottom: 1; }
-    .divider { color: $text-muted; margin: 1 0; }
-    .author { color: ansi_default; margin-top: 1; }
-    .system { color: ansi_bright_black; }
+    .welcome { color: $text-muted; margin-bottom: 1; padding: 0 1; }
+    .divider { color: $text-muted; margin: 1 0; padding: 0 1; }
+    .author {
+        color: ansi_default; background: #252533;
+        padding: 0 1; margin: 1 0 0 0; width: 1fr;
+    }
+    .system { color: ansi_bright_black; padding: 0 1; }
     .history { opacity: 70%; }
-    .reply { height: auto; margin-top: 1; }
+    .reply { height: auto; margin-top: 1; padding: 0 1; }
     .reply > .dot { width: 2; color: $accent; }
     .reply > Static, .reply > Markdown { width: 1fr; }
     .reply > Markdown { margin: 0; padding: 0; background: ansi_default; }
@@ -487,10 +491,10 @@ class WorkbenchApp(App[int]):
     .reply > Markdown MarkdownListItem { margin: 0; margin-right: 1; }
     .reply > Markdown MarkdownListItem MarkdownBlock { margin: 0; }
     .reply > Markdown MarkdownBullet { color: $accent; }
-    .thinking { height: auto; margin-top: 1; }
+    .thinking { height: auto; margin-top: 1; padding: 0 1; }
     .thinking-header { color: $text-muted; }
     .thinking-body { color: $text-muted; text-style: italic; padding-left: 2; }
-    .tool { height: auto; margin-top: 1; }
+    .tool { height: auto; margin-top: 1; padding: 0 1; }
     .tool-header { color: $accent; }
     .tool-header.ok { color: $success; }
     .tool-header.error { color: $error; }

@@ -1169,3 +1169,25 @@ def test_author_line_is_readable_with_an_accented_marker(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_author_and_assistant_are_told_apart_by_background(tmp_path):
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients([Reply("开场。"), Reply("我的回答。")])
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _send(pilot, "我说的话")
+            await _wait(app, pilot, lambda: "我的回答。" in app.transcript_text())
+            await pilot.pause(0.3)
+            said = [w for w in app.query(".author") if "我说的话" in str(w.content)][-1]
+            reply = list(app.query(".reply"))[-1]
+            assert said.styles.background.hex.lower() == "#252533"  # 作者的话有底色
+            assert said.region.width == app.query_one("#transcript").region.width  # 整行铺满
+            assert reply.styles.background.hex != said.styles.background.hex  # 助手的话不铺底
+            await pilot.press("ctrl+d")
+
+    _run(scenario())
