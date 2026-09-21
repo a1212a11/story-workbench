@@ -1143,3 +1143,28 @@ def test_only_one_thinking_indicator_at_a_time(tmp_path):
     assert "想一想" in seen["body"]
     shown, text = seen["spinner"]
     assert shown and "思考中…" in text and "esc 中断" in text
+
+
+def test_author_line_is_readable_with_an_accented_marker(tmp_path):
+    from story_agent.tui import PALETTE, author_line
+
+    line = author_line("不好，要重新设计")
+    assert line.plain == "> 不好，要重新设计"
+    assert [(s.style, line.plain[s.start : s.end]) for s in line.spans] == [
+        (PALETTE["orange"], "> ")
+    ]
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=None, config=None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "已有 1 章正文" in app.transcript_text())
+            await _send(pilot, "我说的话")
+            await pilot.pause(0.2)
+            said = [w for w in app.query(".author") if "我说的话" in str(w.content)][-1]
+            assert said.styles.color.hex.lower() != "#6c7086"  # 不再是灰得看不清
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

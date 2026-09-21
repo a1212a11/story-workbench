@@ -361,6 +361,11 @@ class ThinkingBlock(Vertical):
         self.set_collapsed(not self.collapsed)
 
 
+def author_line(text: str) -> Text:
+    """作者说的话：正文用终端的正常字色，只有开头的 > 用强调色，好和助手的回复区分开。"""
+    return Text.assemble(("> ", PALETTE["orange"]), text)
+
+
 def colorize_diff(text: str) -> Text:
     """把统一 diff 着色：删除行红、新增行绿、位置行暗；其他文字原样。"""
     result = Text()
@@ -461,7 +466,7 @@ class WorkbenchApp(App[int]):
     }
     .welcome { color: $text-muted; margin-bottom: 1; }
     .divider { color: $text-muted; margin: 1 0; }
-    .author { color: ansi_bright_black; margin-top: 1; }
+    .author { color: ansi_default; margin-top: 1; }
     .system { color: ansi_bright_black; }
     .history { opacity: 70%; }
     .reply { height: auto; margin-top: 1; }
@@ -795,7 +800,7 @@ class WorkbenchApp(App[int]):
         for role, text in rows:
             if role == "author":
                 self._log.append(f"> {text}")
-                self._mount(Static(f"> {text}", classes="author history", markup=False))
+                self._mount(Static(author_line(text), classes="author history"))
             else:
                 self._log.append(f"⏺ {text}")
                 self._mount(
@@ -859,7 +864,7 @@ class WorkbenchApp(App[int]):
         self._log.append(f"> {text}")
         self._flush_reply_stream()
         self.follow = True  # 作者说了话，回到底部
-        self._mount(Static(f"> {text}", classes="author", markup=False))
+        self._mount(Static(author_line(text), classes="author"))
 
     def prepare_reply(self) -> None:
         """一次模型调用开始。先不挂回复行，等真有文字再挂，好让思考过程排在它前面。"""
@@ -983,7 +988,7 @@ class WorkbenchApp(App[int]):
         if answer is not None:
             shown = "⏎ 批准" if parse_answer(answer).approved else (answer or "n")
             self._log.append(f"> {shown}")
-            self._mount(Static(f"> {shown}", classes="author", markup=False))
+            self._mount(Static(author_line(shown), classes="author"))
 
     def begin_edit(self, initial: str, title: str) -> None:
         self.push_screen(EditorScreen(initial, title), callback=self.port.edits.put)
