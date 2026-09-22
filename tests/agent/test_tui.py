@@ -1353,3 +1353,31 @@ def test_failed_turn_puts_the_message_back_in_the_input_box(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_thinking_stays_open_when_there_is_no_reply(tmp_path):
+    from story_agent.tui import ThinkingBlock
+
+    path = tmp_path / "novel"
+    _chapter_workspace(path)
+    clients = scripted_clients(
+        [
+            Reply("开场。"),
+            Reply("", thinking="姐夫三修：兵道、墨道、锻体。"),
+            Reply("", thinking="还是只在想"),
+        ]
+    )
+
+    async def scenario():
+        app = WorkbenchApp(path, clients=clients, config=CONFIG)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
+            await _send(pilot, "姐夫的道统")
+            await _wait(app, pilot, lambda: "没有记进对话" in app.transcript_text())
+            await pilot.pause(0.3)
+            blocks = list(app.query(ThinkingBlock))
+            assert blocks and not blocks[-1].collapsed  # 展开着，作者能看清那是思考
+            assert "姐夫三修" in blocks[-1].text
+            await pilot.press("ctrl+d")
+
+    _run(scenario())

@@ -472,6 +472,9 @@ class ThreadPort:
     def turn_reminder(self, text: str) -> None:
         self._ui(self.app.show_dev_note, text)
 
+    def reply_empty(self) -> None:
+        self._ui(self.app.keep_thinking_open)
+
     def thinking(self, chunk: str) -> None:
         self._ui(self.app.show_thinking, chunk)
 
@@ -947,6 +950,13 @@ class WorkbenchApp(App[int]):
             self._mount(self._thinking)
         self._thinking.add_chunk(chunk)
         self._scroll()
+
+    def keep_thinking_open(self) -> None:
+        """这一轮没有正文时，把最后那块思考展开，作者才知道自己看到的是什么。"""
+        blocks = list(self._transcript().query(ThinkingBlock))
+        if blocks:
+            blocks[-1].set_collapsed(False)
+            self._scroll()
 
     def _finish_thinking(self) -> None:
         block, self._thinking = self._thinking, None

@@ -527,3 +527,32 @@ def test_a_billed_failure_is_never_retried(chapter_workspace):
     # 鉴权之类的错误也不重试
     agent, port, clients = make_agent(chapter_workspace, [Reply(error="AuthenticationError")])
     assert agent.handle("再来").failed and len(clients.calls) == 1
+
+
+def test_thinking_only_reply_is_retried_then_reported(chapter_workspace):
+    # 只有思考、没有正文：这一轮等于没说话，先重试一次
+    agent, port, clients = make_agent(
+        chapter_workspace, [Reply("", thinking="想了很多"), Reply("这次说出来了。")]
+    )
+    result = agent.handle("姐夫的道统定哪个")
+    assert result.reply == "这次说出来了。" and len(clients.calls) == 2
+    assert "它刚才只在想，没说出来" in port.output
+    assert transcript_rows(chapter_workspace)[-1]["text"] == "这次说出来了。"
+
+    # 重试还是只有思考：明确告诉作者，别让他把思考当成回复
+    agent, port, clients = make_agent(
+        chapter_workspace, [Reply("", thinking="还是只在想"), Reply("", thinking="仍然只在想")]
+    )
+    result = agent.handle("再来一次")
+    assert result.reply == "" and len(clients.calls) == 2
+    assert "只给了思考过程，没有正文" in port.output and "没有记进对话" in port.output
+    assert transcript_rows(chapter_workspace)[-1]["role"] == "author"  # 确实没存助手消息
+
+
+def test_a_tool_only_turn_is_not_treated_as_empty(chapter_workspace):
+    # 只调工具不说话是正常的，不该重试也不该报「只在想」
+    script = [Reply("", (use("read", "r", path="章节/第01章.md"),)), Reply("看完了。")]
+    agent, port, clients = make_agent(chapter_workspace, script)
+    result = agent.handle("看看第一章")
+    assert result.reply == "看完了。" and len(clients.calls) == 2
+    assert "只在想" not in port.output and "没有正文" not in port.output

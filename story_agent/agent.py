@@ -458,6 +458,12 @@ class Agent:
         final = "\n\n".join(part for part in reply_parts if part.strip())
         if final:
             ws.append_transcript("assistant", final)
+        if not final and not session.executed and not cancelled and not stopped_early:
+            self.port.say(
+                "这一轮它只给了思考过程，没有正文；上面那段不算数，也没有记进对话。"
+                "你可以说一句「把刚才想的说出来」。"
+            )
+            self._notify("reply_empty")
         if interrupted_work:  # 重开之后也知道这一轮做到哪儿了
             ws.append_transcript(
                 "assistant", f"（网络中断，这一轮没说完。已经做了：{interrupted_work}。）"
@@ -525,6 +531,11 @@ class Agent:
                     return text, (), False, None
                 return self._call(cancel, attempt + 1)
             self.workspace.append_log(f"连接出错，重试 {len(RETRY_DELAYS)} 次仍未接通：{error}")
+        if final is EventKind.COMPLETED and not parts and not uses and attempt == 0:
+            # 推理型号偶尔把整段答案写在思考里，正文是空的：这一轮等于没说话，让它再说一次
+            self.workspace.append_log("模型只给了思考没有正文，重试一次")
+            self.port.say("它刚才只在想，没说出来，我让它再说一遍……")
+            return self._call(cancel, attempt + 1)
         if final is not EventKind.COMPLETED:
             reason = {
                 EventKind.TRUNCATED: "输出被截断",
