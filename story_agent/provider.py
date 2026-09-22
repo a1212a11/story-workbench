@@ -7,6 +7,7 @@ tool_use 块原样归一化交给调用方，由调用方决定是否执行。
 
 from __future__ import annotations
 
+import queue
 import threading
 from collections.abc import AsyncIterator, Awaitable, Iterator
 from dataclasses import dataclass, field
@@ -265,50 +266,106 @@ def _request_kwargs(messages, options, disable_thinking):
     return kwargs
 
 
+CANCEL_POLL_SECONDS = 0.2  # 等网络时多久看一次取消标志
+
+
+def _abort(client, holder: dict) -> None:
+    """作者按了 Esc：先关掉响应流，再关掉连接，让卡在网络上的那条线程立刻醒来。"""
+    for obj in (holder.get("response"), client):
+        close = getattr(obj, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:  # noqa: BLE001 — 关不掉也不能影响退出
+                pass
+
+
 def make_anthropic_clients(
-    api_key: str, *, base_url: str | None = None, disable_thinking: bool = False
+    api_key: str,
+    *,
+    base_url: str | None = None,
+    disable_thinking: bool = False,
+    client_factory=None,
 ) -> tuple[StreamCall, CompleteCall]:
     """返回一对绑定密钥的客户端函数。max_retries=0：付费请求不自动重试。
 
     密钥只保存在闭包里，不出现在返回的事件、异常或日志中。
+    网络请求放在一条辅助线程里跑，这边每 0.2 秒看一次取消标志：连第一个字都没来的时候
+    按 Esc 也能立刻停，不用等到有片段到达或超时。client_factory 供测试注入假客户端。
     """
-    from anthropic import Anthropic, APIError
+    from anthropic import Anthropic
 
-    def _client(options: CallOptions) -> Anthropic:
+    def _client(options: CallOptions):
+        if client_factory is not None:
+            return client_factory(options)
         return Anthropic(
             api_key=api_key, base_url=base_url, max_retries=0, timeout=options.timeout_seconds
         )
 
+    def _pump(client, kwargs: dict, sink: queue.Queue, cancel: CancelSignal, holder: dict) -> None:
+        try:
+            with client.messages.stream(**kwargs) as response:
+                holder["response"] = response
+                for event in response:
+                    if cancel.is_set():
+                        break
+                    sink.put(("event", event))
+                if not cancel.is_set():
+                    holder["final"] = response.get_final_message()
+        except BaseException as exc:  # noqa: BLE001 — 送回主线程判断
+            sink.put(("error", exc))
+        finally:
+            sink.put(("done", None))
+
     def stream(
         messages: list[ChatMessage], options: CallOptions, cancel: CancelSignal
     ) -> Iterator[StreamEvent]:
+        cancelled = StreamEvent(EventKind.ERROR, error="cancelled")
         if cancel.is_set():
-            yield StreamEvent(EventKind.ERROR, error="cancelled")
+            yield cancelled
             return
         kwargs = _request_kwargs(messages, options, disable_thinking)
-        try:
-            with _client(options).messages.stream(**kwargs) as response:
-                for event in response:
-                    if cancel.is_set():
-                        response.close()
-                        yield StreamEvent(EventKind.ERROR, error="cancelled")
-                        return
-                    piece = _delta_of(event)
-                    if piece is not None:
-                        yield piece
-                final = response.get_final_message()
-        except APIError as exc:
-            yield StreamEvent(
-                EventKind.ERROR, error=describe_api_error(exc), retryable=is_retryable(exc)
-            )
-            return
-        except Exception as exc:  # 超时、网络中断等
-            yield StreamEvent(
-                EventKind.ERROR, error=describe_api_error(exc), retryable=is_retryable(exc)
-            )
-            return
+        client = _client(options)
+        sink: queue.Queue = queue.Queue()
+        holder: dict = {}
+        threading.Thread(
+            target=_pump, args=(client, kwargs, sink, cancel, holder), daemon=True
+        ).start()
+        while True:
+            try:
+                kind, payload = sink.get(timeout=CANCEL_POLL_SECONDS)
+            except queue.Empty:
+                if cancel.is_set():
+                    _abort(client, holder)
+                    yield cancelled
+                    return
+                continue
+            if kind == "event":
+                piece = _delta_of(payload)
+                if piece is not None:
+                    yield piece
+                if cancel.is_set():
+                    _abort(client, holder)
+                    yield cancelled
+                    return
+            elif kind == "error":
+                if cancel.is_set():
+                    yield cancelled
+                    return
+                yield StreamEvent(
+                    EventKind.ERROR,
+                    error=describe_api_error(payload),
+                    retryable=is_retryable(payload),
+                )
+                return
+            else:
+                break
         if cancel.is_set():
-            yield StreamEvent(EventKind.ERROR, error="cancelled")
+            yield cancelled
+            return
+        final = holder.get("final")
+        if final is None:
+            yield StreamEvent(EventKind.ERROR, error="no_final_message", retryable=True)
             return
         for tool_use in _tool_uses(final):
             yield StreamEvent(EventKind.TOOL_USE, tool_use=tool_use)
@@ -326,14 +383,29 @@ def make_anthropic_clients(
         if cancel.is_set():
             raise ProviderError("cancelled")
         kwargs = _request_kwargs(messages, options, disable_thinking)
-        try:
-            message = _client(options).messages.create(**kwargs)
-        except APIError as exc:
-            raise ProviderError(describe_api_error(exc)) from None
-        except Exception as exc:
-            raise ProviderError(type(exc).__name__) from None
-        if cancel.is_set():
-            raise ProviderError("cancelled")
+        client = _client(options)
+        sink: queue.Queue = queue.Queue()
+
+        def run() -> None:
+            try:
+                sink.put(("ok", client.messages.create(**kwargs)))
+            except BaseException as exc:  # noqa: BLE001
+                sink.put(("error", exc))
+
+        threading.Thread(target=run, daemon=True).start()
+        while True:
+            try:
+                kind, payload = sink.get(timeout=CANCEL_POLL_SECONDS)
+                break
+            except queue.Empty:
+                if cancel.is_set():
+                    _abort(client, {})
+                    raise ProviderError("cancelled") from None
+        if kind == "error":
+            if cancel.is_set():
+                raise ProviderError("cancelled")
+            raise ProviderError(describe_api_error(payload)) from None
+        message = payload
         if getattr(message, "stop_reason", None) not in (*_FINISHED_STOP_REASONS, "max_tokens"):
             raise ProviderError("unexpected_stop_reason")
         text = "".join(

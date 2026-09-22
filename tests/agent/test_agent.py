@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import pytest
+
 from story_agent.agent import Agent, fit_transcript, history_to_transcript
 from story_agent.provider import CancelSignal, ChatMessage, TextBlock, ToolResultBlock
 from story_agent.workspace import Workspace
@@ -559,3 +561,88 @@ def test_a_tool_only_turn_is_not_treated_as_empty(chapter_workspace):
     result = agent.handle("看看第一章")
     assert result.reply == "看完了。" and len(clients.calls) == 2
     assert "只在想" not in port.output and "没有正文" not in port.output
+
+
+class _GateStream:
+    """假的流式响应：第一个字永远不来，直到被 close。"""
+
+    def __init__(self, gate):
+        self.gate = gate
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        self.gate.wait()
+        return iter(())
+
+    def close(self):
+        self.closed = True
+        self.gate.set()
+
+    def get_final_message(self):
+        return None
+
+
+class _GateClient:
+    def __init__(self):
+        import threading
+
+        self.gate = threading.Event()
+        self.closed = False
+        client = self
+
+        class Messages:
+            def stream(self, **kwargs):
+                client.stream_obj = _GateStream(client.gate)
+                return client.stream_obj
+
+            def create(self, **kwargs):
+                client.gate.wait()
+                raise RuntimeError("connection closed")
+
+        self.messages = Messages()
+
+    def close(self):
+        self.closed = True
+        self.gate.set()
+
+
+def test_escape_interrupts_even_before_the_first_byte_arrives():
+    import threading
+    import time as _time
+
+    from story_agent.provider import (
+        CallOptions,
+        CancelSignal,
+        EventKind,
+        ProviderError,
+        make_anthropic_clients,
+    )
+
+    fake = _GateClient()
+    stream, complete = make_anthropic_clients("k", client_factory=lambda options: fake)
+    options = CallOptions(model="m", max_output_tokens=10, timeout_seconds=120)
+    messages = [ChatMessage("user", "你好")]
+
+    cancel = CancelSignal()
+    threading.Timer(0.3, cancel.set).start()  # 0.3 秒后作者按 Esc
+    started = _time.monotonic()
+    events = list(stream(messages, options, cancel))
+    elapsed = _time.monotonic() - started
+    assert elapsed < 2.0, elapsed  # 没等到超时，立刻停
+    assert events[-1].kind is EventKind.ERROR and events[-1].error == "cancelled"
+    assert fake.closed and fake.stream_obj.closed  # 连接被主动关掉，不留一条卡着的线程
+
+    fake = _GateClient()
+    stream, complete = make_anthropic_clients("k", client_factory=lambda options: fake)
+    cancel = CancelSignal()
+    threading.Timer(0.3, cancel.set).start()
+    started = _time.monotonic()
+    with pytest.raises(ProviderError, match="cancelled"):
+        complete(messages, options, cancel)
+    assert _time.monotonic() - started < 2.0 and fake.closed
