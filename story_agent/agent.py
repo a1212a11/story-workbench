@@ -471,7 +471,7 @@ class Agent:
         return TurnResult(final, calls, tuple(session.executed), stopped_early, failed=failed)
 
     def _call(
-        self, cancel: CancelSignal, attempt: int = 0
+        self, cancel: CancelSignal, attempt: int = 0, no_thinking: bool = False
     ) -> tuple[str, tuple[ToolUseBlock, ...], bool, str | None]:
         """一次模型调用：流式显示文本，收集工具调用。
 
@@ -479,6 +479,8 @@ class Agent:
         """
         assert self.clients is not None and self.config is not None
         options = self.config.options
+        if no_thinking:
+            options = replace(options, no_thinking=True)
         parts: list[str] = []
         uses: list[ToolUseBlock] = []
         usage: dict[str, int] = {}
@@ -529,13 +531,14 @@ class Agent:
                 self.port.say(f"网络没连上，{delay:.0f} 秒后重试（第 {attempt + 1} 次）……")
                 if cancel.wait(delay):  # 等待期间作者按了 Esc
                     return text, (), False, None
-                return self._call(cancel, attempt + 1)
+                return self._call(cancel, attempt + 1, no_thinking)
             self.workspace.append_log(f"连接出错，重试 {len(RETRY_DELAYS)} 次仍未接通：{error}")
-        if final is EventKind.COMPLETED and not parts and not uses and attempt == 0:
-            # 推理型号偶尔把整段答案写在思考里，正文是空的：这一轮等于没说话，让它再说一次
-            self.workspace.append_log("模型只给了思考没有正文，重试一次")
-            self.port.say("它刚才只在想，没说出来，我让它再说一遍……")
-            return self._call(cancel, attempt + 1)
+        if final is EventKind.COMPLETED and not parts and not uses and not no_thinking:
+            # 推理型号在某些上下文里会把整段答案写进思考、正文留空，而且重试也一样；
+            # 关掉思考再问一次就一定有正文（实测同一上下文：开着 0 字，关掉 309 字）
+            self.workspace.append_log("模型只给了思考没有正文，关掉思考重试一次")
+            self.port.say("它刚才只在想，没说出来，我让它关掉思考再说一遍……")
+            return self._call(cancel, attempt, no_thinking=True)
         if final is not EventKind.COMPLETED:
             reason = {
                 EventKind.TRUNCATED: "输出被截断",

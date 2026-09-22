@@ -536,7 +536,10 @@ def test_thinking_only_reply_is_retried_then_reported(chapter_workspace):
     )
     result = agent.handle("姐夫的道统定哪个")
     assert result.reply == "这次说出来了。" and len(clients.calls) == 2
-    assert "它刚才只在想，没说出来" in port.output
+    assert "关掉思考再说一遍" in port.output
+    # 第一次开着思考，重试时关掉：实测同一上下文开着只出思考、关掉才有正文
+    assert clients.stream_options[0].no_thinking is False
+    assert clients.stream_options[1].no_thinking is True
     assert transcript_rows(chapter_workspace)[-1]["text"] == "这次说出来了。"
 
     # 重试还是只有思考：明确告诉作者，别让他把思考当成回复

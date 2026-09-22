@@ -87,9 +87,11 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
     calls: list[list[ChatMessage]] = []
     completes: list[list[ChatMessage]] = []
     complete_options: list[CallOptions] = []
+    stream_options: list[CallOptions] = []
 
     def stream(messages, options, cancel) -> Iterator[StreamEvent]:
         calls.append(list(messages))
+        stream_options.append(options)
         reply = replies.pop(0) if replies else Reply()
         if reply.error and not reply.text:
             yield StreamEvent(EventKind.ERROR, error=reply.error, retryable=reply.retryable)
@@ -130,18 +132,21 @@ def scripted_clients(script: list[Reply], complete_text: str | Exception = "{}")
             text=complete_text, usage={"input_tokens": 5, "output_tokens": 6}, truncated=False
         )
 
-    return ScriptedClients(stream, complete, calls, completes, complete_options)
+    return ScriptedClients(stream, complete, calls, completes, complete_options, stream_options)
 
 
 class ScriptedClients:
     """与 Clients 同形，另带记录：calls 是每次 stream 收到的消息，completes 是每次审读的。"""
 
-    def __init__(self, stream, complete, calls, completes, complete_options) -> None:
+    def __init__(
+        self, stream, complete, calls, completes, complete_options, stream_options
+    ) -> None:
         self.stream = stream
         self.complete = complete
         self.calls = calls
         self.completes = completes
         self.complete_options = complete_options
+        self.stream_options = stream_options
 
 
 def provider_failure(name: str = "APIConnectionError") -> Exception:
