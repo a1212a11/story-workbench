@@ -267,6 +267,14 @@ def _request_kwargs(messages, options, disable_thinking):
 
 
 CANCEL_POLL_SECONDS = 0.2  # 等网络时多久看一次取消标志
+CONNECT_TIMEOUT_SECONDS = 10.0  # 建连超过十秒基本就是网不通，不必陪它等两分钟
+
+
+def timeout_for(options: CallOptions):
+    """建连用短超时，读响应用配置里的长超时：网断了十秒就报错进重试，模型慢想两分钟也不误伤。"""
+    from anthropic import Timeout  # SDK 自带的 HTTP 库（httpx2）里的 Timeout
+
+    return Timeout(options.timeout_seconds, connect=CONNECT_TIMEOUT_SECONDS)
 
 
 def _abort(client, holder: dict) -> None:
@@ -299,7 +307,7 @@ def make_anthropic_clients(
         if client_factory is not None:
             return client_factory(options)
         return Anthropic(
-            api_key=api_key, base_url=base_url, max_retries=0, timeout=options.timeout_seconds
+            api_key=api_key, base_url=base_url, max_retries=0, timeout=timeout_for(options)
         )
 
     def _pump(client, kwargs: dict, sink: queue.Queue, cancel: CancelSignal, holder: dict) -> None:

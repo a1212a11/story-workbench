@@ -646,3 +646,11 @@ def test_escape_interrupts_even_before_the_first_byte_arrives():
     with pytest.raises(ProviderError, match="cancelled"):
         complete(messages, options, cancel)
     assert _time.monotonic() - started < 2.0 and fake.closed
+
+
+def test_connect_timeout_is_short_but_read_timeout_stays_long():
+    from story_agent.provider import CONNECT_TIMEOUT_SECONDS, CallOptions, timeout_for
+
+    t = timeout_for(CallOptions(model="m", max_output_tokens=10, timeout_seconds=120))
+    assert t.connect == CONNECT_TIMEOUT_SECONDS == 10.0  # 网不通十秒就知道
+    assert t.read == 120.0  # 模型慢慢想，两分钟没动静才算卡住
