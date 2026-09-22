@@ -148,8 +148,9 @@ class Git:
         """提交指定文件（默认全部）；没有变化时不提交，返回 None。"""
         if not self.initialized:
             return None
-        self._run("add", "-A", "--", *(paths or (".",)))
-        status = self._run("status", "--porcelain", "--", *(paths or (".",)))
+        # 删掉一个从没提交过的文件时，路径既不在盘上也不在库里，add 会报错；那就是没变化
+        self._run("add", "-A", "--", *(paths or (".",)), check=False)
+        status = self._run("status", "--porcelain", "--", *(paths or (".",)), check=False)
         if not status.stdout.strip():
             return None
         self._run("commit", "-q", "-m", message)
@@ -338,6 +339,13 @@ class Workspace:
     def write_text(self, rel: str, text: str) -> None:
         """原子写入。审批在调用前由 tools 层完成；这里不判断。"""
         self._write_raw(normalize(rel), text)
+
+    def delete_text(self, rel: str) -> None:
+        """删除文件。审批在调用前由 tools 层完成；历史里仍能找回。"""
+        target = self.path(rel)
+        if not target.is_file():
+            raise WorkspaceError(f"没有这个文件：{normalize(rel)}")
+        target.unlink()
 
     def list_dir(self, rel: str = "") -> list[str]:
         base = self.root if not rel else self.path(rel)

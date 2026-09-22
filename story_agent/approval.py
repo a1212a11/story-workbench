@@ -18,7 +18,7 @@ class ApprovalCard:
     title: str  # 修改 章节/第02章.md
     diff: str  # 统一 diff；界面着色显示
     summary: str  # 共 2 处 · 新增 1 个文件
-    kind: str  # edit / restore
+    kind: str  # edit / restore / delete
 
 
 @dataclass(frozen=True, slots=True)

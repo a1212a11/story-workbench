@@ -16,6 +16,7 @@ from story_agent.config import AgentConfig, Clients
 from story_agent.provider import CancelSignal, ToolSpec
 from story_agent.workspace import (
     SKILLS_DIR,
+    WORK_FILE,
     Workspace,
     WorkspaceError,
     describe_time,
@@ -75,6 +76,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "或 content（整个文件的新内容，用于新建或重写）。正式文件（作品.md、大纲.md、决定.md、"
         "设定/、人物/、章节/）会先弹审批卡给作者看 diff，作者不批准则文件不变，你会拿到作者的意见。"
         "自由文件（故事状态.md、草稿/、技能/）直接保存。"
+        "delete 为 true 时删除这个文件（正式文件同样先审批）：作废的旧章、旧草稿直接删，"
+        "不要归档到别处，历史里都在，history restore 能找回。"
         "reason 用一句人话说明这次改动，会写进历史。"
         "要在末尾追加内容，把最后一段原文作为 old、原文加新内容作为 new；old 不能为空。",
         {
@@ -96,6 +99,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 },
             },
             "content": {"type": "string", "description": "整个文件的新内容"},
+            "delete": {"type": "boolean", "description": "true 时删除这个文件"},
         },
         ["path", "reason"],
     ),
@@ -188,6 +192,8 @@ def describe_call(name: str, args: dict[str, Any] | None) -> str:
     action = args.get("action")
     if isinstance(action, str):
         parts.append({"list": "列出", "show": "查看", "restore": "恢复"}.get(action, action))
+    if args.get("delete") is True:
+        parts.append("删除")
     for key in ("reason", "pattern", "focus", "question", "name"):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
@@ -240,9 +246,9 @@ def _text(args: dict[str, Any], key: str, required: bool = False) -> str | None:
 # ---------------------------------------------------------------- 写入口
 
 
-def _diff(rel: str, old: str | None, new: str) -> str:
+def _diff(rel: str, old: str | None, new: str | None) -> str:
     before = old.splitlines(keepends=True) if old is not None else []
-    after = new.splitlines(keepends=True)
+    after = new.splitlines(keepends=True) if new is not None else []
     lines = list(difflib.unified_diff(before, after, fromfile=rel, tofile=rel, n=2, lineterm=""))
     text = "".join(line if line.endswith("\n") else line + "\n" for line in lines)
     if text.count("\n") > MAX_DIFF_LINES:
@@ -254,19 +260,21 @@ def _diff(rel: str, old: str | None, new: str) -> str:
 def _apply_edit(
     ctx: ToolContext,
     rel: str,
-    new: str,
+    new: str | None,
     *,
     reason: str,
     summary: str,
     kind: str,
     title: str,
 ) -> ToolOutcome:
-    """唯一的写路径：正式文件先审批，批准后原子写入并提交历史。"""
+    """唯一的写路径：正式文件先审批，批准后原子写入并提交历史。new 为 None 表示删除。"""
     ws = ctx.workspace
     old = ws.read_text(rel) if ws.file_exists(rel) else None
     if old == new:
         return ToolOutcome(f"{rel} 没有变化。")
     diff = _diff(rel, old, new)
+    if old is None and new is None:
+        raise WorkspaceError(f"没有这个文件：{rel}")
     if old is None:
         # 新文件：全文显示在对话里，卡片只提示，作者不必在卡片里读长文
         ctx.port.say(f"── {rel}（新建）──")
@@ -289,9 +297,12 @@ def _apply_edit(
             return ToolOutcome(f"作者没有批准这次改动，{rel} 没有变化。{note}")
     elif old is not None:
         ctx.port.say(diff.rstrip("\n"))
-    ws.write_text(rel, new)
+    if new is None:
+        ws.delete_text(rel)
+    else:
+        ws.write_text(rel, new)
     ref = ws.commit(reason or title, rel)
-    line = f"已保存 {rel}（{summary}）。"
+    line = f"已{'删除' if new is None else '保存'} {rel}（{summary}）。"
     if ref:
         line += f" 历史编号 {ref}。"
     ctx.port.say(line)
@@ -379,6 +390,17 @@ def edit(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     content = args.get("content")
     changes = args.get("changes")
     exists = ws.file_exists(rel)
+    if args.get("delete") is True:
+        if rel == WORK_FILE:
+            raise WorkspaceError("作品.md 是作品的门面，不能删。")
+        if not exists:
+            raise WorkspaceError(f"没有这个文件：{rel}")
+        lines = ws.read_text(rel).count("\n")
+        title = f"删除 {rel}" + (f" · {reason}" if reason else "")
+        summary = f"删除，共 {lines} 行"
+        return _apply_edit(
+            ctx, rel, None, reason=reason, summary=summary, kind="delete", title=title
+        )
     if content is not None:
         if not isinstance(content, str):
             raise WorkspaceError("content 必须是文字。")

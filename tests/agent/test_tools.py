@@ -83,6 +83,53 @@ def test_new_formal_file_and_free_file_paths(workspace: Workspace):
     assert workspace.history(limit=1)[0].message == "整理"
 
 
+def test_delete_goes_through_approval_and_stays_in_history(chapter_workspace: Workspace):
+    from story_agent.tools import describe_call
+
+    # 正式文件：先弹卡；不批准就不动
+    port = FakePort(answers=["不"])
+    args = {"path": "章节/第01章.md", "reason": "旧稿作废", "delete": True}
+    outcome = execute(ctx_for(chapter_workspace, port), "edit", args)
+    assert "没有批准" in outcome.text and chapter_workspace.file_exists("章节/第01章.md")
+    card = port.cards[0]
+    assert card.title == "删除 章节/第01章.md · 旧稿作废" and card.kind == "delete"
+    assert port.cards[0].summary.startswith("删除，共 ") and "-他没有下去。" in port.cards[0].diff
+    assert describe_call("edit", args) == "修改(章节/第01章.md · 删除 · 旧稿作废)"
+    # 批准：文件没了，历史里有这一笔，restore 能找回
+    port = FakePort(answers=[""])
+    before = commits(chapter_workspace)
+    outcome = execute(ctx_for(chapter_workspace, port), "edit", args)
+    assert "已删除 章节/第01章.md" in outcome.text and not outcome.is_error
+    assert not chapter_workspace.file_exists("章节/第01章.md")
+    assert chapter_workspace.chapters() == []
+    latest = chapter_workspace.history(limit=1)[0]
+    assert commits(chapter_workspace) == before + 1 and latest.message == "旧稿作废"
+    assert latest.files == ("章节/第01章.md",)
+    older = chapter_workspace.history(limit=2)[1]
+    port = FakePort(answers=[""])
+    execute(
+        ctx_for(chapter_workspace, port),
+        "history",
+        {"action": "restore", "path": "章节/第01章.md", "ref": older.ref},
+    )
+    assert "他没有下去。" in chapter_workspace.read_text("章节/第01章.md")
+    # 自由文件直接删，不弹卡；作品.md 和不存在的文件不能删
+    chapter_workspace.write_text("草稿/旧稿归档.md", "# 旧稿\n")
+    port = FakePort()
+    outcome = execute(
+        ctx_for(chapter_workspace, port),
+        "edit",
+        {"path": "草稿/旧稿归档.md", "reason": "清掉", "delete": True},
+    )
+    assert not outcome.is_error and not port.cards
+    assert not chapter_workspace.file_exists("草稿/旧稿归档.md")
+    for path, message in (("作品.md", "不能删"), ("草稿/没有.md", "没有这个文件")):
+        outcome = execute(
+            ctx_for(chapter_workspace, port), "edit", {"path": path, "reason": "x", "delete": True}
+        )
+        assert outcome.is_error and message in outcome.text, path
+
+
 def test_edit_rejects_bad_changes_and_forbidden_paths(chapter_workspace: Workspace):
     port = FakePort(answers=[""])
     ctx = ctx_for(chapter_workspace, port)
