@@ -164,7 +164,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
 
 TOOL_NAMES = frozenset(spec.name for spec in TOOL_SPECS)
 
-_LABEL = {
+LABELS = {
     "read": "读取",
     "search": "搜索",
     "edit": "修改",
@@ -193,7 +193,7 @@ def describe_call(name: str, args: dict[str, Any] | None) -> str:
             short = value.strip().splitlines()[0]
             parts.append(short if len(short) <= 24 else short[:24] + "…")
             break
-    label = _LABEL.get(name, name)
+    label = LABELS.get(name, name)
     return f"{label}({' · '.join(parts)})" if parts else f"{label}()"
 
 

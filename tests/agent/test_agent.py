@@ -450,7 +450,7 @@ def test_compaction_disables_thinking_and_review_gets_longer_time(chapter_worksp
     }
 
 
-def test_connection_error_retries_once_before_giving_up(chapter_workspace):
+def test_connection_error_is_retried_automatically(chapter_workspace):
     from story_agent.provider import is_retryable
 
     # 连接层错误可以安全重试；鉴权、参数错误不行
@@ -472,15 +472,50 @@ def test_connection_error_retries_once_before_giving_up(chapter_workspace):
     agent, port, clients = make_agent(chapter_workspace, script)
     result = agent.handle("是不是可以完全丢弃管网的设计")
     assert result.reply == "好的。" and not result.failed
-    assert "网络没连上，正在重试……" in port.output and len(clients.calls) == 2
-    assert "连接出错，自动重试一次" in (chapter_workspace.root / ".story" / "日志.txt").read_text()
+    assert "网络没连上，1 秒后重试（第 1 次）" in port.output and len(clients.calls) == 2
+    assert (
+        "连接出错，1 秒后重试第 1 次"
+        in (chapter_workspace.root / ".story" / "日志.txt").read_text()
+    )
 
 
-def test_two_connection_errors_in_a_row_give_up_and_mark_the_turn_failed(chapter_workspace):
-    script = [Reply(error="APIConnectionError · x", retryable=True)] * 2
-    agent, port, _ = make_agent(chapter_workspace, script)
+def test_gives_up_after_the_last_retry(chapter_workspace):
+    from story_agent.agent import RETRY_DELAYS
+
+    script = [Reply(error="APIConnectionError · x", retryable=True)] * (len(RETRY_DELAYS) + 1)
+    agent, port, clients = make_agent(chapter_workspace, script)
     result = agent.handle("那句话")
-    assert result.failed and "请求失败（APIConnectionError · x）" in port.output
+    assert result.failed and len(clients.calls) == len(RETRY_DELAYS) + 1
+    assert "请求失败（APIConnectionError · x）" in port.output
+    log = (chapter_workspace.root / ".story" / "日志.txt").read_text()
+    assert f"重试 {len(RETRY_DELAYS)} 次仍未接通" in log
+
+
+def test_a_turn_cut_halfway_says_what_landed_and_records_it(chapter_workspace):
+    from story_agent.agent import RETRY_DELAYS
+
+    script = [
+        Reply(
+            "我来记一下。",
+            (
+                use(
+                    "edit",
+                    "e",
+                    path="故事状态.md",
+                    reason="记一下",
+                    content="# 故事状态\n\n改过了。\n",
+                ),
+            ),
+        ),
+        *[Reply(error="APIConnectionError · x", retryable=True)] * (len(RETRY_DELAYS) + 1),
+    ]
+    agent, port, _ = make_agent(chapter_workspace, script)
+    result = agent.handle("记一下状态")
+    assert result.failed and result.tools == ("edit",)
+    assert "断开前这一轮已经做了：修改；这些改动都在。" in port.output
+    assert "改过了。" in chapter_workspace.read_text("故事状态.md")  # 做过的事不白做
+    rows = transcript_rows(chapter_workspace)
+    assert rows[-1]["role"] == "assistant" and "这一轮没说完。已经做了：修改" in rows[-1]["text"]
 
 
 def test_a_billed_failure_is_never_retried(chapter_workspace):

@@ -33,6 +33,8 @@ from story_agent.workspace import (
 )
 
 MAX_CALLS_PER_TURN = 40
+# 连接层出错且一个字都没收到时重试；间隔逐次拉长，等作者按 Esc 就不再等
+RETRY_DELAYS = (1.0, 3.0, 8.0)
 # 附在每轮作者发言末尾、只发给模型不落库的提醒；对不太听系统提示的模型有用。
 TURN_REMINDER = "\n\n（提醒：说人话，别复述我的话；动手之前先 skill 查对应的方法。）"
 # 压缩旧对话按上下文预算触发，不按条数：条数触发会在远没用满时白等一次模型调用。
@@ -390,6 +392,7 @@ class Agent:
         calls = 0
         reply_parts: list[str] = []
         stopped_early = cancelled = failed = False
+        interrupted_work = ""
         while True:
             if cancel.is_set():
                 cancelled = True
@@ -411,7 +414,15 @@ class Agent:
                 + (f" · {failure}" if failure else "")
             )
             if failure:
+                done = "、".join(dict.fromkeys(toolbox.LABELS.get(n, n) for n in session.executed))
+                if done:
+                    failure += f" 断开前这一轮已经做了：{done}；这些改动都在。"
+                    interrupted_work = done
                 self.port.say(failure)
+                if done:
+                    ws.append_transcript(
+                        "assistant", f"（网络中断，这一轮没说完。已经做了：{done}。）"
+                    )
             if text:
                 reply_parts.append(text)
             if not ok:
@@ -447,6 +458,10 @@ class Agent:
         final = "\n\n".join(part for part in reply_parts if part.strip())
         if final:
             ws.append_transcript("assistant", final)
+        if interrupted_work:  # 重开之后也知道这一轮做到哪儿了
+            ws.append_transcript(
+                "assistant", f"（网络中断，这一轮没说完。已经做了：{interrupted_work}。）"
+            )
         return TurnResult(final, calls, tuple(session.executed), stopped_early, failed=failed)
 
     def _call(
@@ -498,11 +513,18 @@ class Agent:
         text = "".join(parts)
         if cancel.is_set():
             return text, (), False, None
-        if final is EventKind.ERROR and retryable and not parts and not uses and attempt == 0:
-            # 连接层出错且一个字都没收到：请求没到模型，没有费用，重试一次
-            self.workspace.append_log(f"连接出错，自动重试一次：{error}")
-            self.port.say("网络没连上，正在重试……")
-            return self._call(cancel, attempt + 1)
+        if final is EventKind.ERROR and retryable and not parts and not uses:
+            # 连接层出错且一个字都没收到：请求没到模型，没有费用，等一会儿重试
+            if attempt < len(RETRY_DELAYS):
+                delay = RETRY_DELAYS[attempt]
+                self.workspace.append_log(
+                    f"连接出错，{delay:.0f} 秒后重试第 {attempt + 1} 次：{error}"
+                )
+                self.port.say(f"网络没连上，{delay:.0f} 秒后重试（第 {attempt + 1} 次）……")
+                if cancel.wait(delay):  # 等待期间作者按了 Esc
+                    return text, (), False, None
+                return self._call(cancel, attempt + 1)
+            self.workspace.append_log(f"连接出错，重试 {len(RETRY_DELAYS)} 次仍未接通：{error}")
         if final is not EventKind.COMPLETED:
             reason = {
                 EventKind.TRUNCATED: "输出被截断",
