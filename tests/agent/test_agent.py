@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from story_agent.agent import Agent, fit_transcript, history_to_transcript
+from story_agent.agent import NUDGE, Agent, fit_transcript, history_to_transcript
 from story_agent.provider import CancelSignal, ChatMessage, TextBlock, ToolResultBlock
 from story_agent.workspace import Workspace
 from tests.agent.conftest import CHAPTER, CONFIG, FakePort, Reply, scripted_clients, use
@@ -552,6 +552,44 @@ def test_thinking_only_reply_is_retried_then_reported(chapter_workspace):
     assert result.reply == "" and len(clients.calls) == 2
     assert "只给了思考过程，没有正文" in port.output and "没有记进对话" in port.output
     assert transcript_rows(chapter_workspace)[-1]["role"] == "author"  # 确实没存助手消息
+
+
+def test_a_promise_without_tools_is_nudged_once(chapter_workspace):
+    # 模型说「你等我改完」就停（实录 09-22 15:04）：催一次，让它这一轮真的去做
+    script = [
+        Reply("三矿定稿。你等我改完。"),
+        Reply("", (use("read", "r", path="章节/第01章.md"),)),
+        Reply("改好了。"),
+    ]
+    agent, port, clients = make_agent(chapter_workspace, script)
+    result = agent.handle("井火，焦炭")
+    assert len(clients.calls) == 3 and result.tools == ("read",)
+    assert "催它接着做" in port.output
+    nudge = clients.calls[1][-1]
+    assert nudge.role == "user" and nudge.content == NUDGE
+    assert transcript_rows(chapter_workspace)[-1]["text"] == "三矿定稿。你等我改完。\n\n改好了。"
+
+    # 催过之后再停就随它，不会没完没了
+    script = [Reply("你等我。"), Reply("我先读一下现在这些文件的内容再动手。")]
+    agent, port, clients = make_agent(chapter_workspace, script)
+    result = agent.handle("你改完了吗")
+    assert len(clients.calls) == 2 and result.reply.endswith("再动手。")
+
+    # 问作者、报下一步、平常叙述，都不算没做完
+    for text in ("要改成哪个？", "下一步我来写第二章。", "你先看看这个方案。", "这就是问题所在。"):
+        agent, port, clients = make_agent(chapter_workspace, [Reply(text)])
+        agent.handle("嗯")
+        assert len(clients.calls) == 1, text
+
+
+def test_thinking_only_retry_logs_the_tail_of_the_thought(chapter_workspace):
+    # 只给思考时把思考末尾记进日志，出问题能看到它到底在想什么
+    agent, port, clients = make_agent(
+        chapter_workspace, [Reply("", thinking="先读设定再改矿名"), Reply("好。")]
+    )
+    agent.handle("井火")
+    log = (chapter_workspace.root / ".story" / "日志.txt").read_text(encoding="utf-8")
+    assert "思考末尾：先读设定再改矿名" in log
 
 
 def test_a_tool_only_turn_is_not_treated_as_empty(chapter_workspace):
