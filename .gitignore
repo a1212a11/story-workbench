@@ -26,3 +26,4 @@ project.lock
 
 # Claude Code 本地 worktree 与会话文件
 .claude/
+.DS_Store
