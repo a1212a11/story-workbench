@@ -42,6 +42,11 @@ KNOWN_PRICES: dict[str, tuple[float, float]] = {
     "google/gemini-2.5-flash": (0.30, 2.50),
     "google/gemini-2.5-pro": (1.25, 10.00),
     "deepseek/deepseek-v4.1-flash": (0.15, 0.60),
+    "deepseek/deepseek-v4-pro": (0.96, 1.91),
+    "deepseek/deepseek-pro-latest": (0.56, 1.68),
+    "moonshotai/kimi-k3": (1.70, 8.50),
+    "anthropic/claude-opus-5": (5.00, 25.00),
+    "anthropic/claude-sonnet-5": (2.00, 10.00),
 }
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 CONFIG_ENV = "STORY_WORKBENCH_CONFIG"
