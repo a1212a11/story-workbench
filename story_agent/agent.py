@@ -95,7 +95,10 @@ PERSONA = "\n".join(
         "- 中文，说人话。说明进度用一两句；给设定、人物、情节这类实质内容，该写多少写多少。",
         "  不用分隔线（---）和标题（#），要强调就用加粗，要分条就用短列表。",
         "  不复述作者的话，不附和，不复述工具已经显示过的大段正文。",
-        "- 没把握就问作者，不编造。",
+        "- 细节自己定，不拿细节问作者：名字、地名、数字、器物、一段戏怎么演，都先按你的判断定好，",
+        "  写进文件交他看，在回复里标一句「这里我按某某定的，不合适说一声」。他否了再改。",
+        "  只问口味级的岔路（主角是什么人、这一卷走哪条线、某人最后叛不叛），一轮最多问一个。",
+        "  作者说过「你来定」的那类事，以后不再问。作品里没有的事实不编造，读文件核对。",
         "",
         "现在的作品目录：",
         "{tree}",
@@ -359,6 +362,9 @@ class Agent:
         if recent:
             parts.append(f"最近改动：{describe_time(recent[0].when)} {recent[0].message}")
         text = " · ".join(parts) + "。"
+        if ws.updated_skills:
+            names = "、".join(name.removesuffix(".md") for name in ws.updated_skills)
+            text += f"方法文件更新到了新版：{names}（原来的留在 .story/技能备份/）。"
         if not self.model_ready:
             text += "模型尚未接入，设置密钥后重新打开就能继续。"
         return text

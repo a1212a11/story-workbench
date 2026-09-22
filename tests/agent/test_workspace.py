@@ -51,6 +51,35 @@ def test_open_requires_work_file_and_keeps_author_skill_edits(tmp_path, workspac
     assert reopened.read_text("技能/写章.md") == "# 我自己的写法\n"
 
 
+def test_open_updates_untouched_skills_and_backs_up_unrecorded_ones(workspace, monkeypatch):
+    from story_agent import workspace as wsmod
+
+    shipped = (workspace.root / "技能" / "共创.md").read_text(encoding="utf-8")
+    # 程序发了新版、作者没动过：跟着更新
+    fake = workspace.root.parent / "skills"
+    fake.mkdir()
+    for path in wsmod.SKILLS_SOURCE.glob("*.md"):
+        (fake / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    (fake / "共创.md").write_text(shipped + "\n新版多了一段。\n", encoding="utf-8")
+    monkeypatch.setattr(wsmod, "SKILLS_SOURCE", fake)
+    reopened = Workspace.open(workspace.root)
+    assert reopened.updated_skills == ("共创.md",)
+    assert reopened.read_text("技能/共创.md").endswith("新版多了一段。\n")
+    assert "技能更新到新版：共创.md" in (workspace.root / ".story" / "日志.txt").read_text()
+    # 作者改过的，新版再来也不动
+    reopened.write_text("技能/共创.md", "# 我的共创法\n")
+    (fake / "共创.md").write_text(shipped + "\n再一版。\n", encoding="utf-8")
+    again = Workspace.open(workspace.root)
+    assert again.updated_skills == () and again.read_text("技能/共创.md") == "# 我的共创法\n"
+    # 老作品没有记录：更新，原来那份留备份
+    (workspace.root / ".story" / "技能.json").unlink()
+    once_more = Workspace.open(workspace.root)
+    assert once_more.updated_skills == ("共创.md",)
+    assert once_more.read_text("技能/共创.md").endswith("再一版。\n")
+    backups = list((workspace.root / ".story" / "技能备份").glob("共创-*.md"))
+    assert len(backups) == 1 and backups[0].read_text(encoding="utf-8") == "# 我的共创法\n"
+
+
 @pytest.mark.parametrize(
     "bad", ["/etc/passwd", "../x.md", "章节/../../x", ".git/config", ".story/a", "~/a"]
 )

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,8 @@ DRAFTS_DIR = "草稿"
 SKILLS_DIR = "技能"
 TRANSCRIPT_DIR = "对话"
 PRIVATE_DIR = ".story"
+SKILLS_RECORD = "技能.json"  # .story/ 里：装进去的每份技能的内容哈希，用来分辨作者改没改
+SKILLS_BACKUP_DIR = "技能备份"
 
 FORMAL_FILES = frozenset({WORK_FILE, OUTLINE_FILE, DECISIONS_FILE})
 FORMAL_DIRS = (SETTINGS_DIR, CHARACTERS_DIR, CHAPTERS_DIR)
@@ -198,12 +201,17 @@ class Git:
         return self.commit(message)
 
 
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 class Workspace:
     """一个作品目录。所有路径都是相对于目录的 POSIX 字符串。"""
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root).resolve()
         self.git = Git(self.root)
+        self.updated_skills: tuple[str, ...] = ()  # 这次打开时跟着新版更新了的技能
 
     # ------------------------------------------------------------ 打开与初始化
 
@@ -250,18 +258,55 @@ class Workspace:
             raise WorkspaceError(f"这里还没有作品：{root}")
         (ws.root / PRIVATE_DIR).mkdir(exist_ok=True)
         (ws.root / TRANSCRIPT_DIR).mkdir(exist_ok=True)
-        ws.install_skills(overwrite=False)
+        updated = ws.install_skills()
+        if updated:
+            ws.updated_skills = tuple(updated)
+            ws.append_log("技能更新到新版：" + "、".join(updated))
         ws.git.init()
         return ws
 
-    def install_skills(self, overwrite: bool = False) -> None:
-        """把默认技能复制到作品目录；作者改过的不覆盖。"""
+    def install_skills(self, overwrite: bool = False) -> list[str]:
+        """把默认技能复制到作品目录。
+
+        作者改过的不覆盖；没改过的跟着程序的新版更新。靠 .story/技能.json 里记的哈希分辨：
+        老作品没有记录，分不清是作者改的还是旧版，就更新并把原来那份留在 .story/技能备份/。
+        返回这次更新了的文件名。
+        """
         target = self.root / SKILLS_DIR
         target.mkdir(exist_ok=True)
+        record_path = self.root / PRIVATE_DIR / SKILLS_RECORD
+        record: dict[str, str] = {}
+        if record_path.is_file():
+            try:
+                loaded = json.loads(record_path.read_text(encoding="utf-8"))
+                record = {k: v for k, v in loaded.items() if isinstance(v, str)}
+            except (OSError, ValueError, AttributeError):
+                record = {}
+        updated: list[str] = []
         for source in sorted(SKILLS_SOURCE.glob("*.md")):
             dest = target / source.name
-            if overwrite or not dest.exists():
-                shutil.copyfile(source, dest)
+            shipped = source.read_text(encoding="utf-8")
+            if dest.exists() and not overwrite:
+                current = dest.read_text(encoding="utf-8")
+                if current == shipped:
+                    record[source.name] = _digest(shipped)
+                    continue
+                known = record.get(source.name)
+                if known is not None and known != _digest(current):
+                    continue  # 作者改过，尊重他的版本
+                if known is None:
+                    backup_dir = self.root / PRIVATE_DIR / SKILLS_BACKUP_DIR
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    (backup_dir / f"{source.stem}-{stamp}.md").write_text(current, encoding="utf-8")
+                updated.append(source.name)
+            dest.write_text(shipped, encoding="utf-8")
+            record[source.name] = _digest(shipped)
+        record_path.parent.mkdir(exist_ok=True)
+        record_path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        return updated
 
     # ------------------------------------------------------------ 文件
 
