@@ -13,16 +13,18 @@ from typing import Any
 
 from story_agent.approval import Approval, ApprovalCard, AuthorPort
 from story_agent.config import AgentConfig, Clients
-from story_agent.provider import CancelSignal, ToolSpec
-from story_agent.workspace import (
+from story_agent.layout import (
+    FORMAL_DESCRIPTION,
+    FREE_DESCRIPTION,
     SKILLS_DIR,
+    TRANSCRIPT_DIR,
     WORK_FILE,
-    Workspace,
     WorkspaceError,
-    describe_time,
     is_formal,
     normalize,
 )
+from story_agent.provider import CancelSignal, ToolSpec
+from story_agent.workspace import Workspace, describe_time
 
 PAID_TOOLS = frozenset({"review", "rewrite"})
 SKILLS = {
@@ -74,9 +76,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     _spec(
         "edit",
         "唯一的写文件工具。给 changes（若干处 old→new 定点替换，old 必须在文件里恰好出现一次）"
-        "或 content（整个文件的新内容，用于新建或重写）。正式文件（作品.md、大纲.md、决定.md、"
-        "设定/、人物/、章节/）会先弹审批卡给作者看 diff，作者不批准则文件不变，你会拿到作者的意见。"
-        "自由文件（故事状态.md、草稿/、技能/）直接保存。"
+        "或 content（整个文件的新内容，用于新建或重写）。"
+        f"正式文件（{FORMAL_DESCRIPTION}）会先弹审批卡给作者看 diff，"
+        "作者不批准则文件不变，你会拿到作者的意见。"
+        f"自由文件（{FREE_DESCRIPTION}）直接保存。"
         "delete 为 true 时删除这个文件（正式文件同样先审批）：作废的旧章、旧草稿直接删，"
         "不要归档到别处，历史里都在，history restore 能找回。"
         "reason 用一句人话说明这次改动，会写进历史。"
@@ -401,7 +404,7 @@ def search(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
 def edit(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     ws = ctx.workspace
     rel = normalize(_text(args, "path", required=True) or "")
-    if rel.startswith("对话/"):
+    if rel.startswith(TRANSCRIPT_DIR + "/"):
         raise WorkspaceError("对话记录由程序维护，不能改。")
     reason = (_text(args, "reason") or "").strip()
     content = args.get("content")
@@ -581,7 +584,7 @@ def skill(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
 def open_editor(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     ws = ctx.workspace
     rel = normalize(_text(args, "path", required=True) or "")
-    if rel.startswith("对话/"):
+    if rel.startswith(TRANSCRIPT_DIR + "/"):
         raise WorkspaceError("对话记录由程序维护，不能改。")
     initial = ws.read_text(rel) if ws.file_exists(rel) else ""
     edited = ctx.port.edit(initial, rel)

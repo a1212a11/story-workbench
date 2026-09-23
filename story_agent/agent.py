@@ -15,6 +15,16 @@ from dataclasses import dataclass, replace
 from story_agent import tools as toolbox
 from story_agent.approval import AuthorPort
 from story_agent.config import AgentConfig, Clients, estimate_tokens
+from story_agent.layout import (
+    NOTES_FILE,
+    OUTLINE_FILE,
+    PRIVATE_DIR,
+    SKILLS_BACKUP_DIR,
+    SKILLS_DIR,
+    STATE_FILE,
+    TRANSCRIPT_DIR,
+    WORK_FILE,
+)
 from story_agent.provider import (
     CancelSignal,
     ChatMessage,
@@ -24,14 +34,7 @@ from story_agent.provider import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from story_agent.workspace import (
-    OUTLINE_FILE,
-    SKILLS_DIR,
-    STATE_FILE,
-    WORK_FILE,
-    Workspace,
-    describe_time,
-)
+from story_agent.workspace import Workspace, describe_time
 
 MAX_CALLS_PER_TURN = 40
 # 连接层出错且一个字都没收到时重试；间隔逐次拉长，等作者按 Esc 就不再等
@@ -45,7 +48,6 @@ _PROMISE = re.compile(r"等我|你等|稍等|我这就|我马上|我现在就|�
 COMPACT_AT = 0.7  # 估算超过预算的七成才压缩
 COMPACT_TARGET = 0.4  # 压到预算的四成，留出往后聊的余地
 KEEP_RECENT = 20  # 压缩时最近这么多条原样保留
-NOTES_FILE = "草稿/代理笔记.md"
 NOTES_LIMIT = 2_000
 SUMMARY_LIMIT = 600
 SUMMARY_SYSTEM = "\n".join(
@@ -259,7 +261,7 @@ class Agent:
         ws = self.workspace
         lines = []
         for rel in ws.all_files():
-            if rel.startswith(SKILLS_DIR + "/") or rel.startswith("对话/"):
+            if rel.startswith(SKILLS_DIR + "/") or rel.startswith(TRANSCRIPT_DIR + "/"):
                 continue
             size = len(ws.read_text(rel))
             lines.append(f"  {rel}（{size} 字）")
@@ -366,7 +368,8 @@ class Agent:
         text = " · ".join(parts) + "。"
         if ws.updated_skills:
             names = "、".join(name.removesuffix(".md") for name in ws.updated_skills)
-            text += f"方法文件更新到了新版：{names}（原来的留在 .story/技能备份/）。"
+            backup = f"{PRIVATE_DIR}/{SKILLS_BACKUP_DIR}/"
+            text += f"方法文件更新到了新版：{names}（原来的留在 {backup}）。"
         if not self.model_ready:
             text += "模型尚未接入，设置密钥后重新打开就能继续。"
         return text

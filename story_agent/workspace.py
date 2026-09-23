@@ -15,67 +15,34 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+
+from story_agent.layout import (
+    CHAPTER_PATTERN,
+    CHAPTERS_DIR,
+    CHARACTERS_DIR,
+    DRAFTS_DIR,
+    HIDDEN_DIRS,
+    LOG_FILE,
+    PRIVATE_DIR,
+    REWIND_PREFIX,
+    SETTINGS_DIR,
+    SKILLS_BACKUP_DIR,
+    SKILLS_DIR,
+    SKILLS_RECORD,
+    SUMMARY_RECORD,
+    TEMPLATES,
+    TRANSCRIPT_DIR,
+    TRANSCRIPT_RECORD,
+    USAGE_RECORD,
+    WORK_FILE,
+    WorkspaceError,
+    normalize,
+)
+from story_agent.layout import chapter_file as chapter_file
+from story_agent.layout import is_formal as is_formal
 
 SKILLS_SOURCE = Path(__file__).parent / "skills"
-
-WORK_FILE = "作品.md"
-OUTLINE_FILE = "大纲.md"
-STATE_FILE = "故事状态.md"
-DECISIONS_FILE = "决定.md"
-SETTINGS_DIR = "设定"
-CHARACTERS_DIR = "人物"
-CHAPTERS_DIR = "章节"
-DRAFTS_DIR = "草稿"
-SKILLS_DIR = "技能"
-TRANSCRIPT_DIR = "对话"
-PRIVATE_DIR = ".story"
-SKILLS_RECORD = "技能.json"  # .story/ 里：装进去的每份技能的内容哈希，用来分辨作者改没改
-SKILLS_BACKUP_DIR = "技能备份"
-
-FORMAL_FILES = frozenset({WORK_FILE, OUTLINE_FILE, DECISIONS_FILE})
-FORMAL_DIRS = (SETTINGS_DIR, CHARACTERS_DIR, CHAPTERS_DIR)
-HIDDEN_DIRS = (".git", PRIVATE_DIR)
-CHAPTER_PATTERN = re.compile(r"^第(\d{2,3})章\.md$")
-
-_TEMPLATES = {
-    OUTLINE_FILE: "# 大纲\n\n（全书走向；每章一段：剧情、结尾状态、状态。还没有内容。）\n",
-    STATE_FILE: (
-        "# 故事状态\n\n"
-        "（到目前为止正文确立的事实、各人物知道什么、读者知道什么、未回收的线索。"
-        "由代理在每章定稿后更新。）\n"
-    ),
-    DECISIONS_FILE: "# 作者决定\n\n（追加日志，带日期；已有条目不改写。）\n",
-}
-
-
-class WorkspaceError(Exception):
-    """面向作者的错误说明，中文。"""
-
-
-def normalize(path: str) -> str:
-    """把模型或作者给的路径规范成相对于作品目录的 POSIX 路径；拒绝越界与隐藏目录。"""
-    text = str(path).strip().replace("\\", "/")
-    if not text or text.startswith("/") or text.startswith("~"):
-        raise WorkspaceError("路径必须是作品目录里的相对路径。")
-    parts = [p for p in PurePosixPath(text).parts if p not in ("", ".")]
-    if not parts or any(p == ".." for p in parts):
-        raise WorkspaceError("路径不能离开作品目录。")
-    if parts[0] in HIDDEN_DIRS:
-        raise WorkspaceError("这个目录不对作者和代理开放。")
-    return "/".join(parts)
-
-
-def is_formal(rel: str) -> bool:
-    """正式文件：作品.md、大纲.md、决定.md 与设定/、人物/、章节/ 下的一切。"""
-    rel = normalize(rel)
-    if rel in FORMAL_FILES:
-        return True
-    return rel.split("/", 1)[0] in FORMAL_DIRS
-
-
-def chapter_file(number: int) -> str:
-    return f"{CHAPTERS_DIR}/第{number:02d}章.md"
 
 
 def describe_time(moment: datetime, now: datetime | None = None) -> str:
@@ -246,7 +213,7 @@ class Workspace:
             "## 文风约定\n\n（写正文的硬约定，一条一行：视角与人称、引号样式、"
             "计时用这个世界的说法、句长节奏、幽默怎么用。）\n",
         )
-        for name, template in _TEMPLATES.items():
+        for name, template in TEMPLATES.items():
             ws._write_raw(name, template)
         ws.install_skills()
         ws._write_raw(".gitignore", f"{PRIVATE_DIR}/\n")
@@ -421,7 +388,7 @@ class Workspace:
             head = self.git.head()
             if head:
                 record["head"] = head  # 说这句话时文件的状态，撤回时用
-        with self._private("对话.jsonl").open("a", encoding="utf-8") as handle:
+        with self._private(TRANSCRIPT_RECORD).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         prefix = {"author": "> ", "assistant": "⏺ ", "system": "· "}.get(role, "")
         daily = self.root / TRANSCRIPT_DIR / f"{now:%Y-%m-%d}.md"
@@ -434,7 +401,7 @@ class Workspace:
 
     def all_records(self) -> list[dict]:
         """对话记录的原始条目（含审批等系统条目），按时间顺序。"""
-        path = self._private("对话.jsonl")
+        path = self._private(TRANSCRIPT_RECORD)
         if not path.exists():
             return []
         records = []
@@ -474,10 +441,10 @@ class Workspace:
             raise WorkspaceError("没有这条记录。")
         removed = records[index:]
         stamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
-        self._private(f"撤回-{stamp}.jsonl").write_text(
+        self._private(f"{REWIND_PREFIX}{stamp}.jsonl").write_text(
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in removed), encoding="utf-8"
         )
-        self._private("对话.jsonl").write_text(
+        self._private(TRANSCRIPT_RECORD).write_text(
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records[:index]),
             encoding="utf-8",
         )
@@ -492,7 +459,7 @@ class Workspace:
 
     def read_summary(self) -> tuple[str, int]:
         """对话摘要与它覆盖到的对话条数。"""
-        path = self._private("摘要.json")
+        path = self._private(SUMMARY_RECORD)
         if not path.exists():
             return "", 0
         try:
@@ -502,7 +469,7 @@ class Workspace:
         return str(data.get("summary", "")), int(data.get("covered", 0))
 
     def write_summary(self, summary: str, covered: int) -> None:
-        self._private("摘要.json").write_text(
+        self._private(SUMMARY_RECORD).write_text(
             json.dumps({"summary": summary, "covered": covered}, ensure_ascii=False, indent=1),
             encoding="utf-8",
         )
@@ -510,7 +477,7 @@ class Workspace:
     def append_log(self, line: str) -> None:
         """开发者日志 .story/日志.txt：模型调用、工具调用与结果摘要、错误。总是写。"""
         stamp = datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        with self._private("日志.txt").open("a", encoding="utf-8") as handle:
+        with self._private(LOG_FILE).open("a", encoding="utf-8") as handle:
             handle.write(f"{stamp} {line.rstrip()}\n")
 
     def record_usage(self, usage: dict[str, int], model: str, purpose: str) -> None:
@@ -520,5 +487,5 @@ class Workspace:
             "purpose": purpose,
             **{k: int(v) for k, v in usage.items()},
         }
-        with self._private("用量.jsonl").open("a", encoding="utf-8") as handle:
+        with self._private(USAGE_RECORD).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")

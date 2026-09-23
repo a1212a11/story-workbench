@@ -10,8 +10,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from story_agent.config import estimate_tokens
-from story_agent.provider import ChatMessage, ProviderError
-from story_agent.workspace import (
+from story_agent.layout import (
     CHARACTERS_DIR,
     OUTLINE_FILE,
     SETTINGS_DIR,
@@ -20,6 +19,7 @@ from story_agent.workspace import (
     WORK_FILE,
     WorkspaceError,
 )
+from story_agent.provider import ChatMessage, ProviderError
 
 if TYPE_CHECKING:
     from story_agent.tools import ToolContext
