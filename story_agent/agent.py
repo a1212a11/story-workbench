@@ -465,7 +465,11 @@ class Agent:
                     results.append(ToolResultBlock(use.id, "作者中断了这一轮。", is_error=True))
                     continue
                 self._notify(
-                    "tool_started", use.name, toolbox.describe_call(use.name, use.input), use.input
+                    "tool_started",
+                    use.name,
+                    toolbox.describe_call(use.name, use.input),
+                    use.input,
+                    toolbox.display_of(use.name),
                 )
                 ws.append_log(f"工具 {use.name} {_clip(json.dumps(use.input, ensure_ascii=False))}")
                 outcome = toolbox.execute(ctx, use.name, use.input)

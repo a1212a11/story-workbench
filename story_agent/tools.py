@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import difflib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,7 +27,6 @@ from story_agent.layout import (
 from story_agent.provider import CancelSignal, ToolSpec
 from story_agent.workspace import Workspace, describe_time
 
-PAID_TOOLS = frozenset({"review", "rewrite"})
 SKILLS = {
     "开书": "目录还空着，从一句想法起步",
     "共创": "和作者一起设计世界观、人物、体系、大纲",
@@ -57,148 +57,11 @@ def _spec(name: str, description: str, properties: dict, required=()) -> ToolSpe
 
 _PATH = {"type": "string", "description": "作品目录里的相对路径，例如 章节/第02章.md"}
 
-TOOL_SPECS: tuple[ToolSpec, ...] = (
-    _spec(
-        "read",
-        "读一个文件的全文，或列出一个目录。正文会完整显示给作者。省略 path 列出作品目录。",
-        {"path": _PATH},
-    ),
-    _spec(
-        "search",
-        "在作品目录里全文搜索，返回 文件:行号: 内容。默认按原文匹配，regex 为 true 时按正则。",
-        {
-            "pattern": {"type": "string", "description": "要找的文字"},
-            "path": {**_PATH, "description": "只在这个文件或目录里找；省略为全部"},
-            "regex": {"type": "boolean"},
-        },
-        ["pattern"],
-    ),
-    _spec(
-        "edit",
-        "唯一的写文件工具。给 changes（若干处 old→new 定点替换，old 必须在文件里恰好出现一次）"
-        "或 content（整个文件的新内容，用于新建或重写）。"
-        f"正式文件（{FORMAL_DESCRIPTION}）会先弹审批卡给作者看 diff，"
-        "作者不批准则文件不变，你会拿到作者的意见。"
-        f"自由文件（{FREE_DESCRIPTION}）直接保存。"
-        "delete 为 true 时删除这个文件（正式文件同样先审批）：作废的旧章、旧草稿直接删，"
-        "不要归档到别处，历史里都在，history restore 能找回。"
-        "reason 用一句人话说明这次改动，会写进历史。"
-        "要在末尾追加内容，把最后一段原文作为 old、原文加新内容作为 new；old 不能为空。",
-        {
-            "path": _PATH,
-            "reason": {
-                "type": "string",
-                "description": "这次改动的一句话说明，例如「改了守夜人的段落」",
-            },
-            "changes": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "old": {"type": "string", "description": "要替换的原文，须唯一"},
-                        "new": {"type": "string", "description": "替换后的文字"},
-                    },
-                    "required": ["old", "new"],
-                    "additionalProperties": False,
-                },
-            },
-            "content": {"type": "string", "description": "整个文件的新内容"},
-            "delete": {"type": "boolean", "description": "true 时删除这个文件"},
-        },
-        ["path", "reason"],
-    ),
-    _spec(
-        "history",
-        "改动历史。action=list 列出最近的改动（可限定 path）；action=show 看某个文件在某次改动时的"
-        "内容（需要 path 与 ref）；action=restore 把文件恢复到某次改动时的内容（需要 path 与 ref，"
-        "正式文件会弹审批卡）。ref 是 list 给出的编号。",
-        {
-            "action": {"type": "string", "enum": ["list", "show", "restore"]},
-            "path": _PATH,
-            "ref": {"type": "string", "description": "改动编号，来自 list"},
-        },
-        ["action"],
-    ),
-    _spec(
-        "verify",
-        "核对若干引用是否逐字出现在文件里。返回每条命中的行号或「没有找到」。"
-        "引用正文说话前先用它核对，别凭记忆引。",
-        {
-            "path": _PATH,
-            "quotes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-        },
-        ["path", "quotes"],
-    ),
-    _spec(
-        "review",
-        "独立审读一章（付费，会调用一次模型）。用不带对话历史的新上下文，只给这一章、作品.md、大纲、"
-        "故事状态、人物与设定和 技能/审读.md 里的清单，返回带原文引用的提醒；引用核不上的会被丢弃。"
-        "focus 可指定这次重点看什么。一轮里失败一次后不要再调。",
-        {
-            "path": _PATH,
-            "focus": {"type": "string", "description": "这次重点看什么，例如「人物认知是否越界」"},
-        },
-        ["path"],
-    ),
-    _spec(
-        "rewrite",
-        "独立重写一章（付费，会调用一次模型，用写作模型）。用不带对话历史的新上下文，只给初稿、作品.md、"
-        "大纲里本章那段、人物文件和一篇范文，从主角脑子里把这章重写一遍；大纲的剧情与结尾是它的硬约束。"
-        "返回重写后的全文，不写文件：你读一遍，把初稿里更好的句子捡回来、过火的收一收，"
-        "再用 edit 落正文。"
-        "chapter 缺省从路径里的「第NN章」推。一轮只能调一次。",
-        {
-            "path": _PATH,
-            "chapter": {"type": "integer", "description": "大纲里的章号，用来取本章剧情与结尾"},
-            "focus": {"type": "string", "description": "这次着重什么，例如「让他嘴硬一点」"},
-        },
-        ["path"],
-    ),
-    _spec(
-        "ask",
-        "问作者一个需要他拍板的问题，带 2 到 5 个选项。作者可以按上下键选一个，"
-        "也可以直接打字说别的。只在真的有岔路时用；方向已经明确就直接做，别用它凑对话。",
-        {
-            "question": {"type": "string", "description": "一句话的问题"},
-            "options": {
-                "type": "array",
-                "items": {"type": "string", "description": "一个选项，一句话说清它的味道"},
-                "minItems": 2,
-                "maxItems": 5,
-            },
-        },
-        ["question", "options"],
-    ),
-    _spec(
-        "skill",
-        "查方法：读一份写作方法，照着做。"
-        + "；".join(f"{k}（{v}）" for k, v in SKILLS.items())
-        + "。做这几类事之前先查一次。方法文件在作品目录的 技能/ 里，作者可能改过，以文件为准。",
-        {"name": {"type": "string", "description": "方法名，例如 写章"}},
-        ["name"],
-    ),
-    _spec(
-        "open_editor",
-        "打开全屏编辑器让作者自己改这个文件。只在作者说要亲自改时用。保存即视为作者批准。",
-        {"path": _PATH},
-        ["path"],
-    ),
-)
 
-TOOL_NAMES = frozenset(spec.name for spec in TOOL_SPECS)
-
-LABELS = {
-    "read": "读取",
-    "search": "搜索",
-    "edit": "修改",
-    "history": "历史",
-    "verify": "核对引用",
-    "review": "审读",
-    "rewrite": "重写",
-    "open_editor": "打开编辑器",
-    "skill": "查方法",
-    "ask": "请作者定",
-}
+def display_of(name: str) -> str:
+    """界面怎么显示这个工具：normal、quiet 或 silent；不认识的名字按 normal。"""
+    tool = TOOLS_BY_NAME.get(name)
+    return tool.display if tool else "normal"
 
 
 def describe_call(name: str, args: dict[str, Any] | None) -> str:
@@ -250,6 +113,22 @@ class ToolContext:
     config: AgentConfig | None
     session: Session
     cancel: CancelSignal = field(default_factory=CancelSignal)
+
+
+@dataclass(frozen=True, slots=True)
+class Tool:
+    """一个工具的全部属性；工具表 TOOLS 是它们的唯一来源。"""
+
+    spec: ToolSpec
+    handler: Callable[[ToolContext, dict[str, Any]], ToolOutcome]
+    label: str  # 界面上的中文名
+    paid: bool = False  # 会调用一次模型：一轮各一次，失败后本轮不再调
+    # normal：作者要看，默认展开；quiet：代理自己看的，默认折叠；silent：界面另有面板，不占一行
+    display: str = "normal"
+
+    @property
+    def name(self) -> str:
+        return self.spec.name
 
 
 def _text(args: dict[str, Any], key: str, required: bool = False) -> str | None:
@@ -601,27 +480,199 @@ def open_editor(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     return ToolOutcome(text)
 
 
-HANDLERS = {
-    "read": read,
-    "search": search,
-    "edit": edit,
-    "history": history,
-    "verify": verify,
-    "review": review,
-    "rewrite": rewrite,
-    "open_editor": open_editor,
-    "skill": skill,
-    "ask": ask,
-}
-assert set(HANDLERS) == set(TOOL_NAMES)
+TOOLS: tuple[Tool, ...] = (
+    Tool(
+        _spec(
+            "read",
+            "读一个文件的全文，或列出一个目录。正文会完整显示给作者。省略 path 列出作品目录。",
+            {"path": _PATH},
+        ),
+        read,
+        "读取",
+        display="quiet",
+    ),
+    Tool(
+        _spec(
+            "search",
+            "在作品目录里全文搜索，返回 文件:行号: 内容。默认按原文匹配，regex 为 true 时按正则。",
+            {
+                "pattern": {"type": "string", "description": "要找的文字"},
+                "path": {**_PATH, "description": "只在这个文件或目录里找；省略为全部"},
+                "regex": {"type": "boolean"},
+            },
+            ["pattern"],
+        ),
+        search,
+        "搜索",
+        display="quiet",
+    ),
+    Tool(
+        _spec(
+            "edit",
+            "唯一的写文件工具。给 changes（若干处 old→new 定点替换，old 必须在文件里恰好出现一次）"
+            "或 content（整个文件的新内容，用于新建或重写）。"
+            f"正式文件（{FORMAL_DESCRIPTION}）会先弹审批卡给作者看 diff，"
+            "作者不批准则文件不变，你会拿到作者的意见。"
+            f"自由文件（{FREE_DESCRIPTION}）直接保存。"
+            "delete 为 true 时删除这个文件（正式文件同样先审批）：作废的旧章、旧草稿直接删，"
+            "不要归档到别处，历史里都在，history restore 能找回。"
+            "reason 用一句人话说明这次改动，会写进历史。"
+            "要在末尾追加内容，把最后一段原文作为 old、原文加新内容作为 new；old 不能为空。",
+            {
+                "path": _PATH,
+                "reason": {
+                    "type": "string",
+                    "description": "这次改动的一句话说明，例如「改了守夜人的段落」",
+                },
+                "changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old": {"type": "string", "description": "要替换的原文，须唯一"},
+                            "new": {"type": "string", "description": "替换后的文字"},
+                        },
+                        "required": ["old", "new"],
+                        "additionalProperties": False,
+                    },
+                },
+                "content": {"type": "string", "description": "整个文件的新内容"},
+                "delete": {"type": "boolean", "description": "true 时删除这个文件"},
+            },
+            ["path", "reason"],
+        ),
+        edit,
+        "修改",
+    ),
+    Tool(
+        _spec(
+            "history",
+            "改动历史。action=list 列出最近的改动（可限定 path）；"
+            "action=show 看某个文件在某次改动时的内容（需要 path 与 ref）；"
+            "action=restore 把文件恢复到某次改动时的内容（需要 path 与 ref，正式文件会弹审批卡）。"
+            "ref 是 list 给出的编号。",
+            {
+                "action": {"type": "string", "enum": ["list", "show", "restore"]},
+                "path": _PATH,
+                "ref": {"type": "string", "description": "改动编号，来自 list"},
+            },
+            ["action"],
+        ),
+        history,
+        "历史",
+        display="quiet",
+    ),
+    Tool(
+        _spec(
+            "verify",
+            "核对若干引用是否逐字出现在文件里。返回每条命中的行号或「没有找到」。"
+            "引用正文说话前先用它核对，别凭记忆引。",
+            {
+                "path": _PATH,
+                "quotes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            },
+            ["path", "quotes"],
+        ),
+        verify,
+        "核对引用",
+        display="quiet",
+    ),
+    Tool(
+        _spec(
+            "review",
+            "独立审读一章（付费，会调用一次模型）。用不带对话历史的新上下文，"
+            "只给这一章、作品.md、大纲、故事状态、人物与设定和 技能/审读.md 里的清单，"
+            "返回带原文引用的提醒；引用核不上的会被丢弃。"
+            "focus 可指定这次重点看什么。一轮里失败一次后不要再调。",
+            {
+                "path": _PATH,
+                "focus": {
+                    "type": "string",
+                    "description": "这次重点看什么，例如「人物认知是否越界」",
+                },
+            },
+            ["path"],
+        ),
+        review,
+        "审读",
+        paid=True,
+    ),
+    Tool(
+        _spec(
+            "rewrite",
+            "独立重写一章（付费，会调用一次模型，用写作模型）。用不带对话历史的新上下文，只给初稿、作品.md、"
+            "大纲里本章那段、人物文件和一篇范文，从主角脑子里把这章重写一遍；大纲的剧情与结尾是它的硬约束。"
+            "返回重写后的全文，不写文件：你读一遍，把初稿里更好的句子捡回来、过火的收一收，"
+            "再用 edit 落正文。"
+            "chapter 缺省从路径里的「第NN章」推。一轮只能调一次。",
+            {
+                "path": _PATH,
+                "chapter": {"type": "integer", "description": "大纲里的章号，用来取本章剧情与结尾"},
+                "focus": {"type": "string", "description": "这次着重什么，例如「让他嘴硬一点」"},
+            },
+            ["path"],
+        ),
+        rewrite,
+        "重写",
+        paid=True,
+    ),
+    Tool(
+        _spec(
+            "ask",
+            "问作者一个需要他拍板的问题，带 2 到 5 个选项。作者可以按上下键选一个，"
+            "也可以直接打字说别的。只在真的有岔路时用；方向已经明确就直接做，别用它凑对话。",
+            {
+                "question": {"type": "string", "description": "一句话的问题"},
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string", "description": "一个选项，一句话说清它的味道"},
+                    "minItems": 2,
+                    "maxItems": 5,
+                },
+            },
+            ["question", "options"],
+        ),
+        ask,
+        "请作者定",
+        display="silent",
+    ),
+    Tool(
+        _spec(
+            "skill",
+            "查方法：读一份写作方法，照着做。"
+            + "；".join(f"{k}（{v}）" for k, v in SKILLS.items())
+            + "。做这几类事之前先查一次。方法文件在作品目录的 技能/ 里，作者可能改过，以文件为准。",
+            {"name": {"type": "string", "description": "方法名，例如 写章"}},
+            ["name"],
+        ),
+        skill,
+        "查方法",
+        display="quiet",
+    ),
+    Tool(
+        _spec(
+            "open_editor",
+            "打开全屏编辑器让作者自己改这个文件。只在作者说要亲自改时用。保存即视为作者批准。",
+            {"path": _PATH},
+            ["path"],
+        ),
+        open_editor,
+        "打开编辑器",
+    ),
+)
+TOOLS_BY_NAME = {tool.name: tool for tool in TOOLS}
+TOOL_SPECS: tuple[ToolSpec, ...] = tuple(tool.spec for tool in TOOLS)
+TOOL_NAMES = frozenset(TOOLS_BY_NAME)
+LABELS = {tool.name: tool.label for tool in TOOLS}
+PAID_TOOLS = frozenset(tool.name for tool in TOOLS if tool.paid)
 
 
 def execute(ctx: ToolContext, name: str, args: dict[str, Any] | None) -> ToolOutcome:
     """执行一个工具调用，返回给模型的文字结果。"""
-    handler = HANDLERS.get(name)
-    if handler is None:
+    tool = TOOLS_BY_NAME.get(name)
+    if tool is None:
         return ToolOutcome(f"没有名为 {name} 的工具。", is_error=True)
-    if name in PAID_TOOLS:
+    if tool.paid:
         if ctx.session.paid_failed:
             return ToolOutcome(
                 "本轮已有一次模型请求失败，不再自动发起新的付费请求；把情况告诉作者，由作者决定是否重试。",
@@ -630,19 +681,18 @@ def execute(ctx: ToolContext, name: str, args: dict[str, Any] | None) -> ToolOut
         if ctx.clients is None or ctx.config is None:
             return ToolOutcome("模型尚未接入（没有密钥），不能发起付费调用。", is_error=True)
         if name in ctx.session.paid_done:
-            label = LABELS.get(name, name)
             return ToolOutcome(
-                f"这一轮已经{label}过一次，不再重复；先按结果改，作者要再来一遍就下一轮。",
+                f"这一轮已经{tool.label}过一次，不再重复；先按结果改，作者要再来一遍就下一轮。",
                 is_error=True,
             )
     ctx.session.executed.append(name)
     try:
-        outcome = handler(ctx, dict(args or {}))
-        if name in PAID_TOOLS:
+        outcome = tool.handler(ctx, dict(args or {}))
+        if tool.paid:
             ctx.session.paid_done.append(name)
         return outcome
     except WorkspaceError as exc:
-        paid = name in PAID_TOOLS
+        paid = tool.paid
         if paid:
             ctx.session.paid_failed = True
         ctx.port.say(f"没有完成：{exc}")

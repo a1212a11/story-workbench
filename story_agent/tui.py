@@ -104,10 +104,6 @@ QUIT_CONFIRM_SECONDS = 2.0
 REWIND_CONFIRM_SECONDS = 1.5  # 空闲时两次 Esc 的间隔上限
 REWIND_COOLDOWN_SECONDS = 3.0  # 刚中断过的这几秒里，Esc 只当中断，不进入撤回
 REWIND_CHOICES = 10
-# 这些工具的输出是代理自己看的，默认折叠成一行；修改、审读、编辑器的输出作者必须看，默认展开。
-QUIET_TOOLS = frozenset({"read", "search", "verify", "history", "skill"})
-# 这些工具的界面另有其人（选项面板），对话里不用再占一行
-SILENT_TOOLS = frozenset({"ask"})
 HISTORY_ON_SCREEN = 12
 IDLE_HINT = "/help 查看按键与命令 · Enter 发送 · Ctrl-J 换行"
 GAUGE_CELLS = 10
@@ -230,10 +226,14 @@ class EditorScreen(ModalScreen[str | None]):
 class ToolBlock(Vertical):
     """一次工具调用：标题、缩进的输出、结束行；可折叠。"""
 
-    def __init__(self, label: str, name: str = "", preface: str | None = None) -> None:
+    def __init__(
+        self, label: str, name: str = "", preface: str | None = None, display: str = "normal"
+    ) -> None:
         super().__init__(classes="tool")
         self.label = label
         self.tool_name = name
+        # 工具表定的显示方式：quiet 是代理自己看的输出，默认折叠成一行
+        self.tool_display = display
         self.preface = preface  # 开发者模式下的参数行，挂载完成后才能加
         self.lines = 0
         self.collapsed = False
@@ -481,8 +481,10 @@ class ThreadPort:
     def reply_finished(self, text: str) -> None:
         self._ui(self.app.end_reply, text)
 
-    def tool_started(self, name: str, label: str, args: dict | None = None) -> None:
-        self._ui(self.app.begin_tool, label, name, args or {})
+    def tool_started(
+        self, name: str, label: str, args: dict | None = None, display: str = "normal"
+    ) -> None:
+        self._ui(self.app.begin_tool, label, name, args or {}, display)
 
     def call_finished(self, usage: dict, seconds: float, ok: bool) -> None:
         self._ui(self.app.show_call_stats, usage, seconds, ok)
@@ -994,10 +996,13 @@ class WorkbenchApp(App[int]):
         row.mount(Markdown(clean_markdown(text)))
         self._scroll()
 
-    def begin_tool(self, label: str, name: str = "", args: dict | None = None) -> None:
+    def begin_tool(
+        self, label: str, name: str = "", args: dict | None = None, display: str = "normal"
+    ) -> None:
         self._finish_thinking()
         self._flush_reply_stream()
-        if name in SILENT_TOOLS and not self.dev:
+        # silent：界面另有其人（比如选项面板），对话里不用再占一行
+        if display == "silent" and not self.dev:
             return
         preface = None
         if self.dev and args:
@@ -1005,7 +1010,7 @@ class WorkbenchApp(App[int]):
 
             preface = "参数 " + json.dumps(args, ensure_ascii=False)[:800]
             self._log.append(preface)
-        block = ToolBlock(label, name, preface)
+        block = ToolBlock(label, name, preface, display)
         self._current_tool = block
         self.busy_verb = label.split("(", 1)[0] + "中"
         self._log.append(f"⏺ {label}")
@@ -1378,7 +1383,7 @@ class WorkbenchApp(App[int]):
         self.query_one("#hint-left", Static).update("再按一次 Ctrl-C 退出（Ctrl-D 直接退出）")
 
     def _default_collapsed(self, block: ToolBlock) -> bool:
-        return not self.verbose and block.tool_name in QUIET_TOOLS
+        return not self.verbose and block.tool_display == "quiet"
 
     def action_toggle_tools(self) -> None:
         self.verbose = not self.verbose
