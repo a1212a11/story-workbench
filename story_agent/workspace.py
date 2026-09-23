@@ -242,7 +242,9 @@ class Workspace:
             f"# 《{title.strip()}》\n\n"
             "## 题材与基调\n\n（一句话说这是个什么故事。）\n\n"
             "## 篇幅\n\n（预计多少章、每章多少字。）\n\n"
-            "## 作者的偏好与禁忌\n\n（喜欢什么样的文字，不要什么。）\n",
+            "## 作者的偏好与禁忌\n\n（喜欢什么样的文字，不要什么。）\n\n"
+            "## 文风约定\n\n（写正文的硬约定，一条一行：视角与人称、引号样式、"
+            "计时用这个世界的说法、句长节奏、幽默怎么用。）\n",
         )
         for name, template in _TEMPLATES.items():
             ws._write_raw(name, template)

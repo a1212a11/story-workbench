@@ -26,10 +26,12 @@ def test_create_lays_out_directory_skills_and_first_commit(workspace: Workspace)
     for name in ("作品.md", "大纲.md", "故事状态.md", "决定.md", ".gitignore"):
         assert (root / name).is_file(), name
     assert workspace.title == "井下回声"
+    assert "## 文风约定" in workspace.read_text("作品.md")
     skills = {p.name for p in (root / "技能").glob("*.md")}
     assert skills == {
         "修订.md",
         "共创.md",
+        "人物.md",
         "剧情.md",
         "写章.md",
         "审读.md",
