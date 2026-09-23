@@ -442,7 +442,7 @@ def test_page_keys_scroll_the_transcript_and_the_card(tmp_path):
 
 
 def test_ctrl_c_needs_a_second_press_to_quit(tmp_path, monkeypatch):
-    from story_agent import tui
+    from story_agent.tui import app as tui  # 常量与 copy_text 在 app 模块里按名字查
 
     path = tmp_path / "novel"
     _chapter_workspace(path)
@@ -898,7 +898,7 @@ def test_turn_ends_with_duration_and_finish_time(tmp_path):
 def test_selection_colors_are_high_contrast_and_ctrl_c_copies(tmp_path, monkeypatch):
     from textual.screen import Screen
 
-    from story_agent import tui
+    from story_agent.tui import app as tui  # 常量与 copy_text 在 app 模块里按名字查
 
     path = tmp_path / "novel"
     _chapter_workspace(path)
@@ -933,7 +933,7 @@ def test_selection_colors_are_high_contrast_and_ctrl_c_copies(tmp_path, monkeypa
 
 
 def test_ctrl_c_in_the_editor_copies_but_never_quits(tmp_path, monkeypatch):
-    from story_agent import tui
+    from story_agent.tui import app as tui  # 常量与 copy_text 在 app 模块里按名字查
 
     path = tmp_path / "novel"
     _chapter_workspace(path)

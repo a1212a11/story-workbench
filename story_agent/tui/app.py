@@ -11,93 +11,37 @@ Enter 批准、n 不批准、打字是不批准并带意见、Esc 也是不批�
 
 from __future__ import annotations
 
+import json
 import queue
-import re
-import shutil
-import subprocess
 import threading
 import time
 from pathlib import Path
 
-import rich._wrap as rich_wrap
-import textual._wrap as textual_wrap
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.css.query import NoMatches
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.theme import Theme
 from textual.widgets import Markdown, Static, TextArea
 
 from story_agent.agent import Agent
-from story_agent.approval import Approval, ApprovalCard, parse_answer
+from story_agent.approval import ApprovalCard, parse_answer
 from story_agent.config import AgentConfig, Clients
 from story_agent.provider import CancelSignal
-from story_agent.workspace import Workspace, WorkspaceError
-
-# 界面库按空格切词换行：一整段没有空格的中文会被当成一个词整体挪行，出现「1.」或「⏺」
-# 单独占一行。把每个中日韩字符（连同紧跟的收尾标点）当成一个可断的词，就能在字间换行。
-_CJK = "\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef"
-_CLOSING = "，。、；：！？）」』》〉】…—"
-CJK_CHUNK = re.compile(rf"[{_CJK}][{_CLOSING}]*\s*|\S+?(?=[{_CJK}])\s*|\S+\s*|\s+")
-# Static 的纯文本走的是 Rich 的切词（textual.content 用 rich._wrap.divide_line），
-# 形状是「前导空白 + 词 + 尾随空白」。
-CJK_WORD = re.compile(rf"\s*(?:[{_CJK}][{_CLOSING}]*|\S+?(?=[{_CJK}])|\S+)\s*")
-
-
-def install_cjk_wrapping() -> None:
-    textual_wrap.re_chunk = CJK_CHUNK
-    rich_wrap.re_word = CJK_WORD
-
-
-install_cjk_wrapping()
-
-# 配色：背景与正文跟着终端走（和 Claude Code 一样），只用少数几个颜色分辨状态：
-# Claude 橙 #D97757 做强调，绿黄红取 Catppuccin Mocha。
-PALETTE = {
-    "orange": "#D97757",  # 助手圆点、输入框边框、旋转指示、选中项
-    "green": "#A6E3A1",  # 完成、新增行
-    "yellow": "#F9E2AF",  # 审批卡、列表标题、七成以上的上下文
-    "red": "#F38BA8",  # 出错、删除行、八成五以上的上下文
-    "blue": "#89B4FA",
-    "subtext": "#A6ADC8",  # diff 文件名行
-    "muted": "#6C7086",  # diff 位置行
-    "surface": "#313244",  # 选中项与列表边框，在深浅终端里都看得见
-    "band": "#252533",  # 作者发言的底色：比深色终端的底略浅一档
-}
-STORY_THEME = Theme(
-    name="story",
-    ansi=True,  # 背景、正文、面板都用终端自己的颜色
-    primary=PALETTE["orange"],
-    secondary=PALETTE["blue"],
-    accent=PALETTE["orange"],
-    success=PALETTE["green"],
-    warning=PALETTE["yellow"],
-    error=PALETTE["red"],
-    foreground="ansi_default",
-    background="ansi_default",
-    surface="ansi_default",
-    panel="ansi_default",
-    boost="ansi_default",
-    dark=True,
-    variables={
-        "text-muted": "ansi_bright_black",
-        "ansi-background": "ansi_black",
-        "ansi-foreground": "ansi_white",
-        "border-blurred": "ansi_black",
-        "block-cursor-foreground": "ansi_black",
-        "block-cursor-background": PALETTE["orange"],
-        "input-cursor-background": PALETTE["orange"],
-        "input-cursor-foreground": "ansi_black",
-        "input-cursor-text-style": "none",
-        "input-selection-background": "ansi_bright_blue",
-        "input-selection-foreground": "ansi_default",
-        "screen-selection-background": "ansi_bright_blue",
-        "screen-selection-foreground": "ansi_black",
-    },
+from story_agent.tui.port import ThreadPort
+from story_agent.tui.text import (
+    _duration,
+    _short,
+    _short_path,
+    author_line,
+    clean_markdown,
+    colorize_diff,
+    context_gauge,
+    copy_text,
+    model_label,
 )
+from story_agent.tui.theme import PALETTE, STORY_THEME
+from story_agent.tui.widgets import COMMANDS, EditorScreen, PromptArea, ThinkingBlock, ToolBlock
+from story_agent.workspace import Workspace, WorkspaceError
 
 SPINNER = "·✢✳✶✻✽"
 QUIT_CONFIRM_SECONDS = 2.0
@@ -106,7 +50,6 @@ REWIND_COOLDOWN_SECONDS = 3.0  # 刚中断过的这几秒里，Esc 只当中断�
 REWIND_CHOICES = 10
 HISTORY_ON_SCREEN = 12
 IDLE_HINT = "/help 查看按键与命令 · Enter 发送 · Ctrl-J 换行"
-GAUGE_CELLS = 10
 BUSY_HINT = "Esc 中断 · 已保存的改动都在"
 HELP_TEXT = (
     "直接说你要做什么；改正式文件前会先给你看改动，Enter 批准、n 不批准、打字是把意见交给它。\n"
@@ -119,381 +62,6 @@ HELP_TEXT = (
 )
 CHOICE_HINT = "按数字或上下键选 · Enter 确认 · 或直接打字说别的 · Esc 跳过"
 CARD_HINT = "Enter 批准 · n 不批准 · 或直接输入你的意见 · PgUp/PgDn 翻看改动"
-
-
-# ---------------------------------------------------------------- 输入与编辑器
-
-
-COMMANDS: tuple[tuple[str, str], ...] = (
-    ("/help", "按键与命令说明"),
-    ("/dev", "开发者模式开关"),
-    ("/exit", "退出"),
-)
-
-
-class PromptArea(TextArea):
-    """多行输入：Enter 发送，Ctrl-J 换行；输入 / 时上下键、Tab、Enter 操作命令列表。"""
-
-    BINDINGS = [
-        Binding("enter", "submit", "发送", priority=True),
-        Binding("ctrl+j", "newline", "换行", priority=True, show=False),
-        Binding("shift+enter", "newline", "换行", priority=True, show=False),
-        Binding("up", "palette_move(-1)", "上一个命令", priority=True, show=False),
-        Binding("down", "palette_move(1)", "下一个命令", priority=True, show=False),
-        Binding("tab", "palette_complete", "补全命令", priority=True, show=False),
-    ]
-
-    class Submitted(Message):
-        def __init__(self, text: str) -> None:
-            super().__init__()
-            self.text = text
-
-    def action_submit(self) -> None:
-        app = self.app
-        if isinstance(app, WorkbenchApp) and app.palette_open:
-            app.palette_execute()
-            return
-        text = self.text
-        self.clear()
-        self.post_message(self.Submitted(text))
-
-    def action_newline(self) -> None:
-        self.insert("\n")
-
-    def action_palette_move(self, delta: int) -> None:
-        app = self.app
-        if isinstance(app, WorkbenchApp) and app.palette_open:
-            app.palette_move(delta)
-        elif delta < 0:
-            self.action_cursor_up()
-        else:
-            self.action_cursor_down()
-
-    def on_key(self, event) -> None:
-        """选项面板开着且输入框是空的时候，按数字直接选那一项（和 Claude Code 一样）。"""
-        app = self.app
-        if not isinstance(app, WorkbenchApp) or app.palette_mode != "choice":
-            return
-        if self.text or not (event.character or "").isdigit():
-            return
-        index = int(event.character) - 1
-        if 0 <= index < len(app.palette_items):
-            event.prevent_default()
-            event.stop()
-            app.palette_index = index
-            app.palette_execute()
-
-    def action_palette_complete(self) -> None:
-        app = self.app
-        if isinstance(app, WorkbenchApp) and app.palette_open:
-            app.palette_complete()
-
-
-class EditorScreen(ModalScreen[str | None]):
-    """全屏编辑器：Ctrl-S 保存返回文本，Ctrl-Q 取消返回 None。"""
-
-    BINDINGS = [
-        Binding("ctrl+s", "save", "保存并返回", priority=True),
-        Binding("ctrl+q", "cancel", "取消编辑", priority=True),
-    ]
-
-    def __init__(self, initial: str, title: str) -> None:
-        super().__init__()
-        self.initial = initial
-        self.title_text = title
-
-    def compose(self) -> ComposeResult:
-        yield Static(
-            f"编辑：{self.title_text}    [Ctrl-S] 保存并返回    [Ctrl-Q] 取消编辑",
-            id="editor-title",
-            markup=False,
-        )
-        yield TextArea(self.initial, id="editor", soft_wrap=True)
-
-    def on_mount(self) -> None:
-        self.query_one("#editor", TextArea).focus()
-
-    def action_save(self) -> None:
-        self.dismiss(self.query_one("#editor", TextArea).text)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-# ---------------------------------------------------------------- 对话记录中的条目
-
-
-class ToolBlock(Vertical):
-    """一次工具调用：标题、缩进的输出、结束行；可折叠。"""
-
-    def __init__(
-        self, label: str, name: str = "", preface: str | None = None, display: str = "normal"
-    ) -> None:
-        super().__init__(classes="tool")
-        self.label = label
-        self.tool_name = name
-        # 工具表定的显示方式：quiet 是代理自己看的输出，默认折叠成一行
-        self.tool_display = display
-        self.preface = preface  # 开发者模式下的参数行，挂载完成后才能加
-        self.lines = 0
-        self.collapsed = False
-        self.tool_state = "…"
-        self.stream: Static | None = None
-        self.stream_text = ""
-
-    def compose(self) -> ComposeResult:
-        yield Static(f"⏺ {self.label}", classes="tool-header running", markup=False)
-        yield Vertical(classes="tool-body")
-        yield Static("", classes="tool-footer", markup=False)
-
-    def on_mount(self) -> None:
-        if self.preface:
-            self.add_line(self.preface)
-
-    def body(self) -> Vertical:
-        return self.query_one(".tool-body", Vertical)
-
-    def add_line(self, text: str) -> None:
-        self.flush_stream()
-        self.body().mount(Static(colorize_diff(text), classes="tool-line"))
-        self.lines += 1 + text.count("\n")
-
-    def add_chunk(self, chunk: str) -> None:
-        if self.stream is None:
-            self.stream = Static("", classes="tool-line", markup=False)
-            self.stream_text = ""
-            self.body().mount(self.stream)
-        self.stream_text += chunk
-        self.stream.update(self.stream_text)
-
-    def flush_stream(self) -> None:
-        if self.stream is not None:
-            if self.stream_text.strip():
-                self.lines += 1 + self.stream_text.rstrip("\n").count("\n")
-            else:
-                self.stream.remove()
-            self.stream = None
-            self.stream_text = ""
-
-    def finish(self, is_error: bool) -> None:
-        self.flush_stream()
-        header = self.query_one(".tool-header", Static)
-        header.remove_class("running")
-        header.add_class("error" if is_error else "ok")
-        self.tool_state = "出错" if is_error else "完成"
-        self._refresh_footer()
-
-    def _refresh_footer(self) -> None:
-        hint = " · Ctrl-O 或点击展开" if self.collapsed else ""
-        self.query_one(".tool-footer", Static).update(
-            f"  ⎿  {self.tool_state} · {self.lines} 行{hint}"
-        )
-
-    def set_collapsed(self, collapsed: bool) -> None:
-        self.collapsed = collapsed
-        self.body().display = not collapsed
-        self._refresh_footer()
-
-    def on_click(self) -> None:
-        if self.tool_state != "…":
-            self.set_collapsed(not self.collapsed)
-
-
-_PUNCT_OPEN = "“「『‘（(《〈【"
-_PUNCT_CLOSE = "”」』’）)》〉】，。、；：！？…"
-_BOLD = re.compile(r"\*\*(.+?)\*\*")
-
-
-def clean_markdown(text: str) -> str:
-    """让模型写的 Markdown 在终端里干净：
-
-    - `**` 紧挨着中文标点时按 CommonMark 不算加粗，会原样露出来；把标点挪到 `**` 外面。
-    - 单独一行的分隔线去掉，聊天里不需要。
-    """
-
-    def fix(match: re.Match) -> str:
-        inner = match.group(1)
-        lead = ""
-        while inner and inner[0] in _PUNCT_OPEN:
-            lead, inner = lead + inner[0], inner[1:]
-        tail = ""
-        while inner and inner[-1] in _PUNCT_CLOSE:
-            tail, inner = inner[-1] + tail, inner[:-1]
-        return f"{lead}**{inner}**{tail}" if inner.strip() else lead + inner + tail
-
-    lines = []
-    for line in text.split("\n"):
-        if re.fullmatch(r"\s*([-*_])\s*(\1\s*){2,}", line):
-            continue
-        lines.append(_BOLD.sub(fix, line))
-    return "\n".join(lines)
-
-
-class ThinkingBlock(Vertical):
-    """模型回答前的思考：实时暗色显示，回答开始后收起成一行，点击或 Ctrl-O 展开。"""
-
-    def __init__(self) -> None:
-        super().__init__(classes="thinking")
-        self.text = ""
-        self.collapsed = False
-        self.started = time.monotonic()
-        self.done_seconds: int | None = None
-
-    @property
-    def seconds(self) -> int:
-        return max(int(time.monotonic() - self.started), 1)
-
-    def compose(self) -> ComposeResult:
-        yield Static("✻ 思考中……", classes="thinking-header", markup=False)
-        yield Static("", classes="thinking-body", markup=False)
-
-    def on_mount(self) -> None:
-        self._repaint()  # 挂载之前收到的片段在这里补上
-
-    def _repaint(self) -> None:  # 不能叫 _render，那是界面库的内部方法
-        try:
-            header = self.query_one(".thinking-header", Static)
-            body = self.query_one(".thinking-body", Static)
-        except NoMatches:  # 还没 compose，等 on_mount
-            return
-        done = self.done_seconds
-        header.display = done is not None  # 思考期间标题让位给下方的转圈，避免两处都写「思考中」
-        if done is not None:
-            header.update(f"✻ 思考了 {done} 秒")
-        body.update(self.text)
-        body.display = not self.collapsed
-
-    def add_chunk(self, chunk: str) -> None:
-        self.text += chunk
-        self._repaint()
-
-    def finish(self, collapsed: bool) -> None:
-        self.done_seconds = self.seconds
-        self.collapsed = collapsed
-        self._repaint()
-
-    def set_collapsed(self, collapsed: bool) -> None:
-        self.collapsed = collapsed
-        self._repaint()
-
-    def on_click(self) -> None:
-        self.set_collapsed(not self.collapsed)
-
-
-def author_line(text: str) -> Text:
-    """作者说的话：正文用终端的正常字色，只有开头的 > 用强调色，好和助手的回复区分开。"""
-    return Text.assemble(("> ", PALETTE["orange"]), text)
-
-
-def colorize_diff(text: str) -> Text:
-    """把统一 diff 着色：删除行红、新增行绿、位置行暗；其他文字原样。"""
-    result = Text()
-    for index, line in enumerate(text.split("\n")):
-        if index:
-            result.append("\n")
-        if line.startswith("+++") or line.startswith("---"):
-            result.append(line, style=f"bold {PALETTE['subtext']}")
-        elif line.startswith("+"):
-            result.append(line, style=PALETTE["green"])
-        elif line.startswith("-"):
-            result.append(line, style=PALETTE["red"])
-        elif line.startswith("@@"):
-            result.append(line, style=PALETTE["muted"])
-        else:
-            result.append(line)
-    return result
-
-
-# ---------------------------------------------------------------- 代理线程端口
-
-
-class ThreadPort:
-    """代理线程使用的作者端口：输出投递到界面，审批与编辑阻塞等待作者作答。"""
-
-    def __init__(self, app: WorkbenchApp) -> None:
-        self.app = app
-        self.answers: queue.Queue[str] = queue.Queue()
-        self.edits: queue.Queue[str | None] = queue.Queue()
-        self.cancel = CancelSignal()
-
-    def _ui(self, callback, *args) -> None:
-        if self.app.stopping.is_set():
-            return
-        try:
-            self.app.call_from_thread(callback, *args)
-        except RuntimeError:  # 界面已关闭
-            pass
-
-    def say(self, text: str) -> None:
-        self._ui(self.app.show_line, text)
-
-    def emit(self, chunk: str) -> None:
-        self._ui(self.app.show_chunk, chunk)
-
-    def approve(self, card: ApprovalCard) -> Approval:
-        while not self.answers.empty():  # 丢掉过期的作答
-            self.answers.get_nowait()
-        self._ui(self.app.begin_approval, card)
-        while True:
-            try:
-                answer = self.answers.get(timeout=0.2)
-            except queue.Empty:
-                if self.app.stopping.is_set() or self.cancel.is_set():
-                    self._ui(self.app.end_approval, None)
-                    return Approval(False)
-                continue
-            return parse_answer(answer)
-
-    def choose(self, question: str, options: tuple[str, ...]) -> str:
-        while not self.answers.empty():  # 丢掉过期的作答
-            self.answers.get_nowait()
-        self._ui(self.app.begin_choice, question, options)
-        while True:
-            try:
-                return self.answers.get(timeout=0.2)
-            except queue.Empty:
-                if self.app.stopping.is_set() or self.cancel.is_set():
-                    self._ui(self.app.end_choice, None)
-                    return ""
-
-    def edit(self, initial: str, title: str) -> str | None:
-        self._ui(self.app.begin_edit, initial, title)
-        while True:
-            try:
-                return self.edits.get(timeout=0.2)
-            except queue.Empty:
-                if self.app.stopping.is_set():
-                    return None
-
-    # 代理观察者
-    def reply_started(self) -> None:
-        self._ui(self.app.prepare_reply)
-
-    def turn_reminder(self, text: str) -> None:
-        self._ui(self.app.show_dev_note, text)
-
-    def reply_empty(self) -> None:
-        self._ui(self.app.keep_thinking_open)
-
-    def thinking(self, chunk: str) -> None:
-        self._ui(self.app.show_thinking, chunk)
-
-    def reply_finished(self, text: str) -> None:
-        self._ui(self.app.end_reply, text)
-
-    def tool_started(
-        self, name: str, label: str, args: dict | None = None, display: str = "normal"
-    ) -> None:
-        self._ui(self.app.begin_tool, label, name, args or {}, display)
-
-    def call_finished(self, usage: dict, seconds: float, ok: bool) -> None:
-        self._ui(self.app.show_call_stats, usage, seconds, ok)
-
-    def tool_finished(self, name: str, text: str, is_error: bool) -> None:
-        self._ui(self.app.end_tool, is_error)
-
-
-# ---------------------------------------------------------------- 应用
 
 
 class WorkbenchApp(App[int]):
@@ -1006,8 +574,6 @@ class WorkbenchApp(App[int]):
             return
         preface = None
         if self.dev and args:
-            import json
-
             preface = "参数 " + json.dumps(args, ensure_ascii=False)[:800]
             self._log.append(preface)
         block = ToolBlock(label, name, preface, display)
@@ -1412,54 +978,6 @@ class WorkbenchApp(App[int]):
         self.stopping.set()
         self.port.cancel.set()
         self.inbox.put(None)
-
-
-def context_gauge(used: int, limit: int) -> tuple[str, float]:
-    """上下文占用的十格小条与比例，例如「▮▮▮▮▯▯▯▯▯▯ 42%」。"""
-    if limit <= 0:
-        return "", 0.0
-    ratio = min(used / limit, 1.0)
-    filled = round(ratio * GAUGE_CELLS)
-    bar = "▮" * filled + "▯" * (GAUGE_CELLS - filled)
-    return f"{bar} {ratio * 100:.0f}%", ratio
-
-
-def copy_text(app: App, text: str) -> None:
-    """复制到系统剪贴板：优先用本机命令，拿不到就退回终端的 OSC 52。"""
-    for command in (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"]):
-        if shutil.which(command[0]) is None:
-            continue
-        try:
-            subprocess.run(command, input=text, text=True, check=True, timeout=5)
-            return
-        except (OSError, subprocess.SubprocessError):
-            break
-    app.copy_to_clipboard(text)
-
-
-def _duration(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.0f} 秒"
-    minutes, rest = divmod(int(seconds), 60)
-    return f"{minutes} 分 {rest} 秒"
-
-
-def _short_path(path: Path) -> str:
-    try:
-        return "~/" + path.relative_to(Path.home()).as_posix()
-    except ValueError:
-        return str(path)
-
-
-def model_label(config: AgentConfig) -> str:
-    """状态栏里的模型名：写作模型不同时显示「对话 ▸ 写作」。"""
-    if config.writing_options is None:
-        return config.options.model
-    return f"{config.options.model} ▸ {config.writing.model}"
-
-
-def _short(count: int) -> str:
-    return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
 
 
 def run(path: Path, *, clients: Clients | None = None, config: AgentConfig | None = None) -> int:
