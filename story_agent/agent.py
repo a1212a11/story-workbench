@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from story_agent import prompts
 from story_agent import tools as toolbox
 from story_agent.approval import AuthorPort
-from story_agent.config import AgentConfig, Clients, estimate_tokens
+from story_agent.config import AgentConfig, Clients
 from story_agent.layout import (
     NOTES_FILE,
     OUTLINE_FILE,
@@ -34,6 +34,7 @@ from story_agent.provider import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    estimate_tokens,
 )
 from story_agent.workspace import Workspace, describe_time
 

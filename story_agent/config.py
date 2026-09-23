@@ -168,11 +168,6 @@ class AgentConfig:
         return self.context_tokens - self.template_reserve - self.options.max_output_tokens
 
 
-def estimate_tokens(text: str) -> int:
-    """保守估算：中文按字符数 × 1.2 向上取整。"""
-    return math.ceil(len(text) * 1.2)
-
-
 def build_agent_config(settings: Settings) -> AgentConfig:
     options = CallOptions(
         model=settings.model,

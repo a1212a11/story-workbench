@@ -1,4 +1,4 @@
-"""模型客户端合同：事件、消息与调用函数签名，以及 Anthropic 协议客户端（自旧包原样搬入）。
+"""模型客户端合同：事件、消息与调用函数签名，Anthropic 协议客户端，以及 token 估算。
 
 客户端只处理协议、认证、超时、流与网络错误；不理解采用与 Canon，
 不执行模型提出的动作，不自动重试付费请求。工具调用只是把模型提出的
@@ -7,9 +7,10 @@ tool_use 块原样归一化交给调用方，由调用方决定是否执行。
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
-from collections.abc import AsyncIterator, Awaitable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -114,19 +115,12 @@ class CompleteCall(Protocol):
     ) -> CompleteResult: ...
 
 
-class AsyncStreamCall(Protocol):
-    def __call__(
-        self, messages: list[ChatMessage], options: CallOptions, cancel: CancelSignal
-    ) -> AsyncIterator[StreamEvent]: ...
-
-
-class AsyncCompleteCall(Protocol):
-    def __call__(
-        self, messages: list[ChatMessage], options: CallOptions, cancel: CancelSignal
-    ) -> Awaitable[CompleteResult]: ...
-
-
 # ---------------------------------------------------------------- Anthropic 客户端（G05）
+
+
+def estimate_tokens(text: str) -> int:
+    """保守估算：中文按字符数 × 1.2 向上取整。"""
+    return math.ceil(len(text) * 1.2)
 
 
 class ProviderError(Exception):
@@ -414,93 +408,6 @@ def make_anthropic_clients(
                 raise ProviderError("cancelled")
             raise ProviderError(describe_api_error(payload)) from None
         message = payload
-        if getattr(message, "stop_reason", None) not in (*_FINISHED_STOP_REASONS, "max_tokens"):
-            raise ProviderError("unexpected_stop_reason")
-        text = "".join(
-            getattr(block, "text", "")
-            for block in message.content
-            if getattr(block, "type", "") == "text"
-        )
-        return CompleteResult(
-            text=text,
-            usage=_usage(message),
-            truncated=getattr(message, "stop_reason", None) == "max_tokens",
-            tool_uses=_tool_uses(message),
-        )
-
-    return stream, complete
-
-
-def make_async_anthropic_clients(
-    api_key: str, *, base_url: str | None = None, disable_thinking: bool = False
-) -> tuple[AsyncStreamCall, AsyncCompleteCall]:
-    """返回一对绑定密钥的客户端函数。max_retries=0：付费请求不自动重试。
-
-    密钥只保存在闭包里，不出现在返回的事件、异常或日志中。
-    """
-    from anthropic import APIError, AsyncAnthropic
-
-    def _client(options: CallOptions) -> AsyncAnthropic:
-        return AsyncAnthropic(
-            api_key=api_key, base_url=base_url, max_retries=0, timeout=options.timeout_seconds
-        )
-
-    async def stream(
-        messages: list[ChatMessage], options: CallOptions, cancel: CancelSignal
-    ) -> AsyncIterator[StreamEvent]:
-        if cancel.is_set():
-            yield StreamEvent(EventKind.ERROR, error="cancelled")
-            return
-        kwargs = _request_kwargs(messages, options, disable_thinking)
-        try:
-            async with _client(options) as client, client.messages.stream(**kwargs) as response:
-                async for event in response:
-                    if cancel.is_set():
-                        await response.close()
-                        yield StreamEvent(EventKind.ERROR, error="cancelled")
-                        return
-                    piece = _delta_of(event)
-                    if piece is not None:
-                        yield piece
-                final = await response.get_final_message()
-        except APIError as exc:
-            yield StreamEvent(
-                EventKind.ERROR, error=describe_api_error(exc), retryable=is_retryable(exc)
-            )
-            return
-        except Exception as exc:  # 超时、网络中断等
-            yield StreamEvent(
-                EventKind.ERROR, error=describe_api_error(exc), retryable=is_retryable(exc)
-            )
-            return
-        if cancel.is_set():
-            yield StreamEvent(EventKind.ERROR, error="cancelled")
-            return
-        for tool_use in _tool_uses(final):
-            yield StreamEvent(EventKind.TOOL_USE, tool_use=tool_use)
-        yield StreamEvent(EventKind.USAGE, usage=_usage(final))
-        if getattr(final, "stop_reason", None) == "max_tokens":
-            yield StreamEvent(EventKind.TRUNCATED)
-        elif getattr(final, "stop_reason", None) in _FINISHED_STOP_REASONS:
-            yield StreamEvent(EventKind.COMPLETED)
-        else:
-            yield StreamEvent(EventKind.ERROR, error="unexpected_stop_reason")
-
-    async def complete(
-        messages: list[ChatMessage], options: CallOptions, cancel: CancelSignal
-    ) -> CompleteResult:
-        if cancel.is_set():
-            raise ProviderError("cancelled")
-        kwargs = _request_kwargs(messages, options, disable_thinking)
-        try:
-            async with _client(options) as client:
-                message = await client.messages.create(**kwargs)
-        except APIError as exc:
-            raise ProviderError(describe_api_error(exc)) from None
-        except Exception as exc:
-            raise ProviderError(type(exc).__name__) from None
-        if cancel.is_set():
-            raise ProviderError("cancelled")
         if getattr(message, "stop_reason", None) not in (*_FINISHED_STOP_REASONS, "max_tokens"):
             raise ProviderError("unexpected_stop_reason")
         text = "".join(
