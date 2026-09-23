@@ -11,7 +11,6 @@ Enter 批准、n 不批准、打字是不批准并带意见、Esc 也是不批�
 
 from __future__ import annotations
 
-import json
 import queue
 import threading
 import time
@@ -21,7 +20,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Markdown, Static, TextArea
+from textual.widgets import Static, TextArea
 
 from story_agent.agent import Agent
 from story_agent.approval import ApprovalCard, parse_answer
@@ -29,18 +28,16 @@ from story_agent.config import AgentConfig, Clients
 from story_agent.provider import CancelSignal
 from story_agent.tui.port import ThreadPort
 from story_agent.tui.text import (
-    _duration,
     _short,
     _short_path,
-    author_line,
-    clean_markdown,
     colorize_diff,
     context_gauge,
     copy_text,
     model_label,
 )
 from story_agent.tui.theme import PALETTE, STORY_THEME
-from story_agent.tui.widgets import COMMANDS, EditorScreen, PromptArea, ThinkingBlock, ToolBlock
+from story_agent.tui.transcript import TranscriptView
+from story_agent.tui.widgets import COMMANDS, EditorScreen, PromptArea
 from story_agent.workspace import Workspace, WorkspaceError
 
 SPINNER = "·✢✳✶✻✽"
@@ -155,10 +152,7 @@ class WorkbenchApp(App[int]):
         self.mode = "chat"  # chat / approve
         self.busy = False
         self.busy_since = 0.0
-        self.busy_verb = "思考中"
-        self.verbose = False  # Ctrl-O：展开全部工具输出
-        self.dev = False  # /dev：工具参数、每次调用的用量与耗时
-        self.follow = True  # 对话区是否跟着新内容滚到底
+        self.transcript_view = TranscriptView()
         self._hint_until = 0.0  # 提示行临时文字的到期时刻
         self.palette_items: list[tuple[str, str]] = []
         self.palette_index = 0
@@ -169,20 +163,13 @@ class WorkbenchApp(App[int]):
         self._esc_armed_at = 0.0
         self._interrupted_at = 0.0
         self._quit_armed_at = 0.0  # 空闲时第一次 Ctrl-C 的时刻；两秒内再按一次才退出
-        self._current_tool: ToolBlock | None = None
-        self._reply_row: Horizontal | None = None
-        self._reply_stream: Static | None = None
-        self._reply_text = ""
-        self._notice: Static | None = None  # 正在做某事的那一行，做完就地改成结果
-        self._thinking: ThinkingBlock | None = None
-        self._log: list[str] = []
         self.status_text = ""
         self.current_card: ApprovalCard | None = None
 
     # ------------------------------------------------------------ 布局
 
     def compose(self) -> ComposeResult:
-        yield VerticalScroll(id="transcript", can_focus=False)
+        yield self.transcript_view
         yield Static("", id="spinner", markup=False)
         with Vertical(id="card"):
             yield Static("", id="card-title", markup=False)
@@ -209,6 +196,7 @@ class WorkbenchApp(App[int]):
 
     def agent_loop(self) -> None:
         port = self.port
+        view = self.transcript_view
         try:
             workspace = self._open_or_create()
         except WorkspaceError as exc:
@@ -222,7 +210,7 @@ class WorkbenchApp(App[int]):
             else "未接入（没有密钥）"
         )
         port._ui(
-            self.show_welcome,
+            view.show_welcome,
             f"✻ 《{workspace.title}》 · {model}\n"
             f"  {_short_path(workspace.root)} · 直接说你要做什么；改正式文件前我会先给你看改动。",
         )
@@ -230,16 +218,16 @@ class WorkbenchApp(App[int]):
             port.say("未检测到模型密钥：可以记录想法；写作与审读需要设置密钥后重新打开。")
         recent = workspace.recent_transcript(HISTORY_ON_SCREEN)
         if recent:
-            port._ui(self.show_history, recent)
+            port._ui(view.show_history, recent)
         if agent.needs_compacting:  # 压缩旧对话要调用模型，先把界面显示出来再做
-            port._ui(self.begin_notice, "正在整理之前的对话……", "整理旧对话")
+            port._ui(view.begin_notice, "正在整理之前的对话……", "整理旧对话")
             port._ui(self.set_busy, True)
             try:
                 done = agent.compact_pending()
             finally:
                 port._ui(self.set_busy, False)
             port._ui(
-                self.end_notice,
+                view.end_notice,
                 "旧对话已整理成摘要。" if done else "这次没整理成，之前的对话照原样带着。",
             )
         self._refresh_status(agent)
@@ -291,7 +279,7 @@ class WorkbenchApp(App[int]):
             seconds = time.monotonic() - started
             calls = result.calls if result is not None else 0
             cancelled = bool(result is not None and result.cancelled)
-            port._ui(self.end_turn, seconds, calls, cancelled)
+            port._ui(self.transcript_view.end_turn, seconds, calls, cancelled)
 
     def _do_rewind(self, agent: Agent, item: tuple) -> None:
         """在代理线程里执行撤回：截断对话记录，按需把文件退回，然后重载代理与界面。"""
@@ -332,14 +320,7 @@ class WorkbenchApp(App[int]):
     def reset_transcript_view(
         self, rows: list[tuple[str, str]], note: str, restore_text: str = ""
     ) -> None:
-        self._transcript().remove_children()
-        self._log.append(note)
-        self._current_tool = None
-        self._reply_row = self._reply_stream = None
-        if rows:
-            self.show_history(rows)
-        self._mount(Static(note, classes="system", markup=False))
-        self._scroll()
+        self.transcript_view.reset(rows, note)
         if restore_text:  # 撤回的那句话放回输入框，作者改一改再发
             area = self.query_one("#input", PromptArea)
             area.clear()
@@ -361,122 +342,30 @@ class WorkbenchApp(App[int]):
 
     # ------------------------------------------------------------ 界面更新（主线程）
 
-    def _transcript(self) -> VerticalScroll:
-        return self.query_one("#transcript", VerticalScroll)
-
-    def _following(self) -> bool:
-        """作者停在底部就跟着新内容滚；他往上翻了就不打扰，翻回底部自动恢复。"""
-        transcript = self._transcript()
-        if transcript.is_vertical_scroll_end:
-            self.follow = True
-        return self.follow
-
-    def _mount(self, widget) -> None:
-        transcript = self._transcript()
-        following = self._following()
-        transcript.mount(widget)
-        if following:
-            transcript.scroll_end(animate=False)
-
-    def _scroll(self) -> None:
-        if self._following():
-            self._transcript().scroll_end(animate=False)
-
     def on_mouse_scroll_up(self, event) -> None:
-        self.follow = False  # 作者往上翻了；滚回底部或发一句话时恢复跟随
+        self.transcript_view.follow = False  # 作者往上翻了；滚回底部或发一句话时恢复跟随
 
     def on_mouse_scroll_down(self, event) -> None:
-        self._following()  # 滚回底部就恢复跟随
+        self.transcript_view.following()  # 滚回底部就恢复跟随
 
     def action_page(self, direction: str) -> None:
         """PageUp/PageDown 翻看对话；审批卡打开时翻卡片里的 diff。"""
         if isinstance(self.screen, EditorScreen):
             return
-        target = self._transcript()
+        view = self.transcript_view
+        target: VerticalScroll = view
         if self.mode == "approve":
             card = self.query_one("#card-diff", VerticalScroll)
             if card.max_scroll_y > 0:  # 新建文件的卡片没有可翻的内容，翻的是上方的全文
                 target = card
         if direction == "up":
-            if target is self._transcript():
-                self.follow = False
+            if target is view:
+                view.follow = False
             target.scroll_page_up(animate=False)
         else:
             target.scroll_page_down(animate=False)
-            if target is self._transcript() and target.is_vertical_scroll_end:
-                self.follow = True
-
-    def _flush_reply_stream(self) -> None:
-        if self._reply_stream is not None and not self._reply_text.strip():
-            self._reply_stream.remove()
-        self._reply_stream = None
-
-    def show_history(self, rows: list[tuple[str, str]]) -> None:
-        """重新打开时回放最近的对话，淡色显示；代理的上下文里也有这些。"""
-        self._log.append("── 上次的对话 ──")
-        self._mount(Static("── 上次的对话 ──", classes="divider", markup=False))
-        for role, text in rows:
-            if role == "author":
-                self._log.append(f"> {text}")
-                self._mount(Static(author_line(text), classes="author history"))
-            else:
-                self._log.append(f"⏺ {text}")
-                self._mount(
-                    Horizontal(
-                        Static("⏺", classes="dot", markup=False),
-                        Markdown(clean_markdown(text)),
-                        classes="reply history",
-                    )
-                )
-
-    def show_welcome(self, text: str) -> None:
-        self._log.append(text)
-        self._mount(Static(text, classes="welcome", markup=False))
-
-    def _log_tool_stream(self) -> None:
-        block = self._current_tool
-        if block is not None and block.stream_text.strip():
-            self._log.append(block.stream_text)
-
-    def show_line(self, text: str) -> None:
-        if self._current_tool is not None:
-            self._log_tool_stream()
-            self._log.append(text)
-            self._current_tool.add_line(text)
-        else:
-            self._log.append(text)
-            self._flush_reply_stream()
-            self._mount(Static(text, classes="system", markup=False))
-        self._scroll()
-
-    def show_chunk(self, chunk: str) -> None:
-        if self._current_tool is not None:
-            self._current_tool.add_chunk(chunk)
-        else:
-            if self._reply_stream is None:
-                self.begin_reply()
-            self._reply_text += chunk
-            assert self._reply_stream is not None
-            self._reply_stream.update(self._reply_text)
-        self._scroll()
-
-    def begin_notice(self, text: str, verb: str = "") -> None:
-        """显示一行「正在……」，完成时用 end_notice 就地换成结果。"""
-        if verb:
-            self.busy_verb = verb
-        self._notice = Static(text, classes="system", markup=False)
-        self._mount(self._notice)
-
-    def end_notice(self, text: str | None) -> None:
-        notice, self._notice = self._notice, None
-        if notice is None:
-            return
-        if text:
-            self._log.append(text)
-            notice.update(text)
-        else:
-            notice.remove()
-        self._scroll()
+            if target is view and target.is_vertical_scroll_end:
+                view.follow = True
 
     def restore_input(self, text: str) -> None:
         """一轮没成（比如网络断了）：把作者这句话放回输入框，按 Enter 就能重发。"""
@@ -488,137 +377,9 @@ class WorkbenchApp(App[int]):
         area.focus()
         self._flash_hint("这句话放回输入框了，按 Enter 重发")
 
-    def show_author(self, text: str) -> None:
-        self._log.append(f"> {text}")
-        self._flush_reply_stream()
-        self.follow = True  # 作者说了话，回到底部
-        self._mount(Static(author_line(text), classes="author"))
-
-    def prepare_reply(self) -> None:
-        """一次模型调用开始。先不挂回复行，等真有文字再挂，好让思考过程排在它前面。"""
-        self._flush_reply_stream()
-        self._reply_row = None
-        self._reply_text = ""
-        self.busy_verb = "思考中"
-
-    def show_dev_note(self, text: str) -> None:
-        """只在开发者模式显示：每轮附在作者发言后面、不落库的提醒。"""
-        if not self.dev:
-            return
-        line = f"（每轮提醒）{text}"
-        self._log.append(line)
-        self._mount(Static(line, classes="system", markup=False))
-        self._scroll()
-
-    def show_thinking(self, chunk: str) -> None:
-        if self._current_tool is not None:
-            return
-        if self._thinking is None:
-            self._flush_reply_stream()
-            self._thinking = ThinkingBlock()
-            self.busy_verb = "思考中"
-            self._mount(self._thinking)
-        self._thinking.add_chunk(chunk)
-        self._scroll()
-
-    def keep_thinking_open(self) -> None:
-        """这一轮没有正文时，把最后那块思考展开，作者才知道自己看到的是什么。"""
-        blocks = list(self._transcript().query(ThinkingBlock))
-        if blocks:
-            blocks[-1].set_collapsed(False)
-            self._scroll()
-
-    def _finish_thinking(self) -> None:
-        block, self._thinking = self._thinking, None
-        if block is not None:
-            self._log.append(f"✻ 思考了 {block.seconds} 秒")
-            block.finish(collapsed=not self.verbose)
-
-    def begin_reply(self) -> None:
-        self._finish_thinking()
-        self._flush_reply_stream()
-        self._reply_text = ""
-        self._reply_stream = Static("", markup=False)
-        self._reply_row = Horizontal(
-            Static("⏺", classes="dot", markup=False), self._reply_stream, classes="reply"
-        )
-        self.busy_verb = "思考中"
-        self._mount(self._reply_row)
-
-    def end_reply(self, text: str) -> None:
-        self._finish_thinking()
-        row = self._reply_row
-        self._reply_row = self._reply_stream = None
-        self._reply_text = ""
-        if not text.strip():
-            if row is not None:
-                row.remove()
-            return
-        if row is None:  # 没有流式片段就直接给了整段（脚本客户端、非流式回退）
-            row = Horizontal(Static("⏺", classes="dot", markup=False), classes="reply")
-            self._mount(row)
-        self._log.append(text)
-        for widget in row.query(Static):
-            if not widget.has_class("dot"):
-                widget.remove()
-        row.mount(Markdown(clean_markdown(text)))
-        self._scroll()
-
-    def begin_tool(
-        self, label: str, name: str = "", args: dict | None = None, display: str = "normal"
-    ) -> None:
-        self._finish_thinking()
-        self._flush_reply_stream()
-        # silent：界面另有其人（比如选项面板），对话里不用再占一行
-        if display == "silent" and not self.dev:
-            return
-        preface = None
-        if self.dev and args:
-            preface = "参数 " + json.dumps(args, ensure_ascii=False)[:800]
-            self._log.append(preface)
-        block = ToolBlock(label, name, preface, display)
-        self._current_tool = block
-        self.busy_verb = label.split("(", 1)[0] + "中"
-        self._log.append(f"⏺ {label}")
-        self._mount(block)
-
-    def show_call_stats(self, usage: dict, seconds: float, ok: bool) -> None:
-        if not self.dev:
-            return
-        line = (
-            f"  ⎿  模型{'完成' if ok else '失败'} · ↑{_short(int(usage.get('input_tokens', 0)))}"
-            f" ↓{_short(int(usage.get('output_tokens', 0)))} · {seconds:.1f}s"
-        )
-        self._log.append(line)
-        self._flush_reply_stream()
-        self._mount(Static(line, classes="system", markup=False))
-
-    def end_tool(self, is_error: bool) -> None:
-        self._log_tool_stream()
-        block = self._current_tool
-        self._current_tool = None
-        if block is not None:
-            block.finish(is_error)
-            block.set_collapsed(self._default_collapsed(block))
-            self._log.append(f"  ⎿  {'出错' if is_error else '完成'}")
-        self._scroll()
-
-    def end_turn(self, seconds: float = 0.0, calls: int = 0, cancelled: bool = False) -> None:
-        self._finish_thinking()
-        self._flush_reply_stream()
-        self._current_tool = None
-        if calls:
-            # 像 Claude Code 的「✻ Brewed for 43s · done 3:00 PM」：用了多久，几点完成
-            finished = time.strftime("%H:%M")
-            state = "已中断" if cancelled else "完成"
-            line = f"✻ 用时 {_duration(seconds)} · {state}于 {finished}"
-            self._log.append(line)
-            self._mount(Static(line, classes="system", markup=False))
-            self._scroll()
-
     def begin_approval(self, card: ApprovalCard) -> None:
         self.current_card = card
-        self._log.append(f"审批：{card.title}（{card.summary}）\n{card.diff}")
+        self.transcript_view.record(f"审批：{card.title}（{card.summary}）\n{card.diff}")
         self.query_one("#card-title", Static).update(f"{card.title} · {card.summary}")
         self.query_one("#card-body", Static).update(colorize_diff(card.diff.rstrip("\n")))
         self.query_one("#card-diff", VerticalScroll).scroll_home(animate=False)
@@ -634,8 +395,7 @@ class WorkbenchApp(App[int]):
         self.query_one("#hint-left", Static).update(BUSY_HINT if self.busy else IDLE_HINT)
         if answer is not None:
             shown = "⏎ 批准" if parse_answer(answer).approved else (answer or "n")
-            self._log.append(f"> {shown}")
-            self._mount(Static(author_line(shown), classes="author"))
+            self.transcript_view.echo_author(shown)
 
     def begin_edit(self, initial: str, title: str) -> None:
         self.push_screen(EditorScreen(initial, title), callback=self.port.edits.put)
@@ -674,7 +434,7 @@ class WorkbenchApp(App[int]):
         elapsed = int(time.monotonic() - self.busy_since)
         frame = SPINNER[(elapsed * 10 + int(time.monotonic() * 10)) % len(SPINNER)]
         self.query_one("#spinner", Static).update(
-            f"{frame} {self.busy_verb}… ({elapsed}s · esc 中断)"
+            f"{frame} {self.transcript_view.busy_verb}… ({elapsed}s · esc 中断)"
         )
 
     def set_status(self, text: str, context_used: int = 0, context_limit: int = 0) -> None:
@@ -692,10 +452,7 @@ class WorkbenchApp(App[int]):
 
     def transcript_text(self) -> str:
         """已记录的对话文本，含正在流式显示的部分；供测试与调试。"""
-        live = [self._reply_text]
-        if self._current_tool is not None:
-            live.append(self._current_tool.stream_text)
-        return "\n".join([*self._log, *(part for part in live if part)])
+        return self.transcript_view.transcript_text()
 
     # ------------------------------------------------------------ 作者输入与按键
 
@@ -723,7 +480,7 @@ class WorkbenchApp(App[int]):
             return
         if self._meta_command(text):
             return
-        self.show_author(text)
+        self.transcript_view.show_author(text)
         self.inbox.put(text)
 
     # ------------------------------------------------------------ 命令列表
@@ -821,7 +578,7 @@ class WorkbenchApp(App[int]):
         """代理问作者一个带选项的问题：上下选、Enter 确认，也可以直接打字说别的。"""
         self.choice_question = question
         self.mode = "choose"
-        self._log.append(f"？{question}")
+        self.transcript_view.record(f"？{question}")
         self._open_palette(
             "choice",
             [(str(i), option) for i, option in enumerate(options, start=1)],
@@ -835,10 +592,7 @@ class WorkbenchApp(App[int]):
         self.palette_close()
         self.query_one("#hint-left", Static).update(BUSY_HINT if self.busy else IDLE_HINT)
         if shown is not None:
-            text = shown or "（跳过，我自己说）"
-            self._log.append(f"> {text}")
-            self._mount(Static(author_line(text), classes="author"))
-            self._scroll()
+            self.transcript_view.echo_author(shown or "（跳过，我自己说）")
 
     def open_rewind(self) -> None:
         """两次 Esc：列出最近说过的话，选一句撤回到它之前。"""
@@ -846,7 +600,7 @@ class WorkbenchApp(App[int]):
             return
         messages = self.agent.workspace.author_messages()[-REWIND_CHOICES:]
         if not messages:
-            self.show_line("还没有可以撤回的话。")
+            self.transcript_view.show_line("还没有可以撤回的话。")
             return
         messages.reverse()
         items = [(m["time"][11:16] or "--:--", m["text"].split("\n", 1)[0][:60]) for m in messages]
@@ -865,21 +619,19 @@ class WorkbenchApp(App[int]):
         if command in ("/exit", "/quit", "/退出"):
             self.action_quit_app()
             return True
+        view = self.transcript_view
         if command in ("/help", "/?", "/帮助"):
-            self.show_author(text)
-            self.show_line(HELP_TEXT)
+            view.show_author(text)
+            view.show_line(HELP_TEXT)
             return True
         if command == "/dev":
-            self.show_author(text)
-            self.dev = not self.dev
-            self.verbose = self.dev
-            for block in self._transcript().query(ToolBlock):
-                if block is not self._current_tool:
-                    block.set_collapsed(self._default_collapsed(block))
-            self.show_line(
+            view.show_author(text)
+            view.dev = not view.dev
+            view.set_verbose(view.dev, thinking=False)
+            view.show_line(
                 "开发者模式已打开：工具输出全部展开，显示工具参数、每次模型调用的用量与耗时。"
                 "日志一直在 .story/日志.txt。"
-                if self.dev
+                if view.dev
                 else "开发者模式已关闭。"
             )
             return True
@@ -948,18 +700,9 @@ class WorkbenchApp(App[int]):
         self._quit_armed_at = now
         self.query_one("#hint-left", Static).update("再按一次 Ctrl-C 退出（Ctrl-D 直接退出）")
 
-    def _default_collapsed(self, block: ToolBlock) -> bool:
-        return not self.verbose and block.tool_display == "quiet"
-
     def action_toggle_tools(self) -> None:
-        self.verbose = not self.verbose
-        for block in self._transcript().query(ToolBlock):
-            if block is not self._current_tool:
-                block.set_collapsed(self._default_collapsed(block))
-        for thinking in self._transcript().query(ThinkingBlock):
-            if thinking is not self._thinking:
-                thinking.set_collapsed(not self.verbose)
-        self._scroll()
+        view = self.transcript_view
+        view.set_verbose(not view.verbose)
 
     def action_editor_cancel_or_quit(self) -> None:
         if isinstance(self.screen, EditorScreen):

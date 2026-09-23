@@ -382,7 +382,7 @@ def test_quiet_tool_outputs_are_collapsed_by_default(tmp_path):
             assert "点击展开" in str(blocks[0].query_one(".tool-footer", Static).content)
             await pilot.press("ctrl+o")
             await pilot.pause(0.1)
-            assert app.verbose and not blocks[0].collapsed
+            assert app.transcript_view.verbose and not blocks[0].collapsed
             await pilot.press("ctrl+o")
             await pilot.pause(0.1)
             assert blocks[0].collapsed and not blocks[1].collapsed
@@ -567,7 +567,7 @@ def test_dev_mode_shows_tool_args_and_call_stats(tmp_path):
             await _wait(app, pilot, lambda: "我们接着改？" in app.transcript_text())
             await _send(pilot, "/dev")
             await pilot.pause(0.1)
-            assert app.dev and "开发者模式已打开" in app.transcript_text()
+            assert app.transcript_view.dev and "开发者模式已打开" in app.transcript_text()
             await _send(pilot, "看第一章")
             await _wait(app, pilot, lambda: "看完了。" in app.transcript_text())
             text = app.transcript_text()
@@ -577,7 +577,7 @@ def test_dev_mode_shows_tool_args_and_call_stats(tmp_path):
             assert not block.collapsed  # 开发者模式下全部展开
             await _send(pilot, "/dev")
             await pilot.pause(0.1)
-            assert not app.dev and block.collapsed
+            assert not app.transcript_view.dev and block.collapsed
             await pilot.press("ctrl+d")
 
     _run(scenario())
@@ -616,7 +616,7 @@ def test_slash_opens_command_palette_with_filter_completion_and_execution(tmp_pa
             assert not panel.display and area.text == "/dev"
             await pilot.press("enter")
             await pilot.pause(0.2)
-            assert app.dev and area.text == ""
+            assert app.transcript_view.dev and area.text == ""
             await pilot.press("slash")
             await pilot.press("e")
             await pilot.pause(0.1)
@@ -850,18 +850,18 @@ def test_transcript_has_no_scrollbar_and_only_follows_when_at_bottom(tmp_path):
             transcript = app.query_one("#transcript", VerticalScroll)
             assert transcript.styles.scrollbar_size_vertical == 0
             await pilot.pause(0.2)
-            assert transcript.is_vertical_scroll_end and app.follow
+            assert transcript.is_vertical_scroll_end and app.transcript_view.follow
             await pilot.press("pageup")
             await pilot.pause(0.1)
             above = transcript.scroll_y
-            assert not app.follow and not transcript.is_vertical_scroll_end
-            app.show_line("有人在下面说话")  # 新内容不把作者拽回底部
+            assert not app.transcript_view.follow and not transcript.is_vertical_scroll_end
+            app.transcript_view.show_line("有人在下面说话")  # 新内容不把作者拽回底部
             await pilot.pause(0.2)
             assert transcript.scroll_y == above
             await _send(pilot, "接着来")  # 作者说话就回到底部
             await _wait(app, pilot, lambda: "新回复。" in app.transcript_text())
             await pilot.pause(0.2)
-            assert app.follow and transcript.is_vertical_scroll_end
+            assert app.transcript_view.follow and transcript.is_vertical_scroll_end
             await pilot.press("ctrl+d")
 
     _run(scenario())
@@ -1122,9 +1122,9 @@ def test_only_one_thinking_indicator_at_a_time(tmp_path):
         async with app.run_test(size=(100, 30)) as pilot:
             await _wait(app, pilot, lambda: "开场。" in app.transcript_text())
             await _send(pilot, "聊聊")
-            await _wait(app, pilot, lambda: app._thinking is not None)
+            await _wait(app, pilot, lambda: app.transcript_view._thinking is not None)
             await pilot.pause(0.15)
-            block = app._thinking
+            block = app.transcript_view._thinking
             assert block is not None
             spinner = app.query_one("#spinner", Static)
             seen["spinner"] = (spinner.display, str(spinner.content))
@@ -1132,7 +1132,7 @@ def test_only_one_thinking_indicator_at_a_time(tmp_path):
             seen["body"] = str(block.query_one(".thinking-body", Static).content)
             await _wait(app, pilot, lambda: "答案。" in app.transcript_text())
             await pilot.pause(0.2)
-            assert app._thinking is None
+            assert app.transcript_view._thinking is None
             done = list(app.query(ThinkingBlock))[-1]
             assert "✻ 思考了" in str(done.query_one(".thinking-header", Static).content)
             assert done.query_one(".thinking-header", Static).display

@@ -30,10 +30,10 @@ class ThreadPort:
             pass
 
     def say(self, text: str) -> None:
-        self._ui(self.app.show_line, text)
+        self._ui(self.app.transcript_view.show_line, text)
 
     def emit(self, chunk: str) -> None:
-        self._ui(self.app.show_chunk, chunk)
+        self._ui(self.app.transcript_view.show_chunk, chunk)
 
     def approve(self, card: ApprovalCard) -> Approval:
         while not self.answers.empty():  # 丢掉过期的作答
@@ -72,27 +72,27 @@ class ThreadPort:
 
     # 代理观察者
     def reply_started(self) -> None:
-        self._ui(self.app.prepare_reply)
+        self._ui(self.app.transcript_view.prepare_reply)
 
     def turn_reminder(self, text: str) -> None:
-        self._ui(self.app.show_dev_note, text)
+        self._ui(self.app.transcript_view.show_dev_note, text)
 
     def reply_empty(self) -> None:
-        self._ui(self.app.keep_thinking_open)
+        self._ui(self.app.transcript_view.keep_thinking_open)
 
     def thinking(self, chunk: str) -> None:
-        self._ui(self.app.show_thinking, chunk)
+        self._ui(self.app.transcript_view.show_thinking, chunk)
 
     def reply_finished(self, text: str) -> None:
-        self._ui(self.app.end_reply, text)
+        self._ui(self.app.transcript_view.end_reply, text)
 
     def tool_started(
         self, name: str, label: str, args: dict | None = None, display: str = "normal"
     ) -> None:
-        self._ui(self.app.begin_tool, label, name, args or {}, display)
+        self._ui(self.app.transcript_view.begin_tool, label, name, args or {}, display)
 
     def call_finished(self, usage: dict, seconds: float, ok: bool) -> None:
-        self._ui(self.app.show_call_stats, usage, seconds, ok)
+        self._ui(self.app.transcript_view.show_call_stats, usage, seconds, ok)
 
     def tool_finished(self, name: str, text: str, is_error: bool) -> None:
-        self._ui(self.app.end_tool, is_error)
+        self._ui(self.app.transcript_view.end_tool, is_error)
