@@ -63,6 +63,7 @@ class Settings:
     provider: str = "anthropic"
     input_price: float | None = None  # 美元 / 百万输入 token
     output_price: float | None = None  # 美元 / 百万输出 token
+    writing_model: str | None = None  # 重写与审读用的模型；不填就和对话同一个
 
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS:
@@ -71,6 +72,10 @@ class Settings:
             object.__setattr__(self, "model", PROVIDERS[self.provider].default_model)
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("模型名称不能为空。")
+        if self.writing_model is not None and (
+            not isinstance(self.writing_model, str) or not self.writing_model.strip()
+        ):
+            raise ValueError("写作模型名称不能为空；不想单独指定就去掉 writing_model。")
         for name in ("max_output_tokens", "context_tokens", "template_reserve"):
             value = getattr(self, name)
             if type(value) is not int or value < (0 if name == "template_reserve" else 1):
@@ -97,6 +102,12 @@ class Settings:
         if self.input_price is not None and self.output_price is not None:
             return float(self.input_price), float(self.output_price)
         return KNOWN_PRICES.get(self.model or "")
+
+    @property
+    def writing_prices(self) -> tuple[float, float] | None:
+        if self.writing_model is None:
+            return self.prices
+        return KNOWN_PRICES.get(self.writing_model)
 
     @property
     def api_key_env(self) -> str:
@@ -138,6 +149,12 @@ class AgentConfig:
     template_reserve: int
     provider: str
     prices: tuple[float, float] | None = None  # 美元 / 百万 token（输入, 输出）
+    writing_options: CallOptions | None = None  # 重写与审读用；None 表示和对话同一个
+    writing_prices: tuple[float, float] | None = None
+
+    @property
+    def writing(self) -> CallOptions:
+        return self.writing_options or self.options
 
     def cost(self, usage: dict[str, int]) -> float | None:
         if self.prices is None:
@@ -157,16 +174,26 @@ def estimate_tokens(text: str) -> int:
 
 
 def build_agent_config(settings: Settings) -> AgentConfig:
-    return AgentConfig(
-        options=CallOptions(
-            model=settings.model,
+    options = CallOptions(
+        model=settings.model,
+        max_output_tokens=settings.max_output_tokens,
+        timeout_seconds=settings.timeout_seconds,
+    )
+    writing = None
+    if settings.writing_model and settings.writing_model != settings.model:
+        writing = CallOptions(
+            model=settings.writing_model,
             max_output_tokens=settings.max_output_tokens,
             timeout_seconds=settings.timeout_seconds,
-        ),
+        )
+    return AgentConfig(
+        options=options,
         context_tokens=settings.context_tokens,
         template_reserve=settings.template_reserve,
         provider=settings.provider,
         prices=settings.prices,
+        writing_options=writing,
+        writing_prices=settings.writing_prices,
     )
 
 

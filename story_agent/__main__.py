@@ -53,7 +53,10 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     else:
-        print(f"本次模型：{settings.provider} / {settings.model}")
+        line = f"本次模型：{settings.provider} / {settings.model}"
+        if agent_config.writing_options is not None:
+            line += f" · 写作：{agent_config.writing.model}"
+        print(line)
     return tui.run(args.project, clients=clients, config=agent_config)
 
 

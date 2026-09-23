@@ -1,4 +1,4 @@
-"""七个工具：read、search、edit、history、verify、review、open_editor。
+"""代理的工具：read、search、edit、history、verify、review、rewrite、open_editor、skill、ask。
 
 只有 `_apply_edit` 会写文件，`edit`、`history restore`、`open_editor` 都走它。
 正式文件在写之前弹审批卡；作者不批准就一个字不变。作者在界面上看到的内容与回给模型的
@@ -24,10 +24,11 @@ from story_agent.workspace import (
     normalize,
 )
 
-PAID_TOOLS = frozenset({"review"})
+PAID_TOOLS = frozenset({"review", "rewrite"})
 SKILLS = {
     "开书": "目录还空着，从一句想法起步",
     "共创": "和作者一起设计世界观、人物、体系、大纲",
+    "人物": "建人物文件：想要什么、怕什么、心里和嘴上怎么说话",
     "剧情": "设计一卷的走向或前几章的方案",
     "定章": "定一章的剧情与结尾状态",
     "写章": "写一章正文",
@@ -137,6 +138,20 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         ["path"],
     ),
     _spec(
+        "rewrite",
+        "独立重写一章（付费，会调用一次模型，用写作模型）。用不带对话历史的新上下文，只给初稿、作品.md、"
+        "大纲里本章那段、人物文件和一篇范文，从主角脑子里把这章重写一遍；大纲的剧情与结尾是它的硬约束。"
+        "返回重写后的全文，不写文件：你读一遍，把初稿里更好的句子捡回来、过火的收一收，"
+        "再用 edit 落正文。"
+        "chapter 缺省从路径里的「第NN章」推。一轮只能调一次。",
+        {
+            "path": _PATH,
+            "chapter": {"type": "integer", "description": "大纲里的章号，用来取本章剧情与结尾"},
+            "focus": {"type": "string", "description": "这次着重什么，例如「让他嘴硬一点」"},
+        },
+        ["path"],
+    ),
+    _spec(
         "ask",
         "问作者一个需要他拍板的问题，带 2 到 5 个选项。作者可以按上下键选一个，"
         "也可以直接打字说别的。只在真的有岔路时用；方向已经明确就直接做，别用它凑对话。",
@@ -176,6 +191,7 @@ LABELS = {
     "history": "历史",
     "verify": "核对引用",
     "review": "审读",
+    "rewrite": "重写",
     "open_editor": "打开编辑器",
     "skill": "查方法",
     "ask": "请作者定",
@@ -220,6 +236,7 @@ class Session:
 
     paid_failed: bool = False
     executed: list[str] = field(default_factory=list)
+    paid_done: list[str] = field(default_factory=list)  # 本轮已经成功调过的付费工具
 
 
 @dataclass
@@ -518,6 +535,19 @@ def review(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     return ToolOutcome(text)
 
 
+def rewrite(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    from story_agent.rewrite import run_rewrite
+
+    rel = normalize(_text(args, "path", required=True) or "")
+    chapter = args.get("chapter")
+    if chapter is not None and (type(chapter) is not int or chapter < 1):
+        raise WorkspaceError("chapter 须是正整数。")
+    focus = (_text(args, "focus") or "").strip()
+    text = run_rewrite(ctx, rel, chapter, focus)
+    ctx.port.say(text)
+    return ToolOutcome(text)
+
+
 def ask(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     question = (_text(args, "question", required=True) or "").strip()
     raw = args.get("options")
@@ -575,6 +605,7 @@ HANDLERS = {
     "history": history,
     "verify": verify,
     "review": review,
+    "rewrite": rewrite,
     "open_editor": open_editor,
     "skill": skill,
     "ask": ask,
@@ -594,10 +625,19 @@ def execute(ctx: ToolContext, name: str, args: dict[str, Any] | None) -> ToolOut
                 is_error=True,
             )
         if ctx.clients is None or ctx.config is None:
-            return ToolOutcome("模型尚未接入（没有密钥），不能审读。", is_error=True)
+            return ToolOutcome("模型尚未接入（没有密钥），不能发起付费调用。", is_error=True)
+        if name in ctx.session.paid_done:
+            label = LABELS.get(name, name)
+            return ToolOutcome(
+                f"这一轮已经{label}过一次，不再重复；先按结果改，作者要再来一遍就下一轮。",
+                is_error=True,
+            )
     ctx.session.executed.append(name)
     try:
-        return handler(ctx, dict(args or {}))
+        outcome = handler(ctx, dict(args or {}))
+        if name in PAID_TOOLS:
+            ctx.session.paid_done.append(name)
+        return outcome
     except WorkspaceError as exc:
         paid = name in PAID_TOOLS
         if paid:

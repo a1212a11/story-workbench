@@ -647,7 +647,7 @@ class WorkbenchApp(App[int]):
         agent = Agent(workspace, port, clients=self.clients, config=self.config, observer=port)
         self.agent = agent
         model = (
-            f"{self.config.provider} / {self.config.options.model}"
+            f"{self.config.provider} / {model_label(self.config)}"
             if self.config and self.clients
             else "未接入（没有密钥）"
         )
@@ -777,7 +777,7 @@ class WorkbenchApp(App[int]):
             area.focus()
 
     def _refresh_status(self, agent: Agent) -> None:
-        model = agent.config.options.model if agent.model_ready and agent.config else "模型未接入"
+        model = model_label(agent.config) if agent.model_ready and agent.config else "模型未接入"
         used = agent.session_usage
         text = (
             f"《{agent.workspace.title}》 · {model}"
@@ -1444,6 +1444,13 @@ def _short_path(path: Path) -> str:
         return "~/" + path.relative_to(Path.home()).as_posix()
     except ValueError:
         return str(path)
+
+
+def model_label(config: AgentConfig) -> str:
+    """状态栏里的模型名：写作模型不同时显示「对话 ▸ 写作」。"""
+    if config.writing_options is None:
+        return config.options.model
+    return f"{config.options.model} ▸ {config.writing.model}"
 
 
 def _short(count: int) -> str:

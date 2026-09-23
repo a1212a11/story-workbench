@@ -8,7 +8,7 @@ import time
 from textual.widgets import Static, TextArea
 
 from story_agent import __main__ as entry
-from story_agent.tui import EditorScreen, PromptArea, WorkbenchApp, colorize_diff
+from story_agent.tui import EditorScreen, PromptArea, WorkbenchApp, colorize_diff, model_label
 from story_agent.workspace import Workspace
 from tests.agent.conftest import CHAPTER, CONFIG, Reply, scripted_clients, use
 
@@ -1381,3 +1381,16 @@ def test_thinking_stays_open_when_there_is_no_reply(tmp_path):
             await pilot.press("ctrl+d")
 
     _run(scenario())
+
+
+def test_model_label_shows_the_writing_model_only_when_it_differs():
+    from dataclasses import replace
+
+    from story_agent.provider import CallOptions
+    from tests.agent.conftest import CONFIG
+
+    assert model_label(CONFIG) == CONFIG.options.model
+    writing = CallOptions(model="anthropic/claude-opus-5", max_output_tokens=1, timeout_seconds=1)
+    assert model_label(replace(CONFIG, writing_options=writing)) == (
+        f"{CONFIG.options.model} ▸ anthropic/claude-opus-5"
+    )

@@ -34,7 +34,8 @@ REVIEW_SYSTEM = "\n".join(
         "- 只提你有把握的问题；拿不准的写在 summary 里，不列为提醒。",
         "- kind 从这些里选：冲突（与故事状态、设定、人物或前文矛盾）、认知越界（人物说了或想了"
         "不该知道的事）、新设定（正文引入了材料里没有的持久设定，需要作者决定要不要）、"
-        "偏差（与大纲里本章剧情或结尾不符）、体验（读者会卡住、节奏或信息的问题）。",
+        "偏差（与大纲里本章剧情或结尾不符）、体验（读者会卡住、节奏或信息的问题）、",
+        "温度（只有摄像机没有人的段落）、做作（为了有感觉而用力过猛）、腔调（台词或心声不像这个人）。",
         "- 只输出一个 JSON 对象，不要别的文字：",
         '  {"remarks": [{"kind": "...", "quote": "...", "explanation": "...",',
         '                "suggestion": "..."}],',
@@ -113,7 +114,8 @@ def run_review(ctx: ToolContext, chapter_rel: str, focus: str) -> str:
     )
     messages = [ChatMessage("system", REVIEW_SYSTEM), ChatMessage("user", user)]
     # 审读要读完整章再给结论，是一次性的长调用，给双倍时间
-    options = replace(ctx.config.options, timeout_seconds=ctx.config.options.timeout_seconds * 2)
+    writing = ctx.config.writing
+    options = replace(writing, timeout_seconds=writing.timeout_seconds * 2)
     try:
         result = ctx.clients.complete(messages, options, ctx.cancel)
     except ProviderError as exc:

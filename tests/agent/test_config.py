@@ -37,6 +37,24 @@ def test_config_file_rejects_keys_and_builds_clients_only_with_env(tmp_path, mon
     assert agent_config.provider == "openrouter" and agent_config.budget > 0
 
 
+def test_writing_model_is_optional_and_only_used_when_different():
+    same = config.build_agent_config(config.Settings(provider="openrouter"))
+    assert same.writing_options is None and same.writing is same.options
+    split = config.Settings(
+        provider="openrouter",
+        model="deepseek/deepseek-v4-pro",
+        writing_model="anthropic/claude-opus-5",
+    )
+    agent_config = config.build_agent_config(split)
+    assert agent_config.writing.model == "anthropic/claude-opus-5"
+    assert agent_config.writing.timeout_seconds == split.timeout_seconds
+    assert agent_config.prices == (0.96, 1.91) and agent_config.writing_prices == (5.0, 25.0)
+    identical = config.Settings(provider="openrouter", model="a/b", writing_model="a/b")
+    assert config.build_agent_config(identical).writing_options is None
+    with pytest.raises(ValueError):
+        config.Settings(provider="openrouter", writing_model="  ")
+
+
 def test_prices_come_from_table_or_config_and_cost_is_estimated():
     known = config.Settings(provider="openrouter")
     assert known.prices == (0.75, 3.75)

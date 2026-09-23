@@ -320,6 +320,113 @@ def test_review_without_model_or_with_bad_json(chapter_workspace: Workspace):
     assert bad.is_error and "JSON" in bad.text
 
 
+def test_rewrite_uses_writing_model_and_only_the_materials_it_should(chapter_workspace: Workspace):
+    from dataclasses import replace
+
+    from story_agent.provider import CallOptions
+
+    ws = chapter_workspace
+    ws.write_text(
+        "大纲.md",
+        "# 大纲\n\n## 全书走向\n\n井下有秘密。\n\n## 第一章 井\n\n- 剧情：沈砚下井。\n"
+        "- 情绪线：不敢想师父。\n- 结尾状态：他没有下去。\n\n## 第二章\n\n- 剧情：别的。\n",
+    )
+    ws.write_text("人物/沈砚.md", "# 沈砚\n\n## 他心里怎么说话\n- 井里的东西不会自己上来。\n")
+    ws.write_text("设定/井.md", "# 井\n\n井是圆的。\n")
+    ws.write_text("故事状态.md", "# 故事状态\n\n师父已死。\n")
+    ws.write_text("草稿/范文/值事棚.md", "范文：学法不学句。\n\n他数到第三遍。\n")
+    ws.write_text("草稿/第01章-初稿.md", "# 第一章\n\n沈砚把灯搁在井沿。他很难过。\n")
+    writing = CallOptions(model="anthropic/claude-opus-5", max_output_tokens=800, timeout_seconds=5)
+    config = replace(CONFIG, writing_options=writing)
+    clients = scripted_clients([], "# 第一章\n\n沈砚把灯搁在井沿。灯焰跳了两下，他没看。\n")
+    port = FakePort()
+    outcome = execute(
+        ctx_for(ws, port, clients, config),
+        "rewrite",
+        {"path": "草稿/第01章-初稿.md", "focus": "让他嘴硬一点"},
+    )
+    assert not outcome.is_error
+    assert outcome.text.startswith("重写 草稿/第01章-初稿.md（着重：让他嘴硬一点）：\n# 第一章")
+    assert "灯焰跳了两下" in port.output  # 全文显示给作者
+    sent = clients.completes[0]
+    assert (
+        sent[0].role == "system"
+        and "从主角脑子里" in sent[0].content
+        and "硬约束" in sent[0].content
+    )
+    body = sent[1].content
+    # 给了：作品、本章大纲段（不含第二章）、人物、范文、初稿
+    assert "### 作品.md" in body and "情绪线：不敢想师父" in body and "别的。" not in body
+    assert "### 人物/沈砚.md" in body and "井里的东西不会自己上来" in body
+    assert "范文 草稿/范文/值事棚.md" in body and "他数到第三遍" in body
+    assert "## 初稿：草稿/第01章-初稿.md" in body and "他很难过" in body
+    assert "## 这次着重\n让他嘴硬一点" in body
+    # 没给：设定与故事状态，重写不该动事实
+    assert "井是圆的" not in body and "师父已死" not in body
+    # 用写作模型、双倍时限；用量记的是写作模型
+    used = clients.complete_options[0]
+    assert used.model == "anthropic/claude-opus-5" and used.timeout_seconds == 10
+    assert "重写 草稿/第01章-初稿.md" in (ws.root / ".story" / "用量.jsonl").read_text()
+    assert "anthropic/claude-opus-5" in (ws.root / ".story" / "用量.jsonl").read_text()
+    # 章号：显式给的优先；空初稿、非法章号报错
+    ws.write_text("草稿/试写.md", "# 试\n\n一句。\n")
+    clients = scripted_clients([], "# 试\n\n一句半。\n")
+    execute(ctx_for(ws, port, clients, config), "rewrite", {"path": "草稿/试写.md", "chapter": 2})
+    assert "剧情：别的" in clients.completes[0][1].content
+    ws.write_text("草稿/空.md", "\n")
+    empty = execute(ctx_for(ws, port, clients, config), "rewrite", {"path": "草稿/空.md"})
+    assert empty.is_error and "是空的" in empty.text
+    bad = execute(
+        ctx_for(ws, port, clients, config), "rewrite", {"path": "草稿/试写.md", "chapter": 0}
+    )
+    assert bad.is_error and "正整数" in bad.text
+    # 截断：结果不可用
+    from story_agent.provider import CompleteResult
+
+    def truncated(messages, options, cancel):
+        return CompleteResult(
+            text="半截", usage={"input_tokens": 1, "output_tokens": 1}, truncated=True
+        )
+
+    clients = scripted_clients([], "x")
+    clients.complete = truncated
+    cut = execute(ctx_for(ws, port, clients, config), "rewrite", {"path": "草稿/试写.md"})
+    assert cut.is_error and "截断" in cut.text
+
+
+def test_each_paid_tool_runs_once_per_turn(chapter_workspace: Workspace):
+    clients = scripted_clients([], _review_json())
+    ctx = ctx_for(chapter_workspace, FakePort(), clients, CONFIG)
+    assert not execute(ctx, "review", {"path": "章节/第01章.md"}).is_error
+    again = execute(ctx, "review", {"path": "章节/第01章.md"})
+    assert again.is_error and "已经审读过一次" in again.text and len(clients.completes) == 1
+    # 另一种付费工具同一轮仍可用一次
+    chapter_workspace.write_text("草稿/第01章-初稿.md", "# 第一章\n\n一句。\n")
+    clients.complete = scripted_clients([], "# 第一章\n\n一句半。\n").complete
+    assert not execute(ctx, "rewrite", {"path": "草稿/第01章-初稿.md"}).is_error
+    third = execute(ctx, "rewrite", {"path": "草稿/第01章-初稿.md"})
+    assert third.is_error and "已经重写过一次" in third.text
+    # 没有密钥的文案不再只说审读
+    refused = execute(
+        ctx_for(chapter_workspace, FakePort()), "rewrite", {"path": "草稿/第01章-初稿.md"}
+    )
+    assert refused.is_error and "没有密钥" in refused.text
+
+
+def test_outline_section_finds_a_chapter_by_number_or_numeral():
+    from story_agent.rewrite import chapter_number, outline_section
+
+    outline = (
+        "# 大纲\n\n## 第一章 井\n\n- 剧情：a\n\n## 第02章\n\n- 剧情：b\n\n"
+        "## 第十二章\n\n- 剧情：c\n"
+    )
+    assert outline_section(outline, 1) == "## 第一章 井\n\n- 剧情：a"
+    assert outline_section(outline, 2) == "## 第02章\n\n- 剧情：b"
+    assert outline_section(outline, 12) == "## 第十二章\n\n- 剧情：c"
+    assert outline_section(outline, 3) == ""
+    assert chapter_number("草稿/第07章-初稿.md") == 7 and chapter_number("草稿/试写.md") is None
+
+
 # ---------------------------------------------------------------- 杂项
 
 
@@ -333,6 +440,7 @@ def test_unknown_tool_specs_and_labels(workspace: Workspace):
         "history",
         "verify",
         "review",
+        "rewrite",
         "open_editor",
         "skill",
         "ask",
