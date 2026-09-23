@@ -33,6 +33,9 @@ SUMMARY_RECORD = "摘要.json"
 LOG_FILE = "日志.txt"
 USAGE_RECORD = "用量.jsonl"
 REWIND_PREFIX = "撤回-"  # 撤回时删掉的记录另存为 撤回-时间.jsonl
+# .story/ 里记录的格式版本：改了上面任何一份记录的结构就加一，并在 Workspace.open 里写迁移
+FORMAT_RECORD = "格式"
+STORY_FORMAT = 1
 
 FORMAL_FILES = (WORK_FILE, OUTLINE_FILE, DECISIONS_FILE)
 FORMAL_DIRS = (SETTINGS_DIR, CHARACTERS_DIR, CHAPTERS_DIR)

@@ -199,3 +199,19 @@ def test_author_messages_record_head_and_rewind_truncates_and_restores(workspace
     assert ref2 and workspace.read_text("章节/第01章.md") == "# 第一章\n\n初稿。\n"
     assert workspace.history(limit=1)[0].message == "再撤"
     assert workspace.git.restore_tree("0000000", "x") is None
+
+
+def test_story_format_is_recorded_and_old_works_still_open(workspace: Workspace):
+    record = workspace.root / ".story" / "格式"
+    assert record.read_text(encoding="utf-8").strip() == str(ws_mod.STORY_FORMAT)
+    record.unlink()  # 加版本号之前建的作品没有这个文件
+    Workspace.open(workspace.root)
+    assert record.read_text(encoding="utf-8").strip() == str(ws_mod.STORY_FORMAT)
+
+
+def test_story_format_from_a_newer_program_is_refused(workspace: Workspace):
+    (workspace.root / ".story" / "格式").write_text(
+        f"{ws_mod.STORY_FORMAT + 1}\n", encoding="utf-8"
+    )
+    with pytest.raises(WorkspaceError, match="更新版本"):
+        Workspace.open(workspace.root)

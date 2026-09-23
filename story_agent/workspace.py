@@ -22,6 +22,7 @@ from story_agent.layout import (
     CHAPTERS_DIR,
     CHARACTERS_DIR,
     DRAFTS_DIR,
+    FORMAT_RECORD,
     HIDDEN_DIRS,
     LOG_FILE,
     PRIVATE_DIR,
@@ -30,6 +31,7 @@ from story_agent.layout import (
     SKILLS_BACKUP_DIR,
     SKILLS_DIR,
     SKILLS_RECORD,
+    STORY_FORMAT,
     SUMMARY_RECORD,
     TEMPLATES,
     TRANSCRIPT_DIR,
@@ -204,6 +206,7 @@ class Workspace:
         for name in (SETTINGS_DIR, CHARACTERS_DIR, CHAPTERS_DIR, DRAFTS_DIR, TRANSCRIPT_DIR):
             (ws.root / name).mkdir(exist_ok=True)
         (ws.root / PRIVATE_DIR).mkdir(exist_ok=True)
+        ws._write_format()
         ws._write_raw(
             WORK_FILE,
             f"# 《{title.strip()}》\n\n"
@@ -227,6 +230,7 @@ class Workspace:
         if not ws.exists:
             raise WorkspaceError(f"这里还没有作品：{root}")
         (ws.root / PRIVATE_DIR).mkdir(exist_ok=True)
+        ws._check_format()
         (ws.root / TRANSCRIPT_DIR).mkdir(exist_ok=True)
         updated = ws.install_skills()
         if updated:
@@ -234,6 +238,24 @@ class Workspace:
             ws.append_log("技能更新到新版：" + "、".join(updated))
         ws.git.init()
         return ws
+
+    def _write_format(self) -> None:
+        (self.root / PRIVATE_DIR / FORMAT_RECORD).write_text(f"{STORY_FORMAT}\n", encoding="utf-8")
+
+    def _check_format(self) -> None:
+        """核对 .story/ 记录的格式版本。没有版本文件的是加版本号之前的老作品，就是第 1 版。"""
+        path = self.root / PRIVATE_DIR / FORMAT_RECORD
+        try:
+            found = int(path.read_text(encoding="utf-8").strip()) if path.is_file() else 1
+        except ValueError:
+            raise WorkspaceError(
+                f"{PRIVATE_DIR}/{FORMAT_RECORD} 被改坏了，内容应当是一个数字。"
+            ) from None
+        if found > STORY_FORMAT:
+            raise WorkspaceError("这部作品是用更新版本的程序写的，请先更新程序再打开。")
+        # 以后格式升级时在这里按 found 逐版迁移
+        if found != STORY_FORMAT or not path.is_file():
+            self._write_format()
 
     def install_skills(self, overwrite: bool = False) -> list[str]:
         """把默认技能复制到作品目录。
