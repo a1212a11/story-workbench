@@ -598,16 +598,16 @@ def test_slash_opens_command_palette_with_filter_completion_and_execution(tmp_pa
             assert not panel.display
             await pilot.press("slash")
             await pilot.pause(0.1)
-            assert panel.display and [c for c, _ in app.palette_items] == ["/help", "/dev", "/exit"]
+            assert panel.display and [c for c, _ in app.palette.items] == ["/help", "/dev", "/exit"]
             await pilot.press("e")
             await pilot.pause(0.1)
-            assert [c for c, _ in app.palette_items] == ["/exit"]
+            assert [c for c, _ in app.palette.items] == ["/exit"]
             await pilot.press("backspace")
             await pilot.pause(0.1)
-            assert len(app.palette_items) == 3 and app.palette_index == 0
+            assert len(app.palette.items) == 3 and app.palette.index == 0
             await pilot.press("down")
             await pilot.pause(0.05)
-            assert app.palette_index == 1
+            assert app.palette.index == 1
             await pilot.press("tab")
             await pilot.pause(0.1)
             assert area.text == "/dev" and app.palette_open
@@ -670,11 +670,11 @@ def test_double_escape_rewinds_conversation_and_files(tmp_path):
             await pilot.press("escape")
             await pilot.pause(0.2)
             panel = app.query_one("#palette", Vertical)
-            assert panel.display and app.palette_mode == "rewind"
-            assert app.palette_items[0][1] == "结尾让他下去"
+            assert panel.display and app.palette.mode == "rewind"
+            assert app.palette.items[0][1] == "结尾让他下去"
             await pilot.press("enter")
             await pilot.pause(0.1)
-            assert app.palette_mode == "rewind-scope"
+            assert app.palette.mode == "rewind-scope"
             await pilot.press("down")
             await pilot.press("enter")
             await _wait(app, pilot, lambda: "已撤回" in app.transcript_text())
@@ -685,7 +685,7 @@ def test_double_escape_rewinds_conversation_and_files(tmp_path):
             assert [r for r, _ in ws.all_transcript()] == ["assistant"]  # 只剩开场回复
             assert app.agent is not None and len(app.agent.transcript) == 0
             assert "文件已退回到那时" in app.transcript_text()
-            assert not panel.display and app.palette_mode == "commands"
+            assert not panel.display and app.palette.mode == "commands"
             assert app.query_one("#input", PromptArea).text == "结尾让他下去"  # 那句话回到输入框
             await pilot.press("ctrl+d")
 
@@ -746,14 +746,14 @@ def test_rewind_list_items_stay_on_one_line(tmp_path):
             await pilot.press("escape")
             await pilot.press("escape")
             await pilot.pause(0.3)
-            assert app.palette_mode == "rewind"
+            assert app.palette.mode == "rewind"
             items = list(app.query(".palette-item"))
             assert len(items) == 2
             assert all(item.region.height == 1 for item in items)
             assert str(items[0].content).startswith("❯ ") and "短的一句" in str(items[0].content)
             await pilot.press("escape")
             await pilot.pause(0.1)
-            assert app.palette_mode == "commands"
+            assert app.palette.mode == "commands"
             await pilot.press("ctrl+d")
 
     _run(scenario())
@@ -1025,7 +1025,7 @@ def test_escape_while_thinking_never_opens_the_rewind_list(tmp_path):
             await pilot.press("escape")  # 冷却期内再按也不进入撤回
             await pilot.press("escape")
             await pilot.pause(0.1)
-            assert app.palette_mode == "commands"
+            assert app.palette.mode == "commands"
             await pilot.press("ctrl+d")
 
     _run(scenario())
@@ -1049,10 +1049,10 @@ def test_first_escape_says_what_the_second_one_does_and_typing_cancels_it(tmp_pa
             assert "再按一次 Esc 撤回" in str(app.query_one("#hint-left", Static).content)
             await pilot.press("escape")
             await pilot.pause(0.2)
-            assert app.palette_mode == "rewind"
+            assert app.palette.mode == "rewind"
             app.query_one("#input", PromptArea).insert("我要说的话")  # 打字就收起列表
             await pilot.pause(0.1)
-            assert app.palette_mode == "commands"
+            assert app.palette.mode == "commands"
             assert not app.query_one("#palette", Vertical).display
             await pilot.press("enter")  # Enter 正常发言，不会误触撤回
             await pilot.pause(0.2)
@@ -1224,12 +1224,12 @@ def test_agent_question_shows_a_selectable_list(tmp_path):
             await _wait(app, pilot, lambda: app.mode == "choose")
             await pilot.pause(0.2)
             panel = app.query_one("#palette", Vertical)
-            assert panel.display and app.palette_mode == "choice"
+            assert panel.display and app.palette.mode == "choice"
             assert "谁把他捡走？" in str(app.query_one(".palette-title", Static).content)
-            assert len(app.palette_items) == 3
+            assert len(app.palette.items) == 3
             await pilot.press("down")  # 上下键选
             await pilot.pause(0.05)
-            assert app.palette_index == 1
+            assert app.palette.index == 1
             await pilot.press("enter")  # 空 Enter 确认高亮那项
             await _wait(app, pilot, lambda: "那就老工。" in app.transcript_text())
             assert options[1] in app.transcript_text() and app.mode == "chat"

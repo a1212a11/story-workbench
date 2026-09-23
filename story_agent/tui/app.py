@@ -26,6 +26,7 @@ from story_agent.agent import Agent
 from story_agent.approval import ApprovalCard, parse_answer
 from story_agent.config import AgentConfig, Clients
 from story_agent.provider import CancelSignal
+from story_agent.tui.palette import CommandPalette
 from story_agent.tui.port import ThreadPort
 from story_agent.tui.text import (
     _short,
@@ -154,12 +155,8 @@ class WorkbenchApp(App[int]):
         self.busy_since = 0.0
         self.transcript_view = TranscriptView()
         self._hint_until = 0.0  # 提示行临时文字的到期时刻
-        self.palette_items: list[tuple[str, str]] = []
-        self.palette_index = 0
-        self.palette_mode = "commands"  # commands / rewind / rewind-scope
-        self.palette_payload: list = []
-        self._rewind_choice: dict | None = None
-        self.choice_question = ""
+        self.palette = CommandPalette()
+        self._rewind_choice: dict | None = None  # 撤回列表里选中的那句话，等作者选撤回范围
         self._esc_armed_at = 0.0
         self._interrupted_at = 0.0
         self._quit_armed_at = 0.0  # 空闲时第一次 Ctrl-C 的时刻；两秒内再按一次才退出
@@ -176,7 +173,7 @@ class WorkbenchApp(App[int]):
             with VerticalScroll(id="card-diff", can_focus=False):
                 yield Static("", id="card-body")
             yield Static(CARD_HINT, id="card-hint", markup=False)
-        yield Vertical(id="palette")
+        yield self.palette
         with Horizontal(id="inputbox"):
             yield Static(">", classes="prompt", markup=False)
             yield PromptArea(id="input", soft_wrap=True)
@@ -487,107 +484,67 @@ class WorkbenchApp(App[int]):
 
     @property
     def palette_open(self) -> bool:
-        return bool(self.palette_items) and self.query_one("#palette", Vertical).display
+        return self.palette.is_open
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        if event.text_area.id == "input":
-            self._update_palette(event.text_area.text)
-
-    def _update_palette(self, text: str) -> None:
-        if self.palette_mode != "commands":
+        if event.text_area.id != "input":
+            return
+        text = event.text_area.text
+        if self.palette.mode != "commands":
             if text.strip():  # 撤回列表开着时打字，说明作者要正常发言，收起列表
                 self.palette_close()
             return
-        panel = self.query_one("#palette", Vertical)
-        head = text.split("\n", 1)[0].strip().lower()
-        items: list[tuple[str, str]] = []
-        if text.startswith("/") and "\n" not in text and self.mode != "approve":
-            items = [c for c in COMMANDS if c[0].startswith(head)]
-        if items != self.palette_items:
-            self.palette_items = items
-            self.palette_index = 0
-        panel.display = bool(items)
-        if items:
-            self._render_palette()
-
-    def _render_palette(self) -> None:
-        panel = self.query_one("#palette", Vertical)
-        panel.remove_children()
-        if self.palette_mode == "choice":
-            panel.mount(Static(self.choice_question, classes="palette-title", markup=False))
-        elif self.palette_mode == "rewind":
-            panel.mount(Static("撤回到哪一句之前", classes="palette-title"))
-        elif self.palette_mode == "rewind-scope":
-            panel.mount(Static("撤回什么？", classes="palette-title"))
-        for index, (name, description) in enumerate(self.palette_items):
-            classes = "palette-item selected" if index == self.palette_index else "palette-item"
-            marker = "❯" if index == self.palette_index else " "
-            line = f"{marker} {name:<7} {description}".replace("\n", " ")
-            panel.mount(Static(line, classes=classes, markup=False))
-
-    def palette_move(self, delta: int) -> None:
-        if not self.palette_items:
-            return
-        self.palette_index = (self.palette_index + delta) % len(self.palette_items)
-        self._render_palette()
-
-    def palette_complete(self) -> None:
-        if not self.palette_items or self.palette_mode != "commands":
-            return
-        area = self.query_one("#input", PromptArea)
-        area.clear()
-        area.insert(self.palette_items[self.palette_index][0])
+        self.palette.filter_commands(text, COMMANDS if self.mode != "approve" else ())
 
     def palette_execute(self) -> None:
-        if not self.palette_items:
+        """面板上选定了一项：按面板的用途去做。"""
+        palette = self.palette
+        if not palette.items:
             return
-        if self.palette_mode == "choice":
-            answer = self.palette_payload[self.palette_index]
+        if palette.mode == "choice":
+            answer = palette.selected_payload
             self.end_choice(answer)
             self.port.answers.put(answer)
             return
-        if self.palette_mode == "rewind":
-            self._rewind_choice = self.palette_payload[self.palette_index]
+        if palette.mode == "rewind":
+            self._rewind_choice = palette.selected_payload
             self._open_palette(
                 "rewind-scope",
                 [("对话", "只撤回对话，文件不动"), ("全部", "对话和文件都退回到那时")],
                 [False, True],
+                "撤回什么？",
             )
             return
-        if self.palette_mode == "rewind-scope":
-            choice, with_files = self._rewind_choice, self.palette_payload[self.palette_index]
+        if palette.mode == "rewind-scope":
+            choice, with_files = self._rewind_choice, palette.selected_payload
             self.palette_close()
             if choice is not None:
                 self.inbox.put(("rewind", choice, with_files))
             return
-        command = self.palette_items[self.palette_index][0]
+        command = palette.selected_name
         self.palette_close()
         self.query_one("#input", PromptArea).clear()
         self._meta_command(command)
 
-    def _open_palette(self, mode: str, items: list[tuple[str, str]], payload: list) -> None:
-        self.palette_mode = mode
-        self.palette_items = items
-        self.palette_payload = payload
-        self.palette_index = 0
-        self.query_one("#palette", Vertical).display = True
-        self._render_palette()
+    def _open_palette(
+        self, mode: str, items: list[tuple[str, str]], payload: list, title: str
+    ) -> None:
+        self.palette.show(mode, items, payload, title)
         self.query_one("#input", PromptArea).focus()
 
     def begin_choice(self, question: str, options: tuple[str, ...]) -> None:
         """代理问作者一个带选项的问题：上下选、Enter 确认，也可以直接打字说别的。"""
-        self.choice_question = question
         self.mode = "choose"
         self.transcript_view.record(f"？{question}")
         self._open_palette(
             "choice",
             [(str(i), option) for i, option in enumerate(options, start=1)],
             list(options),
+            question,
         )
         self.query_one("#hint-left", Static).update(CHOICE_HINT)
 
     def end_choice(self, shown: str | None) -> None:
-        self.choice_question = ""
         self.mode = "chat"
         self.palette_close()
         self.query_one("#hint-left", Static).update(BUSY_HINT if self.busy else IDLE_HINT)
@@ -604,14 +561,11 @@ class WorkbenchApp(App[int]):
             return
         messages.reverse()
         items = [(m["time"][11:16] or "--:--", m["text"].split("\n", 1)[0][:60]) for m in messages]
-        self._open_palette("rewind", items, messages)
+        self._open_palette("rewind", items, messages, "撤回到哪一句之前")
 
     def palette_close(self) -> None:
-        self.palette_items = []
-        self.palette_payload = []
-        self.palette_mode = "commands"
         self._rewind_choice = None
-        self.query_one("#palette", Vertical).display = False
+        self.palette.close()
 
     def _meta_command(self, text: str) -> bool:
         """只处理几个元命令；别的一律交给代理。"""

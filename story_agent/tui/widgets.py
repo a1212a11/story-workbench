@@ -1,6 +1,6 @@
 """界面控件：输入框、全屏编辑器、对话里的工具块与思考块。
 
-输入框只按属性和应用打交道（palette_open 等），不 import 应用本身。
+输入框经 app.palette（选项面板）和 app.palette_execute 打交道，不 import 应用本身。
 """
 
 from __future__ import annotations
@@ -55,8 +55,9 @@ class PromptArea(TextArea):
 
     def action_palette_move(self, delta: int) -> None:
         app = self.app
-        if getattr(app, "palette_open", False):
-            app.palette_move(delta)
+        palette = getattr(app, "palette", None)
+        if palette is not None and palette.is_open:
+            palette.move(delta)
         elif delta < 0:
             self.action_cursor_up()
         else:
@@ -65,21 +66,24 @@ class PromptArea(TextArea):
     def on_key(self, event) -> None:
         """选项面板开着且输入框是空的时候，按数字直接选那一项（和 Claude Code 一样）。"""
         app = self.app
-        if getattr(app, "palette_mode", None) != "choice":
+        palette = getattr(app, "palette", None)
+        if palette is None or palette.mode != "choice":
             return
         if self.text or not (event.character or "").isdigit():
             return
         index = int(event.character) - 1
-        if 0 <= index < len(app.palette_items):
+        if 0 <= index < len(palette.items):
             event.prevent_default()
             event.stop()
-            app.palette_index = index
+            palette.index = index
             app.palette_execute()
 
     def action_palette_complete(self) -> None:
         app = self.app
-        if getattr(app, "palette_open", False):
-            app.palette_complete()
+        palette = getattr(app, "palette", None)
+        if palette is not None and palette.is_open and palette.mode == "commands":
+            self.clear()
+            self.insert(palette.selected_name)
 
 
 class EditorScreen(ModalScreen[str | None]):
