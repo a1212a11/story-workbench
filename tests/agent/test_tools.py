@@ -463,7 +463,7 @@ def _system_lines(workspace: Workspace) -> list[str]:
 
 
 def test_skill_tool_reads_a_method_file_and_lists_what_exists(workspace: Workspace):
-    from story_agent.tools import SKILLS
+    from story_agent.tools import skill_catalogue
 
     port = FakePort()
     ctx = ctx_for(workspace, port)
@@ -473,7 +473,7 @@ def test_skill_tool_reads_a_method_file_and_lists_what_exists(workspace: Workspa
     assert execute(ctx, "skill", {"name": "写章.md"}).text == out.text  # 带不带后缀都行
     bad = execute(ctx, "skill", {"name": "写小说"})
     assert bad.is_error and "可用的是：" in bad.text and "共创" in bad.text
-    assert set(SKILLS) == {p.stem for p in (workspace.root / "技能").glob("*.md")}
+    assert set(skill_catalogue()) == {p.stem for p in (workspace.root / "技能").glob("*.md")}
 
 
 def test_ask_tool_puts_the_choice_back_to_the_model_and_into_the_record(workspace: Workspace):

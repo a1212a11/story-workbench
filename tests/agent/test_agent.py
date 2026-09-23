@@ -9,6 +9,7 @@ import pytest
 
 from story_agent.agent import NUDGE, Agent, fit_transcript, history_to_transcript
 from story_agent.provider import CancelSignal, ChatMessage, TextBlock, ToolResultBlock
+from story_agent.tools import skill_catalogue
 from story_agent.workspace import Workspace
 from tests.agent.conftest import CHAPTER, CONFIG, FakePort, Reply, scripted_clients, use
 
@@ -407,11 +408,8 @@ def test_persona_stays_lean_and_sends_details_to_the_skill_files(workspace):
     agent, _, _ = make_agent(workspace, [])
     prompt = agent.system_prompt()
     # 留在提示里的只有不可违反的规矩和查方法的入口
-    assert (
-        "先用 skill 查一次方法" in prompt
-        and "开书、共创" in prompt
-        and "人物（建人物文件）" in prompt
-    )
+    assert "先用 skill 查一次方法" in prompt and "开书、共创、人物" in prompt
+    assert all(name in prompt for name in skill_catalogue())  # 方法清单从文件来，新加的也在
     assert "每种付费工具（审读、重写）一轮只调一次" in prompt
     assert "不要说你没做的事" in prompt and "没调用工具，就别说" in prompt
     assert "改它们要经作者批准" in prompt

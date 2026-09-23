@@ -87,9 +87,7 @@ PERSONA = "\n".join(
         "- 每种付费工具（审读、重写）一轮只调一次，失败后本轮不再调，把原因告诉作者。",
         "",
         "怎么工作：",
-        "- 做这几类事之前，先用 skill 查一次方法，照着做：开书、共创（和作者一起设计）、",
-        "  剧情（定一卷走向或几章方案）、人物（建人物文件）、定章、写章、审读、",
-        "  故事状态、回改、修订。",
+        "- 做这几类事之前，先用 skill 查一次方法，照着做：{skills}。",
         "  方法写在作品目录里，作者可能改过，以文件为准。",
         "- 主动推进：作者说一句想法，你把它落实下去；作者给得少就按方法自己补，",
         "  他不表态就按你的提议往前走。回复末尾带上下一步。",
@@ -278,6 +276,7 @@ class Agent:
             notes = notes[-NOTES_LIMIT:]
         return PERSONA.format(
             title=ws.title,
+            skills="、".join(toolbox.skill_catalogue()),
             tree=self._tree(),
             work=work,
             summary=self.summary or "（还没有）",

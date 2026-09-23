@@ -8,10 +8,14 @@
 from __future__ import annotations
 
 import difflib
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cache
+from pathlib import Path
 from typing import Any
 
+from story_agent import workspace as workspace_module
 from story_agent.approval import Approval, ApprovalCard, AuthorPort
 from story_agent.config import AgentConfig, Clients
 from story_agent.layout import (
@@ -27,18 +31,29 @@ from story_agent.layout import (
 from story_agent.provider import CancelSignal, ToolSpec
 from story_agent.workspace import Workspace, describe_time
 
-SKILLS = {
-    "开书": "目录还空着，从一句想法起步",
-    "共创": "和作者一起设计世界观、人物、体系、大纲",
-    "人物": "建人物文件：想要什么、怕什么、心里和嘴上怎么说话",
-    "剧情": "设计一卷的走向或前几章的方案",
-    "定章": "定一章的剧情与结尾状态",
-    "写章": "写一章正文",
-    "审读": "审一章正文的清单",
-    "故事状态": "一章定稿后更新故事状态",
-    "回改": "改了前面的章节之后核对后文",
-    "修订": "按作者的反馈改稿",
-}
+# 方法清单以 skills/*.md 为准，名字与描述取自每份文件的首行「# 名字：描述」。
+# 这里只管列出的先后（大致是写一本书的顺序）；不在这里的方法排在最后，照样能用。
+_SKILL_ORDER = ("开书", "共创", "人物", "剧情", "定章", "写章", "审读", "故事状态", "回改", "修订")
+_SKILL_HEADING = re.compile(r"^#\s*(.+?)：(.*)$")
+
+
+@cache
+def _read_catalogue(source: Path) -> tuple[tuple[str, str], ...]:
+    found = []
+    for path in source.glob("*.md"):
+        first = path.read_text(encoding="utf-8").split("\n", 1)[0].strip()
+        match = _SKILL_HEADING.match(first)
+        description = match.group(2).strip() if match and match.group(1) == path.stem else ""
+        found.append((path.stem, description))
+    rank = {name: i for i, name in enumerate(_SKILL_ORDER)}
+    return tuple(sorted(found, key=lambda item: (rank.get(item[0], len(rank)), item[0])))
+
+
+def skill_catalogue() -> dict[str, str]:
+    """程序自带的方法：名字 → 一句话描述，按写书的先后排。"""
+    return dict(_read_catalogue(workspace_module.SKILLS_SOURCE))
+
+
 MAX_DIFF_LINES = 400
 
 
@@ -452,8 +467,9 @@ def ask(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
 def skill(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     name = (_text(args, "name", required=True) or "").strip().removesuffix(".md")
     rel = f"{SKILLS_DIR}/{name}.md"
-    if name not in SKILLS or not ctx.workspace.file_exists(rel):
-        raise WorkspaceError("没有这份方法。可用的是：" + "、".join(SKILLS))
+    known = skill_catalogue()
+    if name not in known or not ctx.workspace.file_exists(rel):
+        raise WorkspaceError("没有这份方法。可用的是：" + "、".join(known))
     text = ctx.workspace.read_text(rel)
     ctx.port.say(f"── {rel} ──")
     ctx.port.say(text.rstrip("\n"))
@@ -640,7 +656,7 @@ TOOLS: tuple[Tool, ...] = (
         _spec(
             "skill",
             "查方法：读一份写作方法，照着做。"
-            + "；".join(f"{k}（{v}）" for k, v in SKILLS.items())
+            + "；".join(f"{k}（{v}）" for k, v in skill_catalogue().items())
             + "。做这几类事之前先查一次。方法文件在作品目录的 技能/ 里，作者可能改过，以文件为准。",
             {"name": {"type": "string", "description": "方法名，例如 写章"}},
             ["name"],
