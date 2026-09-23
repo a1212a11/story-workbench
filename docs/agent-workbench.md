@@ -193,7 +193,7 @@ Markdown 文件，初始化时复制到 `技能/`，作者可改。首版：
 | --- | --- | --- |
 | `infrastructure/provider.py` | `story_agent/provider.py` | 原样搬：流式、工具调用、取消、DeepSeek 兼容 |
 | `bootstrap.py` | `story_agent/config.py` | 配置文件与密钥环境变量的读取 |
-| `tui/app.py` | `story_agent/tui.py` | 外壳、线程模型、工具块、编辑器；问题卡改为审批卡 |
+| `tui/app.py` | `story_agent/tui/` | 外壳、线程模型、工具块、编辑器；问题卡改为审批卡 |
 | `console/engine.py` | `story_agent/agent.py` | 循环骨架；去掉 Workbench 依赖 |
 | `ai/tasks.py` 里检查载荷的引用校验 | `verify` 工具 | 只留"引用必须逐字在文里"这一条 |
 | `docs/magic-cold-war-trial.md`、`.trial-output/寒灯协定/exports/` | 第一个作品目录 | 一次性脚本导出为第 3 节的目录 |
@@ -205,20 +205,28 @@ Markdown 文件，初始化时复制到 `技能/`，作者可改。首版：
 ```
 story_agent/
   __main__.py     参数、配置、启动界面
+  layout.py       作品目录的布局：文件名、目录名、正式/自由划分、路径规范化、.story 格式版本
   config.py       配置与密钥
-  provider.py     模型客户端
-  workspace.py    目录约定、正式/自由文件判定、初始化、git
-  tools.py        七个工具的定义与执行
+  provider.py     模型客户端与 token 估算
+  workspace.py    初始化、文件读写与搜索、git、对话与用量记录
+  tools.py        工具表 TOOLS（规格、执行、中文名、付费、显示方式）与执行
   approval.py     ApprovalCard / Approval / 端口协议
-  agent.py        系统提示装配、一轮循环、对话记录、用量
+  agent.py        系统提示装配、一轮循环、对话压缩、用量
   review.py       独立审读的上下文与调用
   rewrite.py      独立重写的上下文与调用
-  skills/         默认技能文件
-  tui.py          Textual 界面
-tests/agent/      新包测试；旧测试不动
+  prompts/        发给模型的固定文案（人设、开场、压缩、审读、重写），load() 读取
+  skills/         默认方法文件；首行「# 名字：描述」即方法清单
+  tui/            Textual 界面
+    app.py          应用本体：线程协调、输入、审批卡、撤回、按键
+    transcript.py   对话区：回复、思考块、工具块、跟随滚动
+    palette.py      选项面板：斜杠命令、代理提问、撤回列表
+    port.py         代理线程使用的作者端口
+    widgets.py      输入框、编辑器、工具块、思考块
+    text.py theme.py  文本小工具；配色与中文换行
+tests/agent/      新包测试；test_structure.py 守依赖方向与文案里的文件名
 ```
 
-依赖方向：`tui` → `agent` → `tools` → `workspace` / `provider`。`workspace` 是唯一碰文件系统与 git 的模块；`provider` 是唯一碰网络的模块。
+依赖方向：`tui` → `agent` → `tools` → `review` / `rewrite` / `workspace` → `layout`；`config` → `provider`。`layout`、`provider`、`approval`、`prompts` 不 import 包内模块。`workspace` 是唯一碰文件系统与 git 的模块；`provider` 是唯一碰网络的模块。完整规则见仓库根目录的 AGENTS.md。
 
 ## 9. 测试
 
