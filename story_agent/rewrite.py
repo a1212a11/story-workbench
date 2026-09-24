@@ -17,6 +17,7 @@ from story_agent.layout import (
     SAMPLES_DIR,
     WORK_FILE,
     WorkspaceError,
+    chapter_number,
 )
 from story_agent.provider import ChatMessage, ProviderError, estimate_tokens
 
@@ -43,11 +44,6 @@ def outline_section(outline: str, chapter: int) -> str:
     rest = outline[match.end() :]
     nxt = re.search(r"^##\s", rest, re.M)
     return (match.group(0) + (rest[: nxt.start()] if nxt else rest)).strip()
-
-
-def chapter_number(rel: str) -> int | None:
-    match = re.search(r"第\s*(\d+)\s*章", rel)
-    return int(match.group(1)) if match else None
 
 
 def _materials(ctx: ToolContext, chapter: int | None, draft: str) -> str:

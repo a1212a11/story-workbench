@@ -8,7 +8,7 @@ AI 小说创作与故事工程系统。作者决定故事，AI 帮助讨论、�
 
 ## 新包 story_agent（M6，开发中）
 
-按[新包设计](docs/agent-workbench.md)重做的"写小说的 Claude Code"：作品是一个 Markdown 目录（作品.md、大纲.md、设定/、人物/、章节/、决定.md 为正式文件，故事状态.md、草稿/、技能/ 为自由文件），代理用读、搜、改、历史、核对引用、独立审读、独立重写、编辑器、查方法、请作者定十个工具工作，正式文件的每处改动先弹 diff 审批卡，批准后写入并记一次 git 历史。启动：`uv run python -m story_agent <作品目录>`，目录不是作品时按目录名新建。模型配置与下节相同。旧包 `story_workbench` 在新包通过三章验收前保留。
+按[新包设计](docs/agent-workbench.md)重做的"写小说的 Claude Code"：作品是一个 Markdown 目录（作品.md、大纲.md、设定/、人物/、章节/、决定.md 为正式文件，故事状态.md、草稿/、技能/ 为自由文件），代理用读、搜、改、历史、核对引用、独立审读、盲读、独立重写、编辑器、查方法、请作者定十一个工具工作，正式文件的每处改动先弹 diff 审批卡，批准后写入并记一次 git 历史。启动：`uv run python -m story_agent <作品目录>`，目录不是作品时按目录名新建。模型配置与下节相同。旧包 `story_workbench` 在新包通过三章验收前保留。
 
 ## 模型配置
 
@@ -33,7 +33,7 @@ AI 小说创作与故事工程系统。作者决定故事，AI 帮助讨论、�
 
 例如仅写 `{"provider": "deepseek"}` 即使用 DeepSeek 默认配置；`model` 可改成供应商支持的其他模型。没有配置文件时沿用 Anthropic。密钥在启动前通过对应环境变量提供，缺少密钥时仍可编辑和保存。配置错误会在启动时提示，不会自动换用另一供应商。
 
-新包 `story_agent` 还可选填 `"writing_model"`（同一供应商的另一个模型名）：独立重写与审读用它，对话与摘要仍用 `model`，例如 `{"provider": "openrouter", "model": "deepseek/deepseek-v4-pro", "writing_model": "anthropic/claude-opus-5"}`；状态行显示为"对话 ▸ 写作"。
+新包 `story_agent` 还可选填 `"writing_model"`（同一供应商的另一个模型名）：独立重写、审读与盲读用它，对话与摘要仍用 `model`，例如 `{"provider": "openrouter", "model": "deepseek/deepseek-v4-pro", "writing_model": "anthropic/claude-opus-5"}`；状态行显示为"对话 ▸ 写作"。
 
 状态行会按已知价格估算本次花费；模型不在内置价格表里时，可在配置里加 `"input_price"` 与 `"output_price"`（美元 / 百万 token）。OpenRouter 同样走其 Anthropic 兼容端点，`model` 用 OpenRouter 的写法（如 `google/gemini-3.8-flash`），只对新包 `story_agent` 生效。DeepSeek 复用现有 SDK，通过[官方 Anthropic 兼容接口](https://api-docs.deepseek.com/guides/anthropic_api/)访问，显式关闭思考模式；[模型名称](https://api-docs.deepseek.com/quick_start/pricing/)与[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)按 2026-09-14 官方文档核对。付费请求不自动重试。
 

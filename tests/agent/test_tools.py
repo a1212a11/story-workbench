@@ -394,6 +394,57 @@ def test_rewrite_uses_writing_model_and_only_the_materials_it_should(chapter_wor
     assert cut.is_error and "截断" in cut.text
 
 
+def test_blind_read_sees_only_this_and_the_previous_chapter(chapter_workspace: Workspace):
+    ws = chapter_workspace
+    ws.write_text("章节/第02章.md", "# 第二章\n\n天亮了，井口围满了人。\n\n他数了三遍人头。\n")
+    ws.write_text("大纲.md", "# 大纲\n\n## 第二章\n\n- 剧情：秘密大纲\n")
+    ws.write_text("人物/沈砚.md", "# 沈砚\n\n秘密人物\n")
+    reply = json.dumps(
+        {
+            "drift": {"quote": "井口围满了人", "why": "场面空"},
+            "retell": "他发现少了人。",
+            "author_voice": [{"quote": "编出来的句子", "why": "x"}],
+            "confused": [{"quote": "他数了三遍人头", "question": "数谁？"}],
+            "next": "少的是谁。",
+        },
+        ensure_ascii=False,
+    )
+    clients = scripted_clients([], reply)
+    out = execute(
+        ctx_for(ws, FakePort(), clients, CONFIG), "blind_read", {"path": "章节/第02章.md"}
+    )
+    assert not out.is_error
+    assert "走神：第 3 行「井口围满了人」——场面空" in out.text
+    assert "读者复述：他发现少了人。" in out.text
+    assert "- 第 5 行「他数了三遍人头」——数谁？" in out.text
+    assert "像作者在说话" not in out.text and "1 处引用核不上" in out.text
+    assert "读完：少的是谁。" in out.text
+    sent = clients.completes[0]
+    assert sent[0].role == "system" and "普通读者" in sent[0].content
+    body = sent[1].content
+    assert "## 上一章：章节/第01章.md" in body and "沈砚把灯搁在井沿" in body
+    assert "秘密大纲" not in body and "秘密人物" not in body
+    usage = (ws.root / ".story" / "用量.jsonl").read_text()
+    assert "盲读 章节/第02章.md" in usage
+
+
+def test_blind_read_of_the_first_chapter_and_a_bad_reply(chapter_workspace: Workspace):
+    clients = scripted_clients([], json.dumps({"drift": None, "retell": "", "author_voice": []}))
+    out = execute(
+        ctx_for(chapter_workspace, FakePort(), clients, CONFIG),
+        "blind_read",
+        {"path": "章节/第01章.md"},
+    )
+    assert "走神：没有。" in out.text and "读者复述：复述不出" in out.text
+    assert "上一章" not in clients.completes[0][1].content
+    bad = execute(
+        ctx_for(chapter_workspace, FakePort(), scripted_clients([], "不是 JSON"), CONFIG),
+        "blind_read",
+        {"path": "章节/第01章.md"},
+    )
+    assert bad.is_error and "盲读结果不是可解析的 JSON" in bad.text
+
+
 def test_each_paid_tool_runs_once_per_turn(chapter_workspace: Workspace):
     clients = scripted_clients([], _review_json())
     ctx = ctx_for(chapter_workspace, FakePort(), clients, CONFIG)
@@ -414,7 +465,8 @@ def test_each_paid_tool_runs_once_per_turn(chapter_workspace: Workspace):
 
 
 def test_outline_section_finds_a_chapter_by_number_or_numeral():
-    from story_agent.rewrite import chapter_number, outline_section
+    from story_agent.layout import chapter_number
+    from story_agent.rewrite import outline_section
 
     outline = (
         "# 大纲\n\n## 第一章 井\n\n- 剧情：a\n\n## 第02章\n\n- 剧情：b\n\n"
@@ -440,6 +492,7 @@ def test_unknown_tool_specs_and_labels(workspace: Workspace):
         "history",
         "verify",
         "review",
+        "blind_read",
         "rewrite",
         "open_editor",
         "skill",

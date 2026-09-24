@@ -63,6 +63,12 @@ class WorkspaceError(Exception):
     """面向作者的错误说明，中文。"""
 
 
+def chapter_number(rel: str) -> int | None:
+    """路径里「第NN章」的章号，正文与草稿（草稿/第02章-初稿.md）都认；没有就是 None。"""
+    match = re.search(r"第\s*(\d+)\s*章", rel)
+    return int(match.group(1)) if match else None
+
+
 def normalize(path: str) -> str:
     """把模型或作者给的路径规范成相对于作品目录的 POSIX 路径；拒绝越界与隐藏目录。"""
     text = str(path).strip().replace("\\", "/")

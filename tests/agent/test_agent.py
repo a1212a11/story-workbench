@@ -410,7 +410,7 @@ def test_persona_stays_lean_and_sends_details_to_the_skill_files(workspace):
     # 留在提示里的只有不可违反的规矩和查方法的入口
     assert "先用 skill 查一次方法" in prompt and "开书、共创、人物" in prompt
     assert all(name in prompt for name in skill_catalogue())  # 方法清单从文件来，新加的也在
-    assert "每种付费工具（审读、重写）一轮只调一次" in prompt
+    assert "每种付费工具（审读、盲读、重写）一轮只调一次" in prompt
     assert "不要说你没做的事" in prompt and "没调用工具，就别说" in prompt
     assert "改它们要经作者批准" in prompt
     # 方法细节下放到技能文件，不再挤在提示里

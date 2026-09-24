@@ -1,4 +1,4 @@
-"""代理的工具：read、search、edit、history、verify、review、rewrite、open_editor、skill、ask。
+"""代理的工具：read、search、edit、history、verify、review、blind_read、rewrite、open_editor、skill、ask。
 
 只有 `_apply_edit` 会写文件，`edit`、`history restore`、`open_editor` 都走它。
 正式文件在写之前弹审批卡；作者不批准就一个字不变。作者在界面上看到的内容与回给模型的
@@ -432,6 +432,15 @@ def review(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     return ToolOutcome(text)
 
 
+def blind_read(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    from story_agent.review import run_blind_read
+
+    rel = normalize(_text(args, "path", required=True) or "")
+    text = run_blind_read(ctx, rel)
+    ctx.port.say(text)
+    return ToolOutcome(text)
+
+
 def rewrite(ctx: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     from story_agent.rewrite import run_rewrite
 
@@ -611,6 +620,20 @@ TOOLS: tuple[Tool, ...] = (
         ),
         review,
         "审读",
+        paid=True,
+    ),
+    Tool(
+        _spec(
+            "blind_read",
+            "盲读一章（付费，会调用一次模型，用写作模型）。像一个普通读者那样读：只给这一章和上一章正文，"
+            "不给大纲、设定和人物，返回读者从哪句开始走神、能不能复述出本章的变化、"
+            "哪几句像作者在说话、哪里看不懂；不打分，引用核不上的会被丢弃。"
+            "审读看的是对不对，盲读看的是读不读得下去、读不读得懂。一轮只能调一次。",
+            {"path": _PATH},
+            ["path"],
+        ),
+        blind_read,
+        "盲读",
         paid=True,
     ),
     Tool(
